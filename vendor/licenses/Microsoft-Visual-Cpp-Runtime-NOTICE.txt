@@ -1,0 +1,11 @@
+Microsoft Visual C++ OpenMP Runtime Notice
+
+SpinTexture bundles the unmodified vcomp140.dll runtime required by the
+official Real-ESRGAN ncnn Vulkan Windows worker. The runtime is a Microsoft
+Visual C++ Redistributable component and remains governed by Microsoft's
+applicable Visual Studio and redistributable runtime license terms.
+
+Current supported redistributable information:
+https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist
+
+No Microsoft rights are granted by the SpinTexture project.

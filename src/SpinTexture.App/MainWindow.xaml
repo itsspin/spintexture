@@ -1,0 +1,1019 @@
+<Window x:Class="SpinTexture.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="SpinTexture - Lavastorm Texture Forge"
+        Width="1440"
+        Height="900"
+        MinWidth="1160"
+        MinHeight="760"
+        WindowStartupLocation="CenterScreen"
+        Background="#090A0D"
+        Foreground="#F5F1E8"
+        FontFamily="Segoe UI"
+        TextOptions.TextFormattingMode="Display"
+        UseLayoutRounding="True">
+    <Window.Resources>
+        <SolidColorBrush x:Key="AppBackgroundBrush" Color="#090A0D" />
+        <SolidColorBrush x:Key="PanelBrush" Color="#111318" />
+        <SolidColorBrush x:Key="PanelRaisedBrush" Color="#17191F" />
+        <SolidColorBrush x:Key="PanelInsetBrush" Color="#0C0E12" />
+        <SolidColorBrush x:Key="BorderBrush" Color="#292D35" />
+        <SolidColorBrush x:Key="BorderBrightBrush" Color="#3B414B" />
+        <SolidColorBrush x:Key="PrimaryTextBrush" Color="#F4F0E7" />
+        <SolidColorBrush x:Key="SecondaryTextBrush" Color="#B8BBC2" />
+        <SolidColorBrush x:Key="MutedTextBrush" Color="#8A8F99" />
+        <SolidColorBrush x:Key="LavaBrush" Color="#FF5A1F" />
+        <SolidColorBrush x:Key="LavaBrightBrush" Color="#FF8A3D" />
+        <SolidColorBrush x:Key="LavaDimBrush" Color="#442016" />
+        <SolidColorBrush x:Key="SafeBrush" Color="#65D6A6" />
+        <SolidColorBrush x:Key="SafeDimBrush" Color="#16372D" />
+        <SolidColorBrush x:Key="WarningBrush" Color="#F5C76B" />
+        <SolidColorBrush x:Key="DangerBrush" Color="#FF6B72" />
+
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+        </Style>
+
+        <Style x:Key="EyebrowTextStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="10" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{StaticResource LavaBrightBrush}" />
+            <Setter Property="TextOptions.TextFormattingMode" Value="Ideal" />
+        </Style>
+
+        <Style x:Key="SectionTitleStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="17" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+        </Style>
+
+        <Style x:Key="CaptionStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+
+        <Style x:Key="CardStyle" TargetType="Border">
+            <Setter Property="Background" Value="{StaticResource PanelBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="10" />
+            <Setter Property="Padding" Value="18" />
+        </Style>
+
+        <Style x:Key="InsetStyle" TargetType="Border">
+            <Setter Property="Background" Value="{StaticResource PanelInsetBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="7" />
+        </Style>
+
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="#242830" />
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <Setter Property="BorderBrush" Value="#3A3F49" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="14,9" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="ButtonBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="#303640" />
+                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="#555D69" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="#1C1F25" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.38" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="PrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="{StaticResource LavaBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource LavaBrightBrush}" />
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="Padding" Value="18,12" />
+        </Style>
+
+        <Style x:Key="SafeButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="#183C32" />
+            <Setter Property="BorderBrush" Value="#2D715C" />
+            <Setter Property="Foreground" Value="#C9F8E7" />
+            <Setter Property="Padding" Value="18,12" />
+        </Style>
+
+        <Style x:Key="TextBoxStyle" TargetType="TextBox">
+            <Setter Property="Background" Value="{StaticResource PanelInsetBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <Setter Property="CaretBrush" Value="{StaticResource LavaBrightBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="12,10" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TextBox">
+                        <Border x:Name="TextBoxBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6">
+                            <ScrollViewer x:Name="PART_ContentHost"
+                                          Padding="{TemplateBinding Padding}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="TextBoxBorder" Property="BorderBrush" Value="{StaticResource LavaBrightBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="TextBoxBorder" Property="Opacity" Value="0.45" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!--
+            WPF's stock ComboBox template pulls colors from the Windows theme. On a
+            dark surface that can produce a white field with white text (or black
+            text in the popup), so the complete control is themed here rather than
+            relying on a few foreground setters.
+        -->
+        <Style x:Key="DarkComboBoxToggleStyle" TargetType="ToggleButton">
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="ClickMode" Value="Press" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="ToggleSurface" Background="Transparent">
+                            <Grid Width="38">
+                                <Border Width="1" Height="21" HorizontalAlignment="Left"
+                                        Background="#323741" />
+                                <Path x:Name="Arrow"
+                                      Width="10" Height="6"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center"
+                                      Data="M 0,0 L 5,5 L 10,0 Z"
+                                      Fill="{StaticResource SecondaryTextBrush}"
+                                      Stretch="Fill" />
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ToggleSurface" Property="Background" Value="#22262D" />
+                                <Setter TargetName="Arrow" Property="Fill" Value="{StaticResource LavaBrightBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="ToggleSurface" Property="Background" Value="#291A14" />
+                                <Setter TargetName="Arrow" Property="Fill" Value="{StaticResource LavaBrightBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Arrow" Property="Fill" Value="#666B74" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="ComboBox">
+            <Setter Property="Background" Value="{StaticResource PanelInsetBrush}" />
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrightBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="12,8" />
+            <Setter Property="MinHeight" Value="42" />
+            <Setter Property="MaxDropDownHeight" Value="310" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="ScrollViewer.CanContentScroll" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid x:Name="ComboRoot" SnapsToDevicePixels="True">
+                            <Border x:Name="ComboBorder"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="6" />
+
+                            <Grid Margin="{TemplateBinding BorderThickness}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="38" />
+                                </Grid.ColumnDefinitions>
+                                <ContentPresenter x:Name="SelectedContent"
+                                                  Margin="{TemplateBinding Padding}"
+                                                  HorizontalAlignment="Left"
+                                                  VerticalAlignment="Center"
+                                                  Content="{TemplateBinding SelectionBoxItem}"
+                                                  ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                                  ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"
+                                                  IsHitTestVisible="False"
+                                                  SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"
+                                                  TextElement.Foreground="{TemplateBinding Foreground}" />
+                                <TextBlock x:Name="EmptySelectionHint"
+                                           Margin="{TemplateBinding Padding}"
+                                           VerticalAlignment="Center"
+                                           Text="Select an option..."
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           FontWeight="Normal"
+                                           IsHitTestVisible="False"
+                                           Visibility="Collapsed" />
+                                <ToggleButton Grid.Column="1"
+                                              Style="{StaticResource DarkComboBoxToggleStyle}"
+                                              IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" />
+                            </Grid>
+
+                            <Popup x:Name="PART_Popup"
+                                   AllowsTransparency="True"
+                                   Focusable="False"
+                                   IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   Placement="Bottom"
+                                   PopupAnimation="Fade">
+                                <Border x:Name="PopupBorder"
+                                        MinWidth="{Binding ActualWidth, ElementName=ComboRoot}"
+                                        MaxHeight="{TemplateBinding MaxDropDownHeight}"
+                                        Margin="0,4,0,0"
+                                        Padding="4"
+                                        Background="#15181E"
+                                        BorderBrush="#505761"
+                                        BorderThickness="1"
+                                        CornerRadius="6">
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                                  HorizontalScrollBarVisibility="Disabled"
+                                                  SnapsToDevicePixels="True">
+                                        <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained" />
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="SelectedIndex" Value="-1">
+                                <Setter TargetName="SelectedContent" Property="Visibility" Value="Collapsed" />
+                                <Setter TargetName="EmptySelectionHint" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ComboBorder" Property="BorderBrush" Value="#606873" />
+                                <Setter TargetName="ComboBorder" Property="Background" Value="#11141A" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Setter TargetName="ComboBorder" Property="BorderBrush" Value="{StaticResource LavaBrightBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsDropDownOpen" Value="True">
+                                <Setter TargetName="ComboBorder" Property="BorderBrush" Value="{StaticResource LavaBrightBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsReadOnly" Value="True">
+                                <Setter Property="Cursor" Value="Arrow" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ComboBorder" Property="Background" Value="#0E1014" />
+                                <Setter TargetName="ComboBorder" Property="BorderBrush" Value="#252A31" />
+                                <Setter Property="Foreground" Value="#777C86" />
+                                <Setter TargetName="EmptySelectionHint" Property="Foreground" Value="#666B74" />
+                                <Setter Property="Cursor" Value="Arrow" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="ComboBoxItem">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <Setter Property="Padding" Value="11,9" />
+            <Setter Property="Margin" Value="0,1" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="ItemSurface"
+                                Padding="{TemplateBinding Padding}"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="Transparent"
+                                BorderThickness="1"
+                                CornerRadius="4">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="Center"
+                                              RecognizesAccessKey="True"
+                                              TextElement.Foreground="{TemplateBinding Foreground}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="ItemSurface" Property="Background" Value="#252A32" />
+                                <Setter TargetName="ItemSurface" Property="BorderBrush" Value="#414852" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="ItemSurface" Property="Background" Value="#352018" />
+                                <Setter TargetName="ItemSurface" Property="BorderBrush" Value="{StaticResource LavaBrush}" />
+                                <Setter Property="Foreground" Value="#FFF8EF" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="#70757E" />
+                                <Setter TargetName="ItemSurface" Property="Opacity" Value="0.62" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+
+        <Style x:Key="PresetItemStyle" TargetType="ListBoxItem">
+            <Setter Property="Background" Value="{StaticResource PanelInsetBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0,0,10,0" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Stretch" />
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Border x:Name="PresetBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="8"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter TextElement.Foreground="{TemplateBinding Foreground}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="PresetBorder" Property="BorderBrush" Value="#555C66" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="PresetBorder" Property="Background" Value="#251813" />
+                                <Setter TargetName="PresetBorder" Property="BorderBrush" Value="{StaticResource LavaBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="CapItemStyle" TargetType="ListBoxItem">
+            <Setter Property="Background" Value="{StaticResource PanelInsetBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="18,9" />
+            <Setter Property="Margin" Value="0,0,8,0" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Border x:Name="CapBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              TextElement.Foreground="{TemplateBinding Foreground}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="CapBorder" Property="Background" Value="{StaticResource LavaDimBrush}" />
+                                <Setter TargetName="CapBorder" Property="BorderBrush" Value="{StaticResource LavaBrightBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="MetricLabelStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="10" />
+            <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+        </Style>
+
+        <Style x:Key="FieldLabelStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="10" />
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+            <Setter Property="TextOptions.TextFormattingMode" Value="Ideal" />
+        </Style>
+
+        <Style x:Key="MetricValueStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="18" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <Setter Property="Margin" Value="0,4,0,0" />
+        </Style>
+
+        <Style TargetType="ScrollBar">
+            <Setter Property="Background" Value="#0C0E12" />
+        </Style>
+    </Window.Resources>
+
+    <Grid Background="{StaticResource AppBackgroundBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="210" />
+        </Grid.RowDefinitions>
+
+        <!-- Lava atmosphere behind the header. -->
+        <Grid Grid.Row="0" Height="112" ClipToBounds="True">
+            <Grid.Background>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                    <GradientStop Color="#1C100C" Offset="0" />
+                    <GradientStop Color="#101216" Offset="0.48" />
+                    <GradientStop Color="#161014" Offset="1" />
+                </LinearGradientBrush>
+            </Grid.Background>
+            <Ellipse Width="600" Height="250" HorizontalAlignment="Left" Margin="-180,-165,0,0" Opacity="0.62">
+                <Ellipse.Fill>
+                    <RadialGradientBrush>
+                        <GradientStop Color="#B94B21" Offset="0" />
+                        <GradientStop Color="#00161210" Offset="1" />
+                    </RadialGradientBrush>
+                </Ellipse.Fill>
+            </Ellipse>
+            <Rectangle Height="2" VerticalAlignment="Bottom">
+                <Rectangle.Fill>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                        <GradientStop Color="#00FF5A1F" Offset="0" />
+                        <GradientStop Color="#FFFF5A1F" Offset="0.16" />
+                        <GradientStop Color="#44FF8A3D" Offset="0.58" />
+                        <GradientStop Color="#00FF5A1F" Offset="1" />
+                    </LinearGradientBrush>
+                </Rectangle.Fill>
+            </Rectangle>
+
+            <Grid Margin="28,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Border Width="56" Height="56" CornerRadius="12" VerticalAlignment="Center"
+                        Background="#2B1710" BorderBrush="#B94B21" BorderThickness="1">
+                    <Grid>
+                        <Path Data="M 9,40 L 20,17 L 29,31 L 37,10 L 48,40 Z"
+                              Fill="#FF5A1F" Stretch="Uniform" Margin="10" />
+                        <Path Data="M 20,39 L 27,28 L 32,35 L 37,24 L 42,39 Z"
+                              Fill="#FFC06A" Stretch="Uniform" Margin="13" />
+                    </Grid>
+                </Border>
+
+                <StackPanel Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="SPINTEXTURE" FontSize="25" FontWeight="Bold" />
+                        <Border Margin="11,3,0,3" Padding="8,2" CornerRadius="4" Background="{StaticResource LavaDimBrush}">
+                            <TextBlock Text="LAVASTORM FORGE" Style="{StaticResource EyebrowTextStyle}" />
+                        </Border>
+                    </StackPanel>
+                    <TextBlock Margin="0,5,0,0"
+                               Text="A faithful texture enhancement workshop built specifically for EverQuest Legends"
+                               Foreground="{StaticResource SecondaryTextBrush}" FontSize="12" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Border Padding="12,8" CornerRadius="6" Background="{StaticResource SafeDimBrush}"
+                            BorderBrush="#275A4A" BorderThickness="1" Margin="0,0,10,0">
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse Width="7" Height="7" Fill="{StaticResource SafeBrush}" Margin="0,0,7,0" />
+                            <TextBlock Text="STAGING FIRST" Foreground="{StaticResource SafeBrush}" FontSize="10" FontWeight="Bold" />
+                        </StackPanel>
+                    </Border>
+                    <Border Padding="12,8" CornerRadius="6" Background="#191B20" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+                        <TextBlock Text="NO LIVE WRITES DURING ANALYSIS" Foreground="{StaticResource SecondaryTextBrush}" FontSize="10" FontWeight="SemiBold" />
+                    </Border>
+                </StackPanel>
+            </Grid>
+        </Grid>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <Grid Margin="24,22,24,24">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="310" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="338" />
+                </Grid.ColumnDefinitions>
+
+                <!-- Source and scope -->
+                <StackPanel Grid.Column="0">
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="01 / SOURCE" Style="{StaticResource EyebrowTextStyle}" />
+                            <TextBlock Text="Find the Legends client" Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,4" />
+                            <TextBlock Text="Analysis is inventory-only. It reads names and sizes, then leaves every client file untouched."
+                                       Style="{StaticResource CaptionStyle}" />
+
+                            <Grid Margin="0,16,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBox Grid.Column="0" Text="{Binding InstallPath, UpdateSourceTrigger=PropertyChanged}"
+                                         Style="{StaticResource TextBoxStyle}" ToolTip="EverQuest Legends installation folder" />
+                                <Button Grid.Column="1" Margin="8,0,0,0" Command="{Binding BrowseCommand}" ToolTip="Browse for the client folder">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE8B7;" FontFamily="Segoe Fluent Icons" Margin="0,0,7,0" />
+                                        <TextBlock Text="Browse" />
+                                    </StackPanel>
+                                </Button>
+                            </Grid>
+
+                            <Border Margin="0,10,0,0" Padding="10,8" CornerRadius="5" Background="#0D1916" BorderBrush="#1E4136" BorderThickness="1">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="&#xE73E;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource SafeBrush}" Margin="0,0,8,0" />
+                                    <TextBlock Text="{Binding PathStateText}" FontSize="11" Foreground="{StaticResource SecondaryTextBrush}" TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
+                            </Border>
+
+                            <Button Margin="0,12,0,0" Command="{Binding AnalyzeCommand}" HorizontalContentAlignment="Center">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="&#xE721;" FontFamily="Segoe Fluent Icons" Margin="0,0,8,0" />
+                                    <TextBlock Text="Analyze Client (Read Only)" />
+                                </StackPanel>
+                            </Button>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource CardStyle}" Margin="0,14,0,0">
+                        <StackPanel>
+                            <TextBlock Text="02 / SCOPE" Style="{StaticResource EyebrowTextStyle}" />
+                            <TextBlock Text="Choose what to forge" Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,12" />
+
+                            <TextBlock Text="ASSET SET" Style="{StaticResource FieldLabelStyle}" />
+                            <ComboBox Margin="0,6,0,0"
+                                      ItemsSource="{Binding ScopeOptions}"
+                                      SelectedItem="{Binding SelectedScopeOption}"
+                                      DisplayMemberPath="Name"
+                                      AutomationProperties.Name="Asset set" />
+                            <TextBlock Margin="1,7,1,0" Text="{Binding SelectedScopeOption.Description}" Style="{StaticResource CaptionStyle}" />
+
+                            <TextBlock Text="ZONE  /  QUICK SELECT" Style="{StaticResource FieldLabelStyle}" Margin="0,15,0,0" />
+                            <ComboBox Margin="0,6,0,0"
+                                      ItemsSource="{Binding Zones}"
+                                      SelectedItem="{Binding SelectedZone}"
+                                      IsEnabled="{Binding IsZoneSelectionEnabled}"
+                                      ToolTip="Choose a zone to automatically switch Asset Set to Selected zone."
+                                      AutomationProperties.Name="Zone quick select" />
+                            <TextBlock Margin="1,7,1,0"
+                                       Text="{Binding ZoneSelectionStatusText}"
+                                       Style="{StaticResource CaptionStyle}"
+                                       Foreground="{StaticResource SecondaryTextBrush}" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource CardStyle}" Margin="0,14,0,0">
+                        <StackPanel>
+                            <Grid>
+                                <TextBlock Text="CLIENT INVENTORY" Style="{StaticResource EyebrowTextStyle}" />
+                                <Border HorizontalAlignment="Right" Padding="7,2" CornerRadius="4" Background="#202329">
+                                    <TextBlock Text="{Binding AnalysisStateText}" FontSize="9" FontWeight="Bold" Foreground="{StaticResource SecondaryTextBrush}" />
+                                </Border>
+                            </Grid>
+                            <Grid Margin="0,15,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="ARCHIVES" Style="{StaticResource MetricLabelStyle}" />
+                                    <TextBlock Text="{Binding ArchiveCountText}" Style="{StaticResource MetricValueStyle}" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="LOOSE TEXTURES" Style="{StaticResource MetricLabelStyle}" />
+                                    <TextBlock Text="{Binding LooseTextureCountText}" Style="{StaticResource MetricValueStyle}" />
+                                </StackPanel>
+                            </Grid>
+                            <Grid Margin="0,15,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="PACKED INDEX" Style="{StaticResource MetricLabelStyle}" />
+                                    <TextBlock Text="{Binding PackedTextureCountText}" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource PrimaryTextBrush}" Margin="0,5,0,0" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="FOOTPRINT" Style="{StaticResource MetricLabelStyle}" />
+                                    <TextBlock Text="{Binding SourceFootprintText}" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource PrimaryTextBrush}" Margin="0,5,0,0" />
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- Presets and output -->
+                <StackPanel Grid.Column="1" Margin="14,0">
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="03 / ENHANCEMENT PROFILE" Style="{StaticResource EyebrowTextStyle}" />
+                            <TextBlock Text="Keep the era. Recover the detail." Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,4" />
+                            <TextBlock Text="Texture HD uses a game-texture model and keeps its full reconstructed detail. Review one zone before a full-world pass."
+                                       Style="{StaticResource CaptionStyle}" />
+
+                            <ListBox Margin="0,17,0,0"
+                                     Background="Transparent"
+                                     BorderThickness="0"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                     ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                                     ItemsSource="{Binding PresetOptions}"
+                                     SelectedItem="{Binding SelectedPresetOption}"
+                                     ItemContainerStyle="{StaticResource PresetItemStyle}">
+                                <ListBox.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <UniformGrid Rows="1" Columns="3" />
+                                    </ItemsPanelTemplate>
+                                </ListBox.ItemsPanel>
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="15" MinHeight="145">
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="*" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <Grid>
+                                                <TextBlock Text="{Binding Eyebrow}" Style="{StaticResource EyebrowTextStyle}" />
+                                                <Border HorizontalAlignment="Right" Padding="6,2" CornerRadius="4" Background="{StaticResource LavaDimBrush}">
+                                                    <Border.Style>
+                                                        <Style TargetType="Border">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsRecommended}" Value="True">
+                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Border.Style>
+                                                    <TextBlock Text="RECOMMENDED" FontSize="8" FontWeight="Bold" Foreground="{StaticResource LavaBrightBrush}" />
+                                                </Border>
+                                            </Grid>
+                                            <TextBlock Grid.Row="1" Text="{Binding Name}" FontSize="16" FontWeight="SemiBold"
+                                                       Foreground="{StaticResource PrimaryTextBrush}" Margin="0,9,0,6" />
+                                            <TextBlock Grid.Row="2" Text="{Binding Description}" Style="{StaticResource CaptionStyle}" />
+                                            <TextBlock Grid.Row="3" Text="{Binding Detail}" FontSize="10" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,10,0,0" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </StackPanel>
+                    </Border>
+
+                    <Grid Margin="0,14,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <Border Grid.Column="0" Style="{StaticResource CardStyle}" Margin="0,0,7,0">
+                            <StackPanel>
+                                <TextBlock Text="04 / TEXTURE CEILING" Style="{StaticResource EyebrowTextStyle}" />
+                                <TextBlock Text="Maximum edge size" Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,4" />
+                                <TextBlock Text="A ceiling prevents tiny UI art and distant props from ballooning unnecessarily."
+                                           Style="{StaticResource CaptionStyle}" />
+                                <ListBox Margin="0,16,0,0"
+                                         Background="Transparent"
+                                         Foreground="{StaticResource PrimaryTextBrush}"
+                                         BorderThickness="0"
+                                         ItemsSource="{Binding TextureCaps}"
+                                         SelectedItem="{Binding SelectedMaximumDimension}"
+                                         ItemContainerStyle="{StaticResource CapItemStyle}">
+                                    <ListBox.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" />
+                                        </ItemsPanelTemplate>
+                                    </ListBox.ItemsPanel>
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding StringFormat={}{0:N0}}" FontSize="12" FontWeight="Bold"
+                                                           Foreground="{StaticResource PrimaryTextBrush}" HorizontalAlignment="Center" />
+                                                <TextBlock Text="PX" FontSize="9" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource SecondaryTextBrush}" HorizontalAlignment="Center" />
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                                <CheckBox Margin="2,15,0,0" IsChecked="{Binding GenerateMipMaps}">
+                                    <StackPanel>
+                                        <TextBlock Text="Generate full mip chains" FontWeight="SemiBold" />
+                                        <TextBlock Text="Reduces shimmer at distance; recommended." Style="{StaticResource CaptionStyle}" Margin="0,3,0,0" />
+                                    </StackPanel>
+                                </CheckBox>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Grid.Column="1" Style="{StaticResource CardStyle}" Margin="7,0,0,0">
+                            <StackPanel>
+                                <TextBlock Text="QUALITY GUARDRAILS" Style="{StaticResource EyebrowTextStyle}" />
+                                <TextBlock Text="Faithful by construction" Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,12" />
+                                <StackPanel>
+                                    <Grid Margin="0,0,0,10">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="22" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                        <TextBlock Text="&#xE73E;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource SafeBrush}" />
+                                        <TextBlock Grid.Column="1" Text="Preserve aspect ratio, DDS family, and alpha intent" Style="{StaticResource CaptionStyle}" />
+                                    </Grid>
+                                    <Grid Margin="0,0,0,10">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="22" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                        <TextBlock Text="&#xE73E;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource SafeBrush}" />
+                                        <TextBlock Grid.Column="1" Text="Protect UI, effects, masks, packed atlases, and technical maps" Style="{StaticResource CaptionStyle}" />
+                                    </Grid>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="22" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                        <TextBlock Text="&#xE73E;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource SafeBrush}" />
+                                        <TextBlock Grid.Column="1" Text="Verify exact mip chains, archive structure, and SHA-256 manifests" Style="{StaticResource CaptionStyle}" />
+                                    </Grid>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+
+                    <Border Style="{StaticResource CardStyle}" Margin="0,14,0,0">
+                        <StackPanel>
+                            <Grid>
+                                <StackPanel>
+                                    <TextBlock Text="OUTPUT FORECAST" Style="{StaticResource EyebrowTextStyle}" />
+                                    <TextBlock Text="Staged pack estimate" Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,0" />
+                                </StackPanel>
+                                <Border HorizontalAlignment="Right" VerticalAlignment="Center" Padding="10,6" CornerRadius="5"
+                                        Background="{StaticResource SafeDimBrush}" BorderBrush="#275A4A" BorderThickness="1">
+                                    <TextBlock Text="LIVE CLIENT UNCHANGED" FontSize="9" FontWeight="Bold" Foreground="{StaticResource SafeBrush}" />
+                                </Border>
+                            </Grid>
+                            <Grid Margin="0,17,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="1" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="1" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel HorizontalAlignment="Center">
+                                    <TextBlock Text="EST. OUTPUT" Style="{StaticResource MetricLabelStyle}" HorizontalAlignment="Center" />
+                                    <TextBlock Text="{Binding EstimatedOutputText}" Style="{StaticResource MetricValueStyle}" HorizontalAlignment="Center" />
+                                </StackPanel>
+                                <Border Grid.Column="1" Background="{StaticResource BorderBrush}" Margin="0,2" />
+                                <StackPanel Grid.Column="2" HorizontalAlignment="Center">
+                                    <TextBlock Text="TO REPACK" Style="{StaticResource MetricLabelStyle}" HorizontalAlignment="Center" />
+                                    <TextBlock Text="{Binding EstimatedArchivesText}" Style="{StaticResource MetricValueStyle}" HorizontalAlignment="Center" />
+                                </StackPanel>
+                                <Border Grid.Column="3" Background="{StaticResource BorderBrush}" Margin="0,2" />
+                                <StackPanel Grid.Column="4" HorizontalAlignment="Center">
+                                    <TextBlock Text="ROUGH TIME" Style="{StaticResource MetricLabelStyle}" HorizontalAlignment="Center" />
+                                    <TextBlock Text="{Binding EstimatedTimeText}" Style="{StaticResource MetricValueStyle}" HorizontalAlignment="Center" />
+                                </StackPanel>
+                            </Grid>
+                            <Border Margin="0,16,0,0" Padding="10,8" CornerRadius="5" Background="#0E1014" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+                                <TextBlock Text="{Binding WorkspaceText}" FontSize="11" Foreground="{StaticResource SecondaryTextBrush}" HorizontalAlignment="Center" />
+                            </Border>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- Safety and actions -->
+                <StackPanel Grid.Column="2">
+                    <Border Background="#21150F" BorderBrush="#7A3920" BorderThickness="1" CornerRadius="10" Padding="18">
+                        <StackPanel>
+                            <Grid>
+                                <Border Width="36" Height="36" CornerRadius="18" Background="#432318" HorizontalAlignment="Left">
+                                    <TextBlock Text="&#xE7BA;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource WarningBrush}" FontSize="17"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
+                                <StackPanel Margin="48,0,0,0" VerticalAlignment="Center">
+                                    <TextBlock Text="BACKUP + LEGAL GATE" Style="{StaticResource EyebrowTextStyle}" Foreground="{StaticResource WarningBrush}" />
+                                    <TextBlock Text="Install only when you mean it" FontSize="16" FontWeight="SemiBold" Margin="0,3,0,0" />
+                                </StackPanel>
+                            </Grid>
+
+                            <TextBlock Margin="0,15,0,0" TextWrapping="Wrap" Foreground="#D8C5B9" FontSize="12" LineHeight="19">
+                                SpinTexture is an independent fan utility. EverQuest and related assets remain the property of their respective owners. Only transform files you are authorized to use.
+                            </TextBlock>
+                            <TextBlock Margin="0,11,0,0" TextWrapping="Wrap" Foreground="#D8C5B9" FontSize="12" LineHeight="19">
+                                A real install creates and verifies a reversible backup. After installing, use the SpinTexture play shortcut; LaunchPad validates custom archives back to their originals.
+                            </TextBlock>
+
+                            <Border Margin="0,15,0,0" Padding="12" CornerRadius="6" Background="#130E0B" BorderBrush="#553021" BorderThickness="1">
+                                <CheckBox IsChecked="{Binding IsLegalAcknowledged}">
+                                    <TextBlock TextWrapping="Wrap" Text="I understand that custom client files may be unsupported, and I will review a staged pack before installing." />
+                                </CheckBox>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource CardStyle}" Margin="0,14,0,0">
+                        <StackPanel>
+                            <TextBlock Text="05 / BUILD" Style="{StaticResource EyebrowTextStyle}" />
+                            <TextBlock Text="Forge your texture pack" Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,4" />
+                            <TextBlock Text="Start with staging, inspect the report and thumbnails, then opt into an installation."
+                                       Style="{StaticResource CaptionStyle}" />
+
+                            <Button Command="{Binding BuildStagedPackCommand}" Style="{StaticResource SafeButtonStyle}" Margin="0,16,0,0" HorizontalContentAlignment="Center">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="&#xE7B8;" FontFamily="Segoe Fluent Icons" Margin="0,0,8,0" />
+                                    <TextBlock Text="Build Staged Pack" />
+                                </StackPanel>
+                            </Button>
+                            <TextBlock Text="Recommended - writes only to the managed workspace" FontSize="10" Foreground="{StaticResource SafeBrush}" HorizontalAlignment="Center" Margin="0,6,0,0" />
+
+                            <Button Command="{Binding OpenPreviewGalleryCommand}" Margin="0,14,0,0" HorizontalContentAlignment="Center"
+                                    Background="#19251F" BorderBrush="#356A57" Foreground="#C9F8E7">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="&#xE91B;" FontFamily="Segoe Fluent Icons" Margin="0,0,8,0" />
+                                    <TextBlock Text="Open Preview Gallery" />
+                                </StackPanel>
+                            </Button>
+                            <TextBlock Text="{Binding PreviewStateText}" FontSize="10" Foreground="{StaticResource MutedTextBrush}"
+                                       HorizontalAlignment="Center" Margin="0,6,0,0" />
+
+                            <Button Command="{Binding OpenPackLibraryCommand}" Margin="0,14,0,0" HorizontalContentAlignment="Center"
+                                    Background="#20283A" BorderBrush="#445A87" Foreground="#DCE7FF">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="&#xE8F1;" FontFamily="Segoe Fluent Icons" Margin="0,0,8,0" />
+                                    <TextBlock Text="Manage Staged Packs" />
+                                </StackPanel>
+                            </Button>
+                            <TextBlock Text="Check multiple packs, inspect archive contents, or repair only missing textures"
+                                       TextWrapping="Wrap" TextAlignment="Center" FontSize="10"
+                                       Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" Margin="0,6,0,0" />
+
+                            <Button Command="{Binding OpenNativeGraphicsCommand}" Margin="0,14,0,0" HorizontalContentAlignment="Center"
+                                    Background="#272316" BorderBrush="#6B5A2E" Foreground="#F2DEA4">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="&#xE9D9;" FontFamily="Segoe Fluent Icons" Margin="0,0,8,0" />
+                                    <TextBlock Text="Native Graphics / Lighting" />
+                                </StackPanel>
+                            </Button>
+                            <TextBlock Text="Built-in EQL stencil shadows, advanced lighting, and bloom - no injector or shader DLL"
+                                       TextWrapping="Wrap" TextAlignment="Center" FontSize="10"
+                                       Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" Margin="0,6,0,0" />
+
+                            <Button Command="{Binding InstallLatestPackCommand}" Style="{StaticResource PrimaryButtonStyle}" Margin="0,14,0,0" HorizontalContentAlignment="Center">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="&#xE896;" FontFamily="Segoe Fluent Icons" Margin="0,0,8,0" />
+                                    <TextBlock Text="Install Staged Pack" />
+                                </StackPanel>
+                            </Button>
+                            <TextBlock Text="One-time archive install - no second AI build" FontSize="10" Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" Margin="0,6,0,0" />
+
+                            <Button Command="{Binding PlayEnhancedCommand}" Style="{StaticResource SafeButtonStyle}" Margin="0,14,0,0" HorizontalContentAlignment="Center">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="&#xE768;" FontFamily="Segoe Fluent Icons" Margin="0,0,8,0" />
+                                    <TextBlock Text="Play Enhanced EQ" />
+                                </StackPanel>
+                            </Button>
+                            <TextBlock Text="{Binding InstallHealthText}" TextWrapping="Wrap" TextAlignment="Center" FontSize="10"
+                                       Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" Margin="0,6,0,0" />
+                            <TextBlock Text="Normal play does a quick health check only - no AI and no archive copy" TextWrapping="Wrap" TextAlignment="Center" FontSize="10"
+                                       Foreground="{StaticResource SafeBrush}" HorizontalAlignment="Center" Margin="0,5,0,0" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource CardStyle}" Margin="0,14,0,0">
+                        <StackPanel>
+                            <Grid>
+                                <StackPanel>
+                                    <TextBlock Text="RECOVERY" Style="{StaticResource EyebrowTextStyle}" />
+                                    <TextBlock Text="Return to vanilla" FontSize="15" FontWeight="SemiBold" Margin="0,4,0,0" />
+                                </StackPanel>
+                                <Button HorizontalAlignment="Right" Command="{Binding RestoreCommand}" Padding="12,8">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE777;" FontFamily="Segoe Fluent Icons" Margin="0,0,7,0" />
+                                        <TextBlock Text="Restore" />
+                                    </StackPanel>
+                                </Button>
+                            </Grid>
+                            <TextBlock Text="{Binding RestoreStateText}" Style="{StaticResource CaptionStyle}" Margin="0,10,0,0" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </Grid>
+        </ScrollViewer>
+
+        <!-- Activity dock -->
+        <Border Grid.Row="2" Background="#0C0E12" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0">
+            <Grid Margin="24,15,24,16">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="365" />
+                    <ColumnDefinition Width="1" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <Grid Margin="0,0,20,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Grid>
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse Width="8" Height="8" Fill="{StaticResource LavaBrush}" Margin="0,0,8,0" />
+                            <TextBlock Text="{Binding CurrentStage}" FontSize="10" FontWeight="Bold" Foreground="{StaticResource LavaBrightBrush}" />
+                        </StackPanel>
+                        <TextBlock Text="{Binding ProgressValue, StringFormat={}{0:0}%}" HorizontalAlignment="Right" FontSize="11" Foreground="{StaticResource SecondaryTextBrush}" />
+                    </Grid>
+                    <ProgressBar Grid.Row="1" Height="5" Margin="0,9,0,0" Value="{Binding ProgressValue, Mode=OneWay}" Maximum="100"
+                                 Background="#24272E" Foreground="{StaticResource LavaBrush}" BorderThickness="0" />
+                    <TextBlock Grid.Row="2" Text="{Binding CurrentItem}" FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Margin="0,11,0,0" />
+                    <Grid Grid.Row="3" Margin="0,8,0,0">
+                        <TextBlock Text="{Binding StatusText}" Style="{StaticResource CaptionStyle}" VerticalAlignment="Top" />
+                        <Button Command="{Binding CancelCommand}" HorizontalAlignment="Right" VerticalAlignment="Bottom" Padding="10,6" Content="Cancel" />
+                    </Grid>
+                </Grid>
+
+                <Border Grid.Column="1" Background="{StaticResource BorderBrush}" />
+
+                <Grid Grid.Column="2" Margin="20,0,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Grid>
+                        <TextBlock Text="ACTIVITY LOG" Style="{StaticResource EyebrowTextStyle}" />
+                        <TextBlock Text="Safe workflow telemetry" HorizontalAlignment="Right" FontSize="10" Foreground="{StaticResource MutedTextBrush}" />
+                    </Grid>
+                    <ListBox x:Name="ActivityLogList"
+                             Grid.Row="1"
+                             Margin="0,8,0,0"
+                             ItemsSource="{Binding LogEntries}"
+                             Background="Transparent"
+                             BorderThickness="0"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="Padding" Value="0" />
+                                <Setter Property="Margin" Value="0,0,0,4" />
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="Background" Value="Transparent" />
+                                <Setter Property="IsHitTestVisible" Value="False" />
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="58" />
+                                        <ColumnDefinition Width="52" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="{Binding Timestamp}" FontFamily="Cascadia Mono" FontSize="10" Foreground="{StaticResource MutedTextBrush}" />
+                                    <TextBlock Grid.Column="1" Text="{Binding Level}" FontFamily="Cascadia Mono" FontSize="10" FontWeight="Bold">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Level}" Value="SAFE"><Setter Property="Foreground" Value="{StaticResource SafeBrush}" /></DataTrigger>
+                                                    <DataTrigger Binding="{Binding Level}" Value="DONE"><Setter Property="Foreground" Value="{StaticResource SafeBrush}" /></DataTrigger>
+                                                    <DataTrigger Binding="{Binding Level}" Value="WARN"><Setter Property="Foreground" Value="{StaticResource WarningBrush}" /></DataTrigger>
+                                                    <DataTrigger Binding="{Binding Level}" Value="ERROR"><Setter Property="Foreground" Value="{StaticResource DangerBrush}" /></DataTrigger>
+                                                    <DataTrigger Binding="{Binding Level}" Value="SCAN"><Setter Property="Foreground" Value="{StaticResource LavaBrightBrush}" /></DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                    <TextBlock Grid.Column="2" Text="{Binding Message}" FontFamily="Cascadia Mono" FontSize="10" Foreground="#B9BBC0" TextTrimming="CharacterEllipsis" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

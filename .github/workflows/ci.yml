@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-build:
+    name: Windows Release build and self-tests
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+      SPINTEXTURE_SKIP_GPU_SMOKE: "1"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install .NET 9 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Build and test
+        shell: pwsh
+        run: ./build.ps1 -Configuration Release
+
+      - name: Upload portable validation build
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpinTexture-ci-win-x64
+          path: |
+            publish/SpinTexture-win-x64.zip
+            publish/SpinTexture-win-x64.zip.sha256.txt
+          if-no-files-found: error
+          retention-days: 7

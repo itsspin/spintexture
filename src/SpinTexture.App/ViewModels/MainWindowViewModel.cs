@@ -1,0 +1,1086 @@
+using System.Collections.ObjectModel;
+using System.Globalization;
+using System.IO;
+using SpinTexture.App.Services;
+using SpinTexture.Core.Models;
+using SpinTexture.Core.Pipeline;
+using SpinTexture.Core.Services;
+
+namespace SpinTexture.App.ViewModels;
+
+public sealed class MainWindowViewModel : ObservableObject, IDisposable
+{
+    private readonly IFolderPickerService _folderPicker;
+    private readonly ITextureWorkflowService _workflow;
+    private readonly IUserDialogService _dialogs;
+    private readonly IEnhancedLauncherService _enhancedLauncher;
+    private string _installPath = string.Empty;
+    private string _statusText = "Choose an EverQuest Legends directory to begin";
+    private string _currentStage = "READY";
+    private string _currentItem = "No operation running";
+    private double _progressValue;
+    private bool _isBusy;
+    private bool _hasAnalysis;
+    private bool _hasManagedBackup;
+    private bool _hasStagedPack;
+    private bool _isLegalAcknowledged;
+    private bool _generateMipMaps = true;
+    private ScanSummary? _scanSummary;
+    private PresetOptionViewModel _selectedPresetOption;
+    private ScopeOptionViewModel _selectedScopeOption;
+    private string? _selectedZone;
+    private int _selectedMaximumDimension = 2048;
+    private string _estimatedOutputText = "Analyze to estimate";
+    private string _estimatedArchivesText = "—";
+    private string _estimatedTimeText = "—";
+    private string _workspaceText = "Staged workspace • live client remains unchanged";
+    private string _installHealthText = "No enhanced pack is active";
+    private string? _previewManifestPath;
+    private InstallHealthReport? _installHealth;
+
+    public MainWindowViewModel(
+        IFolderPickerService folderPicker,
+        ITextureWorkflowService workflow,
+        IUserDialogService dialogs,
+        IEnhancedLauncherService enhancedLauncher)
+    {
+        _folderPicker = folderPicker;
+        _workflow = workflow;
+        _dialogs = dialogs;
+        _enhancedLauncher = enhancedLauncher;
+
+        PresetOptions =
+        [
+            new PresetOptionViewModel(
+                TexturePreset.Faithful,
+                "Faithful",
+                "UP TO 4× CONSERVATIVE",
+                "Cleans compression noise and sharpens forms without inventing surface detail.",
+                "Best match to original pixels"),
+            new PresetOptionViewModel(
+                TexturePreset.ClassicHd,
+                "Texture HD",
+                "4× BALANCED",
+                "Uses a game-texture-trained model to reconstruct clearly visible stone, wood, cloth, and terrain detail.",
+                "Strong single pass • recommended for the world",
+                IsRecommended: true),
+            new PresetOptionViewModel(
+                TexturePreset.MaximumDetail,
+                "Maximum Detail",
+                "4× AGGRESSIVE",
+                "Stronger reconstruction for selected hero assets. Requires close visual review.",
+                "Highest detail • highest variance")
+        ];
+
+        ScopeOptions =
+        [
+            new ScopeOptionViewModel(AssetScope.SelectedZone, "Selected zone", "Build and validate one zone at a time."),
+            new ScopeOptionViewModel(AssetScope.WorldOnly, "World only", "Terrain, architecture, and safe world objects."),
+            new ScopeOptionViewModel(AssetScope.CharactersAndEquipmentOnly, "Characters + equipment only", "Race models, armor, weapons, and dedicated wearable-item packs without the world."),
+            new ScopeOptionViewModel(AssetScope.WorldCharactersAndEquipment, "World + characters", "Adds supported character and equipment textures."),
+            new ScopeOptionViewModel(AssetScope.AllSafeTextures, "All safe textures", "Every classified texture that is safe to transform.")
+        ];
+
+        TextureCaps = [1024, 2048, 4096];
+        _selectedPresetOption = PresetOptions.Single(option => option.Value == TexturePreset.ClassicHd);
+        _selectedScopeOption = ScopeOptions.Single(option => option.Value == AssetScope.WorldOnly);
+
+        BrowseCommand = new RelayCommand(_ => Browse(), _ => !IsBusy);
+        AnalyzeCommand = new AsyncRelayCommand(AnalyzeAsync, CanAnalyze);
+        BuildStagedPackCommand = new AsyncRelayCommand(
+            BuildAsync,
+            CanBuildStaged);
+        InstallLatestPackCommand = new AsyncRelayCommand(InstallLatestPackAsync, CanInstallLatestPack);
+        PlayEnhancedCommand = new AsyncRelayCommand(PlayEnhancedAsync, CanPlayEnhanced);
+        OpenPreviewGalleryCommand = new RelayCommand(_ => OpenPreviewGallery(), _ => CanOpenPreviewGallery());
+        OpenPackLibraryCommand = new RelayCommand(
+            _ => PackLibraryRequested?.Invoke(InstallPath),
+            _ => !IsBusy && IsClientSignaturePresent);
+        OpenNativeGraphicsCommand = new RelayCommand(
+            _ => NativeGraphicsRequested?.Invoke(InstallPath),
+            _ => !IsBusy && IsClientSignaturePresent);
+        RestoreCommand = new AsyncRelayCommand(RestoreAsync, CanRestore);
+        CancelCommand = new RelayCommand(_ => Cancel(), _ => IsBusy);
+
+        AddLog("INFO", "SpinTexture initialized. Analyze and staged builds never write to the selected client.");
+        AddLog("SAFE", "Default profile: Texture HD • World only • 2,048 px • staged output.");
+    }
+
+    public IReadOnlyList<PresetOptionViewModel> PresetOptions { get; }
+    public IReadOnlyList<ScopeOptionViewModel> ScopeOptions { get; }
+    public IReadOnlyList<int> TextureCaps { get; }
+    public ObservableCollection<string> Zones { get; } = [];
+    public ObservableCollection<LogEntryViewModel> LogEntries { get; } = [];
+
+    public RelayCommand BrowseCommand { get; }
+    public AsyncRelayCommand AnalyzeCommand { get; }
+    public AsyncRelayCommand BuildStagedPackCommand { get; }
+    public AsyncRelayCommand InstallLatestPackCommand { get; }
+    public AsyncRelayCommand PlayEnhancedCommand { get; }
+    public RelayCommand OpenPreviewGalleryCommand { get; }
+    public RelayCommand OpenPackLibraryCommand { get; }
+    public RelayCommand OpenNativeGraphicsCommand { get; }
+    public AsyncRelayCommand RestoreCommand { get; }
+    public RelayCommand CancelCommand { get; }
+
+    public event Action<string>? PreviewGalleryRequested;
+    public event Action<string>? PackLibraryRequested;
+    public event Action<string>? NativeGraphicsRequested;
+
+    public async Task RefreshPackLibraryStateAsync()
+    {
+        if (string.IsNullOrWhiteSpace(InstallPath) || !Directory.Exists(InstallPath))
+        {
+            return;
+        }
+
+        try
+        {
+            HasManagedBackup = _workflow.HasRestorableBackup(InstallPath);
+            HasStagedPack = _workflow.HasStagedPack(InstallPath);
+            await RefreshInstallHealthAsync(CancellationToken.None, fast: true)
+                .ConfigureAwait(true);
+        }
+        catch (Exception exception) when (exception is
+            IOException
+            or UnauthorizedAccessException
+            or InvalidDataException
+            or ArgumentException
+            or NotSupportedException)
+        {
+            AddLog("WARN", $"Pack Library state could not be refreshed: {exception.Message}");
+        }
+    }
+
+    public string InstallPath
+    {
+        get => _installPath;
+        set
+        {
+            string normalized = value?.Trim() ?? string.Empty;
+            if (!SetProperty(ref _installPath, normalized))
+            {
+                return;
+            }
+
+            ClearAnalysis();
+            OnPropertyChanged(nameof(PathStateText));
+            OnPropertyChanged(nameof(IsClientSignaturePresent));
+            RefreshCommands();
+        }
+    }
+
+    public string PathStateText
+    {
+        get
+        {
+            if (string.IsNullOrWhiteSpace(InstallPath))
+            {
+                return "No client selected";
+            }
+
+            if (!Directory.Exists(InstallPath))
+            {
+                return "Folder not found";
+            }
+
+            return IsClientSignaturePresent
+                ? "EverQuest client signature found"
+                : "Folder exists • verify this is the EQL client";
+        }
+    }
+
+    public bool IsClientSignaturePresent =>
+        Directory.Exists(InstallPath) && File.Exists(Path.Combine(InstallPath, "eqgame.exe"));
+
+    public string StatusText
+    {
+        get => _statusText;
+        private set => SetProperty(ref _statusText, value);
+    }
+
+    public string CurrentStage
+    {
+        get => _currentStage;
+        private set => SetProperty(ref _currentStage, value);
+    }
+
+    public string CurrentItem
+    {
+        get => _currentItem;
+        private set => SetProperty(ref _currentItem, value);
+    }
+
+    public double ProgressValue
+    {
+        get => _progressValue;
+        private set => SetProperty(ref _progressValue, value);
+    }
+
+    public bool IsBusy
+    {
+        get => _isBusy;
+        private set
+        {
+            if (SetProperty(ref _isBusy, value))
+            {
+                RefreshCommands();
+            }
+        }
+    }
+
+    public bool HasAnalysis
+    {
+        get => _hasAnalysis;
+        private set
+        {
+            if (SetProperty(ref _hasAnalysis, value))
+            {
+                OnPropertyChanged(nameof(AnalysisStateText));
+                OnPropertyChanged(nameof(IsZoneSelectionEnabled));
+                OnPropertyChanged(nameof(ZoneSelectionStatusText));
+                RefreshCommands();
+            }
+        }
+    }
+
+    public string AnalysisStateText => HasAnalysis ? "ANALYZED" : "NOT ANALYZED";
+
+    public PresetOptionViewModel SelectedPresetOption
+    {
+        get => _selectedPresetOption;
+        set
+        {
+            if (value is not null && SetProperty(ref _selectedPresetOption, value))
+            {
+                UpdateEstimate();
+            }
+        }
+    }
+
+    public ScopeOptionViewModel SelectedScopeOption
+    {
+        get => _selectedScopeOption;
+        set
+        {
+            if (value is not null && SetProperty(ref _selectedScopeOption, value))
+            {
+                if (!IsSelectedZoneScope && _selectedZone is not null)
+                {
+                    _selectedZone = null;
+                    OnPropertyChanged(nameof(SelectedZone));
+                }
+
+                OnPropertyChanged(nameof(IsSelectedZoneScope));
+                OnPropertyChanged(nameof(IsZoneSelectionEnabled));
+                OnPropertyChanged(nameof(ZoneSelectionStatusText));
+                UpdateEstimate();
+                RefreshCommands();
+            }
+        }
+    }
+
+    public bool IsSelectedZoneScope => SelectedScopeOption.Value == AssetScope.SelectedZone;
+
+    // The zone picker doubles as a shortcut: after analysis, selecting any zone
+    // switches the scope to Selected zone. This avoids presenting a seemingly
+    // broken disabled field when the default scope is World only.
+    public bool IsZoneSelectionEnabled => HasAnalysis && Zones.Count > 0;
+
+    public string ZoneSelectionStatusText
+    {
+        get
+        {
+            if (!HasAnalysis)
+            {
+                return "Analyze first to load the available zones.";
+            }
+
+            if (Zones.Count == 0)
+            {
+                return "No likely zone archives were found in this client.";
+            }
+
+            if (!IsSelectedZoneScope)
+            {
+                return "Optional: choosing a zone switches Asset Set to Selected zone.";
+            }
+
+            return string.IsNullOrWhiteSpace(SelectedZone)
+                ? "Selected zone scope is active - choose one zone to continue."
+                : $"Only {SelectedZone} will be included in this build.";
+        }
+    }
+
+    public string? SelectedZone
+    {
+        get => _selectedZone;
+        set
+        {
+            if (SetProperty(ref _selectedZone, value))
+            {
+                if (HasAnalysis && !string.IsNullOrWhiteSpace(value) && !IsSelectedZoneScope)
+                {
+                    SelectedScopeOption = ScopeOptions.Single(option => option.Value == AssetScope.SelectedZone);
+                }
+                else
+                {
+                    UpdateEstimate();
+                }
+
+                OnPropertyChanged(nameof(ZoneSelectionStatusText));
+                RefreshCommands();
+            }
+        }
+    }
+
+    public int SelectedMaximumDimension
+    {
+        get => _selectedMaximumDimension;
+        set
+        {
+            if (SetProperty(ref _selectedMaximumDimension, value))
+            {
+                UpdateEstimate();
+            }
+        }
+    }
+
+    public bool GenerateMipMaps
+    {
+        get => _generateMipMaps;
+        set
+        {
+            if (SetProperty(ref _generateMipMaps, value))
+            {
+                UpdateEstimate();
+            }
+        }
+    }
+
+    public bool IsLegalAcknowledged
+    {
+        get => _isLegalAcknowledged;
+        set
+        {
+            if (SetProperty(ref _isLegalAcknowledged, value))
+            {
+                RefreshCommands();
+            }
+        }
+    }
+
+    public bool HasManagedBackup
+    {
+        get => _hasManagedBackup;
+        private set
+        {
+            if (SetProperty(ref _hasManagedBackup, value))
+            {
+                OnPropertyChanged(nameof(RestoreStateText));
+                RefreshCommands();
+            }
+        }
+    }
+
+    public bool HasStagedPack
+    {
+        get => _hasStagedPack;
+        private set
+        {
+            if (SetProperty(ref _hasStagedPack, value))
+            {
+                RefreshCommands();
+            }
+        }
+    }
+
+    public string RestoreStateText => HasManagedBackup ? "Verified backup available" : "No managed backup detected";
+
+    public string InstallHealthText
+    {
+        get => _installHealthText;
+        private set => SetProperty(ref _installHealthText, value);
+    }
+
+    public string ArchiveCountText => _scanSummary is null ? "—" : _scanSummary.ArchiveCount.ToString("N0");
+    public string PackedTextureCountText => _scanSummary is null ? "—" : _scanSummary.PackedTextureCount.ToString("N0");
+    public string LooseTextureCountText => _scanSummary is null ? "—" : _scanSummary.LooseTextureCount.ToString("N0");
+    public string SourceFootprintText => _scanSummary is null ? "—" : FormatBytes(_scanSummary.SourceBytes);
+
+    public string EstimatedOutputText
+    {
+        get => _estimatedOutputText;
+        private set => SetProperty(ref _estimatedOutputText, value);
+    }
+
+    public string EstimatedArchivesText
+    {
+        get => _estimatedArchivesText;
+        private set => SetProperty(ref _estimatedArchivesText, value);
+    }
+
+    public string EstimatedTimeText
+    {
+        get => _estimatedTimeText;
+        private set => SetProperty(ref _estimatedTimeText, value);
+    }
+
+    public string WorkspaceText
+    {
+        get => _workspaceText;
+        private set => SetProperty(ref _workspaceText, value);
+    }
+
+    public string? PreviewManifestPath
+    {
+        get => _previewManifestPath;
+        private set
+        {
+            if (!SetProperty(ref _previewManifestPath, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(HasPreviewGallery));
+            OnPropertyChanged(nameof(PreviewStateText));
+            RefreshCommands();
+        }
+    }
+
+    public bool HasPreviewGallery =>
+        !string.IsNullOrWhiteSpace(PreviewManifestPath) && File.Exists(PreviewManifestPath);
+
+    public string PreviewStateText => HasPreviewGallery
+        ? "Before/after previews ready for review"
+        : "Available after a successful staged build";
+
+    private void Browse()
+    {
+        string? selectedPath = _folderPicker.PickFolder(InstallPath);
+        if (selectedPath is null)
+        {
+            return;
+        }
+
+        InstallPath = selectedPath;
+        AddLog("INFO", $"Selected client directory: {selectedPath}");
+        StatusText = "Directory selected • ready for read-only analysis";
+    }
+
+    private async Task AnalyzeAsync(CancellationToken cancellationToken)
+    {
+        BeginOperation("ANALYZE", "Reading archive and loose-texture inventory");
+        AddLog("SCAN", "Started read-only client analysis.");
+
+        try
+        {
+            var progress = new Progress<ProgressUpdate>(HandleProgress);
+            ScanSummary summary = await _workflow.AnalyzeAsync(InstallPath, progress, cancellationToken);
+
+            _scanSummary = summary;
+            Zones.Clear();
+            foreach (string zone in summary.Zones)
+            {
+                Zones.Add(zone);
+            }
+
+            // Leave the quick selector empty until the user intentionally chooses
+            // a zone. Selecting one will switch the asset scope automatically.
+            SelectedZone = null;
+            HasAnalysis = true;
+            HasManagedBackup = _workflow.HasRestorableBackup(InstallPath);
+            HasStagedPack = _workflow.HasStagedPack(InstallPath);
+            await RefreshInstallHealthAsync(cancellationToken, fast: true).ConfigureAwait(true);
+            OnPropertyChanged(nameof(ArchiveCountText));
+            OnPropertyChanged(nameof(PackedTextureCountText));
+            OnPropertyChanged(nameof(LooseTextureCountText));
+            OnPropertyChanged(nameof(SourceFootprintText));
+            UpdateEstimate();
+
+            AddLog("DONE", $"Analysis complete: {summary.ArchiveCount:N0} archives, {summary.LooseTextureCount:N0} loose textures, {summary.Zones.Count:N0} likely zones.");
+            foreach (string warning in summary.Warnings)
+            {
+                AddLog("WARN", warning);
+            }
+
+            StatusText = "Analysis complete • review scope and output estimate";
+            CurrentStage = "ANALYZED";
+            CurrentItem = "Ready to build a staged pack";
+        }
+        catch (OperationCanceledException)
+        {
+            AddLog("WARN", "Analysis canceled. No files were changed.");
+            StatusText = "Analysis canceled";
+            CurrentStage = "CANCELED";
+            throw;
+        }
+        catch (Exception exception)
+        {
+            AddLog("ERROR", exception.Message);
+            StatusText = "Analysis failed • see activity log";
+            CurrentStage = "ERROR";
+        }
+        finally
+        {
+            EndOperation();
+        }
+    }
+
+    private async Task BuildAsync(CancellationToken cancellationToken)
+    {
+        const string operation = "STAGED BUILD";
+        BeginOperation(operation, "Preparing immutable staged output");
+        AddLog("SAFE", "Started staged-pack workflow. The live client remains immutable.");
+
+        string? previewToOpenAfterBuild = null;
+
+        try
+        {
+            var options = new UpscaleOptions(
+                SelectedPresetOption.Value,
+                SelectedScopeOption.Value,
+                SelectedMaximumDimension,
+                GenerateMipMaps,
+                InstallAfterBuild: false,
+                IsSelectedZoneScope ? SelectedZone : null);
+
+            TexturePackBuildResult result = await _workflow.BuildAsync(
+                InstallPath,
+                options,
+                new Progress<ProgressUpdate>(HandleProgress),
+                cancellationToken);
+
+            AddLog("DONE", $"Staged {result.Report.Statistics.EnhancedTextures:N0} enhanced textures without changing the live client.");
+            foreach (string warning in result.Report.Statistics.Warnings.Take(12))
+            {
+                AddLog("WARN", warning);
+            }
+            StatusText = "Staged pack complete • review previews, then install once";
+            WorkspaceText = _workflow.LastBuildDirectory is null
+                ? "Managed workspace ready"
+                : $"Output: {_workflow.LastBuildDirectory}";
+            PreviewManifestPath = !string.IsNullOrWhiteSpace(result.PreviewManifestPath)
+                                  && File.Exists(result.PreviewManifestPath)
+                ? Path.GetFullPath(result.PreviewManifestPath)
+                : null;
+            if (HasPreviewGallery)
+            {
+                AddLog("PREVIEW", "Before/after review images are ready in the staged workspace.");
+                previewToOpenAfterBuild = PreviewManifestPath;
+            }
+            else
+            {
+                AddLog("WARN", "This build did not produce preview images. The staged texture pack is still available.");
+            }
+
+            HasManagedBackup = _workflow.HasRestorableBackup(InstallPath);
+            HasStagedPack = _workflow.HasStagedPack(InstallPath);
+            await RefreshInstallHealthAsync(cancellationToken).ConfigureAwait(true);
+            AddLog("NEXT", "Review the previews, close EverQuest and LaunchPad, then install the staged pack. Installation reuses this output without rerunning AI.");
+        }
+        catch (OperationCanceledException)
+        {
+            AddLog("WARN", $"{operation} canceled. No live files were changed.");
+            StatusText = "Operation canceled safely";
+            throw;
+        }
+        catch (InstallTransactionException exception)
+        {
+            AddLog("ERROR", exception.Message);
+            foreach (Exception rollbackFailure in exception.RollbackFailures.Take(5))
+            {
+                AddLog("ERROR", $"Recovery detail: {rollbackFailure.Message}");
+            }
+
+            HasManagedBackup = _workflow.HasRestorableBackup(InstallPath);
+            StatusText = "Recovery required • do not launch EverQuest • use Restore";
+            CurrentStage = "RECOVERY REQUIRED";
+            CurrentItem = "A verified backup is available; review the activity log";
+            WorkspaceText = "Install did not complete cleanly • managed backup retained";
+        }
+        catch (Exception exception)
+        {
+            AddLog("ERROR", exception.Message);
+            StatusText = "Build failed • the live client remains unchanged";
+        }
+        finally
+        {
+            EndOperation();
+            if (previewToOpenAfterBuild is not null)
+            {
+                OpenPreviewGallery(previewToOpenAfterBuild);
+            }
+        }
+    }
+
+    private async Task InstallLatestPackAsync(CancellationToken cancellationToken)
+    {
+        if (!_dialogs.ConfirmApplyLatest())
+        {
+            AddLog("INFO", "Install Staged Pack canceled at the safety gate.");
+            return;
+        }
+
+        BeginOperation("INSTALL PACK", "Verifying the staged pack and original client files");
+        try
+        {
+            await RefreshInstallHealthAsync(cancellationToken).ConfigureAwait(true);
+            if (_installHealth?.State == InstallHealthState.RevertedToOriginal)
+            {
+                AddLog("REPAIR", "LaunchPad restored the previous pack. Reusing the verified staged output without rerunning the AI upscaler.");
+            }
+
+            await _workflow.ApplyLatestStagedPackAsync(
+                InstallPath,
+                new Progress<ProgressUpdate>(HandleProgress),
+                cancellationToken).ConfigureAwait(true);
+            await RefreshInstallHealthAsync(cancellationToken).ConfigureAwait(true);
+            if (_installHealth?.State != InstallHealthState.EnhancedActive)
+            {
+                throw new InvalidOperationException(
+                    "The apply transaction completed, but the live enhanced hashes could not be verified.");
+            }
+
+            HasManagedBackup = _workflow.HasRestorableBackup(InstallPath);
+            try
+            {
+                string shortcutPath = _enhancedLauncher.CreateDesktopShortcut(InstallPath);
+                AddLog("SHORTCUT", $"Created the no-patch play shortcut: {shortcutPath}");
+            }
+            catch (Exception shortcutFailure)
+            {
+                AddLog("WARN", $"The pack is installed, but the desktop shortcut could not be created: {shortcutFailure.Message}");
+            }
+
+            AddLog("DONE", "Enhanced archives are active and SHA-256 verified. The AI upscaler does not need to run again.");
+            AddLog("SAFE", "For normal play, use Play Enhanced EQ or the SpinTexture desktop shortcut. LaunchPad is only needed for real game updates.");
+            StatusText = "Enhanced textures ACTIVE • use the SpinTexture play shortcut";
+            CurrentStage = "INSTALLED";
+            CurrentItem = "One-time install complete • LaunchPad bypass shortcut ready";
+        }
+        catch (OperationCanceledException)
+        {
+            AddLog("WARN", "Install Staged Pack canceled safely.");
+            StatusText = "Install canceled safely";
+            throw;
+        }
+        catch (Exception exception)
+        {
+            AddLog("ERROR", exception.Message);
+            StatusText = "Pack not installed • close EverQuest and LaunchPad, then try again";
+            CurrentStage = "NOT APPLIED";
+            CurrentItem = "No unverified pack will be reported as active";
+            await RefreshInstallHealthAsync(CancellationToken.None).ConfigureAwait(true);
+        }
+        finally
+        {
+            EndOperation();
+        }
+    }
+
+    private async Task PlayEnhancedAsync(CancellationToken cancellationToken)
+    {
+        BeginOperation("VERIFY + PLAY", "Verifying that the enhanced archives are still active");
+        try
+        {
+            await RefreshInstallHealthAsync(cancellationToken, fast: true).ConfigureAwait(true);
+            if (_installHealth?.State != InstallHealthState.EnhancedActive)
+            {
+                throw new InvalidOperationException(_installHealth?.State switch
+                {
+                    InstallHealthState.RevertedToOriginal =>
+                        "LaunchPad restored the original archives. Close LaunchPad and reinstall the staged pack; the AI upscaler will not run again.",
+                    InstallHealthState.MixedOrModified when _installHealth.Entries.Any(entry =>
+                        entry.State == InstalledArtifactHealthState.ModifiedOrMissing) =>
+                        "Game archives changed outside SpinTexture. Finish the LaunchPad update, then Analyze and rebuild against the patched client.",
+                    InstallHealthState.MixedOrModified =>
+                        "The pack is partly enhanced and partly original. Use SpinTexture's verified Restore action before installing again.",
+                    InstallHealthState.RecoveryRequired =>
+                        "The previous install needs recovery. Use Restore before playing.",
+                    _ =>
+                        "No active enhanced pack was found. Install the staged pack before playing."
+                });
+            }
+
+            await _enhancedLauncher.LaunchAsync(InstallPath, cancellationToken).ConfigureAwait(true);
+            AddLog("PLAY", "Started eqgame.exe with the no-patch option. The verified enhanced archives remain installed.");
+            StatusText = "EverQuest started with SpinTexture enhancements active";
+            CurrentStage = "PLAYING";
+            CurrentItem = "LaunchPad was not started for this session; Direct Play does not check for updates";
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            AddLog("ERROR", exception.Message);
+            StatusText = "Enhanced client was not started • see activity log";
+            CurrentStage = "NOT STARTED";
+        }
+        finally
+        {
+            EndOperation();
+        }
+    }
+
+    private async Task RestoreAsync(CancellationToken cancellationToken)
+    {
+        if (!_dialogs.ConfirmRestore())
+        {
+            AddLog("INFO", "Restore canceled at the confirmation gate.");
+            return;
+        }
+
+        BeginOperation("RESTORE", "Verifying managed backup");
+        try
+        {
+            await _workflow.RestoreAsync(InstallPath, new Progress<ProgressUpdate>(HandleProgress), cancellationToken);
+            HasManagedBackup = _workflow.HasRestorableBackup(InstallPath);
+            await RefreshInstallHealthAsync(cancellationToken).ConfigureAwait(true);
+            AddLog("DONE", "Original EverQuest archives restored and verified.");
+            StatusText = "Restore complete • original files verified";
+            CurrentStage = "RESTORED";
+            CurrentItem = "Vanilla client files are active";
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            AddLog("ERROR", exception.Message);
+        }
+        finally
+        {
+            EndOperation();
+        }
+    }
+
+    private void BeginOperation(string stage, string message)
+    {
+        IsBusy = true;
+        CurrentStage = stage;
+        CurrentItem = message;
+        ProgressValue = 0;
+        StatusText = message;
+    }
+
+    private void EndOperation()
+    {
+        IsBusy = false;
+        RefreshCommands();
+    }
+
+    private void HandleProgress(ProgressUpdate update)
+    {
+        CurrentStage = update.Stage.ToUpperInvariant();
+        CurrentItem = update.CurrentItem ?? update.Message;
+        ProgressValue = update.Percent;
+        StatusText = update.Message;
+        AddLog("STEP", $"{update.Stage}: {update.Message}");
+    }
+
+    private void Cancel()
+    {
+        AnalyzeCommand.Cancel();
+        BuildStagedPackCommand.Cancel();
+        InstallLatestPackCommand.Cancel();
+        PlayEnhancedCommand.Cancel();
+        RestoreCommand.Cancel();
+        StatusText = "Canceling safely…";
+    }
+
+    private bool CanAnalyze() => !IsBusy && Directory.Exists(InstallPath);
+
+    private bool CanBuildStaged() =>
+        !IsBusy && HasAnalysis && (!IsSelectedZoneScope || !string.IsNullOrWhiteSpace(SelectedZone));
+
+    private bool CanInstallLatestPack() =>
+        !IsBusy && HasStagedPack && IsLegalAcknowledged && Directory.Exists(InstallPath);
+
+    private bool CanPlayEnhanced() =>
+        !IsBusy
+        && _installHealth?.State == InstallHealthState.EnhancedActive
+        && Directory.Exists(InstallPath);
+
+    private bool CanOpenPreviewGallery() => !IsBusy && HasPreviewGallery;
+
+    private bool CanRestore() => !IsBusy && HasManagedBackup && Directory.Exists(InstallPath);
+
+    private void OpenPreviewGallery(string? manifestPath = null)
+    {
+        string? path = manifestPath ?? PreviewManifestPath;
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            PreviewManifestPath = null;
+            AddLog("WARN", "The preview manifest is no longer available. Build a new staged pack to regenerate it.");
+            return;
+        }
+
+        PreviewGalleryRequested?.Invoke(path);
+    }
+
+    private async Task RefreshInstallHealthAsync(
+        CancellationToken cancellationToken,
+        bool fast = false)
+    {
+        InstallHealthState? previousState = _installHealth?.State;
+        try
+        {
+            _installHealth = await (fast
+                    ? _workflow.AuditInstallHealthFastAsync(InstallPath, cancellationToken)
+                    : _workflow.AuditInstallHealthAsync(InstallPath, cancellationToken))
+                .ConfigureAwait(true);
+            InstallHealthText = _installHealth.State switch
+            {
+                InstallHealthState.None => HasStagedPack
+                    ? "Staged pack ready • not installed yet"
+                    : "No enhanced pack is active",
+                InstallHealthState.EnhancedActive => _installHealth.Entries.All(entry => entry.ObservedSha256 is not null)
+                    ? $"Enhanced pack ACTIVE • {_installHealth.Entries.Count:N0} archive(s) hash-verified"
+                    : $"Enhanced pack ACTIVE • {_installHealth.Entries.Count:N0} archive(s) fast-checked",
+                InstallHealthState.RevertedToOriginal =>
+                    $"LaunchPad restored {_installHealth.Entries.Count:N0} archive(s) • reinstall staged pack (no AI rebuild)",
+                InstallHealthState.MixedOrModified when _installHealth.Entries.Any(entry =>
+                    entry.State == InstalledArtifactHealthState.ModifiedOrMissing) =>
+                    "Game archives changed outside SpinTexture - finish updating, then Analyze and rebuild",
+                InstallHealthState.MixedOrModified =>
+                    "Pack is partly enhanced and partly original - use verified Restore",
+                InstallHealthState.RecoveryRequired =>
+                    "Install recovery is required before playing",
+                _ => _installHealth.Summary
+            };
+
+            if (previousState != _installHealth.State
+                && _installHealth.State == InstallHealthState.RevertedToOriginal)
+            {
+                AddLog(
+                    "WARN",
+                    $"LaunchPad replaced {_installHealth.Entries.Count:N0} enhanced archive(s) with originals. The staged pack is still safe and can be reapplied without rebuilding.");
+            }
+
+            RefreshCommands();
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            _installHealth = null;
+            InstallHealthText = "Install health could not be verified";
+            AddLog("WARN", $"Could not verify the installed pack: {exception.Message}");
+            RefreshCommands();
+        }
+    }
+
+    private void ClearAnalysis()
+    {
+        _scanSummary = null;
+        Zones.Clear();
+        _selectedZone = null;
+        HasAnalysis = false;
+        HasManagedBackup = false;
+        HasStagedPack = false;
+        _installHealth = null;
+        InstallHealthText = "No enhanced pack is active";
+        PreviewManifestPath = null;
+        EstimatedOutputText = "Analyze to estimate";
+        EstimatedArchivesText = "—";
+        EstimatedTimeText = "—";
+        WorkspaceText = "Staged workspace • live client remains unchanged";
+        OnPropertyChanged(nameof(SelectedZone));
+        OnPropertyChanged(nameof(IsZoneSelectionEnabled));
+        OnPropertyChanged(nameof(ZoneSelectionStatusText));
+        OnPropertyChanged(nameof(ArchiveCountText));
+        OnPropertyChanged(nameof(PackedTextureCountText));
+        OnPropertyChanged(nameof(LooseTextureCountText));
+        OnPropertyChanged(nameof(SourceFootprintText));
+    }
+
+    private void UpdateEstimate()
+    {
+        if (_scanSummary is null)
+        {
+            return;
+        }
+
+        var estimateOptions = new UpscaleOptions(
+            SelectedPresetOption.Value,
+            SelectedScopeOption.Value,
+            SelectedMaximumDimension,
+            GenerateMipMaps,
+            InstallAfterBuild: false,
+            IsSelectedZoneScope ? SelectedZone : null);
+        if (TryUpdateEstimateFromHistory(estimateOptions))
+        {
+            return;
+        }
+
+        double byteScopeFactor = SelectedScopeOption.Value switch
+        {
+            AssetScope.SelectedZone => 0.018,
+            AssetScope.WorldOnly => 0.34,
+            AssetScope.CharactersAndEquipmentOnly => 0.60,
+            AssetScope.WorldCharactersAndEquipment => 0.78,
+            AssetScope.AllSafeTextures => 1.0,
+            _ => 0.34
+        };
+
+        double presetFactor = SelectedPresetOption.Value switch
+        {
+            TexturePreset.Faithful => 1.35,
+            TexturePreset.ClassicHd => 1.55,
+            TexturePreset.MaximumDetail => 2.55,
+            _ => 1.55
+        };
+
+        double capFactor = SelectedMaximumDimension switch
+        {
+            <= 1024 => 0.58,
+            <= 2048 => 1.0,
+            _ => 2.85
+        };
+
+        double mipFactor = GenerateMipMaps ? 1.18 : 1.0;
+        long estimatedBytes = (long)Math.Max(
+            24 * 1024 * 1024,
+            _scanSummary.SourceBytes * byteScopeFactor * presetFactor * capFactor * mipFactor);
+        int archiveCount;
+        try
+        {
+            archiveCount = Math.Max(
+                1,
+                TexturePackWorkflow.ResolveSelectedArchives(
+                    InstallPath,
+                    estimateOptions).Count);
+        }
+        catch (Exception exception) when (exception is
+            IOException
+            or UnauthorizedAccessException
+            or InvalidDataException
+            or ArgumentException
+            or NotSupportedException)
+        {
+            archiveCount = Math.Max(
+                1,
+                (int)Math.Round(_scanSummary.ArchiveCount * byteScopeFactor));
+        }
+        double minutesPerArchive = SelectedPresetOption.Value switch
+        {
+            TexturePreset.Faithful => 0.22,
+            TexturePreset.ClassicHd => 0.18,
+            TexturePreset.MaximumDetail => 0.51,
+            _ => 0.18
+        };
+        double minutes = Math.Max(1, archiveCount * minutesPerArchive);
+
+        EstimatedOutputText = $"≈ {FormatBytes(estimatedBytes)}";
+        EstimatedArchivesText = $"≈ {archiveCount:N0} archives";
+        EstimatedTimeText = minutes < 60
+            ? $"~{Math.Ceiling(minutes):N0}–{Math.Ceiling(minutes * 1.8):N0} min"
+            : $"~{minutes / 60:0.0}–{minutes * 1.8 / 60:0.0} hr";
+    }
+
+    private bool TryUpdateEstimateFromHistory(UpscaleOptions options)
+    {
+        HistoricalBuildEstimate? estimate;
+        try
+        {
+            estimate = StagedBuildEstimateHistory.FindLatest(
+                WorkspaceLocator.ForInstall(InstallPath),
+                options);
+        }
+        catch (Exception exception) when (exception is
+            IOException
+            or UnauthorizedAccessException
+            or ArgumentException
+            or NotSupportedException)
+        {
+            return false;
+        }
+
+        if (estimate is null)
+        {
+            return false;
+        }
+
+        EstimatedOutputText = $"~ {FormatBytes(estimate.StagedBytes)} (prior build)";
+        EstimatedArchivesText = $"{estimate.SelectedArchives:N0} archives (prior build)";
+
+        double minutes;
+        string basis;
+        if (estimate.Duration is { } measuredDuration)
+        {
+            minutes = Math.Max(1, measuredDuration.TotalMinutes);
+            basis = "measured";
+        }
+        else
+        {
+            double minutesPerArchive = options.Preset switch
+            {
+                TexturePreset.Faithful => 0.22,
+                TexturePreset.ClassicHd => 0.18,
+                TexturePreset.MaximumDetail => 0.51,
+                _ => 0.18
+            };
+            minutes = Math.Max(1, estimate.SelectedArchives * minutesPerArchive);
+            basis = "prior pack size";
+        }
+
+        double lowerMinutes = minutes * 0.9;
+        double upperMinutes = minutes * 1.2;
+        EstimatedTimeText = upperMinutes < 60
+            ? $"~{Math.Ceiling(lowerMinutes):N0}-{Math.Ceiling(upperMinutes):N0} min ({basis})"
+            : $"~{lowerMinutes / 60:0.0}-{upperMinutes / 60:0.0} hr ({basis})";
+        return true;
+    }
+
+    private void AddLog(string level, string message)
+    {
+        LogEntries.Add(new LogEntryViewModel(
+            DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture),
+            level,
+            message));
+
+        while (LogEntries.Count > 250)
+        {
+            LogEntries.RemoveAt(0);
+        }
+    }
+
+    private void RefreshCommands()
+    {
+        BrowseCommand.RaiseCanExecuteChanged();
+        AnalyzeCommand.RaiseCanExecuteChanged();
+        BuildStagedPackCommand.RaiseCanExecuteChanged();
+        InstallLatestPackCommand.RaiseCanExecuteChanged();
+        PlayEnhancedCommand.RaiseCanExecuteChanged();
+        OpenPreviewGalleryCommand.RaiseCanExecuteChanged();
+        OpenPackLibraryCommand.RaiseCanExecuteChanged();
+        OpenNativeGraphicsCommand.RaiseCanExecuteChanged();
+        RestoreCommand.RaiseCanExecuteChanged();
+        CancelCommand.RaiseCanExecuteChanged();
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        double value = Math.Max(0, bytes);
+        int unit = 0;
+        while (value >= 1024 && unit < units.Length - 1)
+        {
+            value /= 1024;
+            unit++;
+        }
+
+        return $"{value:0.#} {units[unit]}";
+    }
+
+    public void Dispose()
+    {
+        AnalyzeCommand.Dispose();
+        BuildStagedPackCommand.Dispose();
+        InstallLatestPackCommand.Dispose();
+        PlayEnhancedCommand.Dispose();
+        RestoreCommand.Dispose();
+    }
+}

@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (for example 1.0.0 or v1.0.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: spintexture-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+      SPINTEXTURE_SKIP_GPU_SMOKE: "1"
+      INPUT_VERSION: ${{ inputs.version }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release source and version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -ne $env:DEFAULT_BRANCH) {
+            throw "Run public releases from the default branch '$env:DEFAULT_BRANCH', not '$env:GITHUB_REF_NAME'."
+          }
+
+          $version = $env:INPUT_VERSION.Trim()
+          if ($version.StartsWith('v', [StringComparison]::OrdinalIgnoreCase)) {
+            $version = $version.Substring(1)
+          }
+
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') {
+            throw "Version must look like 1.2.3 or 1.2.3-preview.1."
+          }
+
+          $tag = "v$version"
+          git fetch --tags --force
+          if (git tag --list $tag) {
+            throw "Tag $tag already exists. Enter a new version."
+          }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "archive=SpinTexture-$version-win-x64.zip" >> $env:GITHUB_OUTPUT
+
+      - name: Install .NET 9 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Build, test, and package
+        shell: pwsh
+        run: ./build.ps1 -Configuration Release -Version '${{ steps.version.outputs.version }}'
+
+      - name: Verify release payload
+        shell: pwsh
+        env:
+          RELEASE_ARCHIVE: ${{ steps.version.outputs.archive }}
+        run: |
+          $zip = Join-Path 'publish' $env:RELEASE_ARCHIVE
+          $checksum = "$zip.sha256.txt"
+          if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) {
+            throw "Missing release archive: $zip"
+          }
+          if (-not (Test-Path -LiteralPath $checksum -PathType Leaf)) {
+            throw "Missing release checksum: $checksum"
+          }
+          $expected = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
+          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          if (-not $actual.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Release checksum verification failed."
+          }
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpinTexture-${{ steps.version.outputs.version }}-win-x64
+          path: |
+            publish/${{ steps.version.outputs.archive }}
+            publish/${{ steps.version.outputs.archive }}.sha256.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_ARCHIVE: ${{ steps.version.outputs.archive }}
+        run: |
+          gh release create $env:RELEASE_TAG `
+            (Join-Path 'publish' $env:RELEASE_ARCHIVE) `
+            (Join-Path 'publish' "$env:RELEASE_ARCHIVE.sha256.txt") `
+            --target $env:GITHUB_SHA `
+            --title "SpinTexture $env:RELEASE_VERSION" `
+            --generate-notes

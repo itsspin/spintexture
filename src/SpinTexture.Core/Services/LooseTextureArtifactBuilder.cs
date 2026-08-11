@@ -1,0 +1,329 @@
+using SpinTexture.Core.Models;
+using SpinTexture.Core.Pipeline;
+using SpinTexture.Core.Textures;
+using SpinTexture.Core.Tooling;
+
+namespace SpinTexture.Core.Services;
+
+internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder
+{
+    private static readonly HashSet<string> SafeLegacyDdsFormats = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "BC1_UNORM", "BC2_UNORM", "BC3_UNORM",
+        "B8G8R8A8_UNORM", "B8G8R8X8_UNORM"
+    };
+
+    private readonly NativeTextureProcessor processor;
+    private readonly TextureBuildCounter counter;
+    private readonly TexturePreviewCollector? previewCollector;
+    private readonly TextureHeaderSniffer sniffer = new();
+    private readonly TextureSemanticClassifier classifier = new();
+    private readonly Func<
+        NativeTextureProcessRequest,
+        CancellationToken,
+        Task<NativeTextureProcessResult>> processTexture;
+
+    public LooseTextureArtifactBuilder(
+        NativeTextureProcessor processor,
+        TextureBuildCounter counter,
+        TexturePreviewCollector? previewCollector = null,
+        Func<
+            NativeTextureProcessRequest,
+            CancellationToken,
+            Task<NativeTextureProcessResult>>? processTexture = null)
+    {
+        this.processor = processor;
+        this.counter = counter;
+        this.previewCollector = previewCollector;
+        this.processTexture = processTexture
+            ?? ((request, cancellationToken) => processor.ProcessAsync(
+                request,
+                cancellationToken: cancellationToken));
+    }
+
+    public async Task BuildAsync(
+        StagedArtifactBuildContext context,
+        CancellationToken cancellationToken = default)
+    {
+        var metadata = await sniffer.ReadFileAsync(context.SourcePath, cancellationToken).ConfigureAwait(false);
+        if (metadata is null)
+        {
+            throw new InvalidDataException($"Loose texture is not supported: {context.RelativeInstallPath}");
+        }
+
+        counter.Discover(new FileInfo(context.SourcePath).Length);
+        byte[]? sourcePayload = null;
+        var fullyTransparentControl = false;
+        if (metadata.HasAlpha && metadata.FileFormat == TextureFileFormat.Dds)
+        {
+            sourcePayload = await File.ReadAllBytesAsync(context.SourcePath, cancellationToken)
+                .ConfigureAwait(false);
+            fullyTransparentControl = TextureAlphaInspector.IsKnownFullyTransparent(
+                sourcePayload,
+                metadata);
+        }
+
+        var classification = classifier.Classify(context.RelativeInstallPath, metadata);
+        var unsafeIndexedBitmap = metadata.FileFormat == TextureFileFormat.Bmp
+            && metadata.BitsPerPixel == 8
+            && !LegacyIndexedBmp.CanEncode(
+                sourcePayload ??= await File.ReadAllBytesAsync(
+                        context.SourcePath,
+                        cancellationToken)
+                    .ConfigureAwait(false));
+        if (!metadata.IsSimpleTwoDimensionalTexture
+            || metadata.Width < 8
+            || metadata.Height < 8
+            || Math.Max(metadata.Width, metadata.Height) >= context.Options.MaximumDimension
+            || !HasSafeContainer(metadata)
+            || fullyTransparentControl
+            || unsafeIndexedBitmap
+            || !classification.CanUseColorUpscaler
+            || classification.Kind is not (TextureKind.Color or TextureKind.Cutout))
+        {
+            counter.Preserve($"Protected loose {classification.Kind.ToString().ToLowerInvariant()} texture");
+            await CopyAsync(context.SourcePath, context.DestinationPath, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var textureOptions = metadata.FileFormat == TextureFileFormat.Bmp
+            && metadata.BitsPerPixel == 8
+            ? context.Options with { Preset = TexturePreset.ClassicHd }
+            : context.Options;
+        if (!(metadata.FileFormat == TextureFileFormat.Bmp
+                && metadata.BitsPerPixel == 8)
+            && context.Options.Preset != TexturePreset.Faithful
+            && (PfsTextureArchiveBuilder.ShouldUseConservativeColorModel(context.RelativeInstallPath)
+                || Math.Max(metadata.Width, metadata.Height) < 128))
+        {
+            textureOptions = context.Options with { Preset = TexturePreset.Faithful };
+        }
+
+        try
+        {
+            var result = await processTexture(
+                new NativeTextureProcessRequest(
+                    context.SourcePath,
+                    context.DestinationPath,
+                    context.WorkingDirectory,
+                    metadata,
+                    classification,
+                    textureOptions,
+                    // Loose files do not carry enough container context to prove
+                    // that opposite-edge sampling is intended.
+                    WrapEdges: false),
+                cancellationToken).ConfigureAwait(false);
+            if (result.ProcessingRoute.Contains("fallback", StringComparison.OrdinalIgnoreCase))
+            {
+                counter.Warn(
+                    $"{context.RelativeInstallPath} used the legacy Real-ESRGAN fallback because the game-texture model was unavailable.");
+            }
+
+            var output = await sniffer.ReadFileAsync(context.DestinationPath, cancellationToken).ConfigureAwait(false);
+            var expectedMipCount = GetValidatedResultMipCount(
+                context.RelativeInstallPath,
+                metadata.FileFormat,
+                result,
+                context.Options.GenerateMipMaps);
+            if (output is null
+                || output.FileFormat != metadata.FileFormat
+                || output.Width != result.Dimensions.OutputWidth
+                || output.Height != result.Dimensions.OutputHeight
+                || (metadata.FileFormat == TextureFileFormat.Dds
+                    && (!string.Equals(output.TexconvFormat, metadata.TexconvFormat, StringComparison.OrdinalIgnoreCase)
+                        || output.UsesDx10Header
+                        || output.MipCount != expectedMipCount)))
+            {
+                throw new InvalidDataException(
+                    $"Enhanced loose texture failed validation: {context.RelativeInstallPath}");
+            }
+
+            await TryCreatePreviewAsync(
+                context,
+                metadata,
+                result.Dimensions,
+                cancellationToken).ConfigureAwait(false);
+            counter.Enhanced(new FileInfo(context.DestinationPath).Length);
+        }
+        catch (Exception exception) when (exception is NativeProcessException
+                                               or InvalidDataException
+                                               or NotSupportedException)
+        {
+            counter.Preserve("Loose texture processing failed safely");
+            counter.Warn(
+                $"{context.RelativeInstallPath} was kept original because its enhanced output failed validation: "
+                + exception.Message);
+            TryDelete(context.DestinationPath);
+            await CopyAsync(context.SourcePath, context.DestinationPath, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    public static async Task<bool> IsCandidateAsync(
+        string path,
+        int maximumDimension,
+        CancellationToken cancellationToken)
+    {
+        var metadata = await new TextureHeaderSniffer().ReadFileAsync(path, cancellationToken).ConfigureAwait(false);
+        if (metadata is null
+            || !metadata.IsSimpleTwoDimensionalTexture
+            || metadata.Width < 8
+            || metadata.Height < 8
+            || Math.Max(metadata.Width, metadata.Height) >= maximumDimension
+            || !HasSafeContainer(metadata))
+        {
+            return false;
+        }
+
+        if (metadata.FileFormat == TextureFileFormat.Bmp
+            && metadata.BitsPerPixel == 8
+            && !LegacyIndexedBmp.CanEncode(
+                await File.ReadAllBytesAsync(path, cancellationToken)
+                    .ConfigureAwait(false)))
+        {
+            return false;
+        }
+
+        if (metadata.HasAlpha
+            && metadata.FileFormat == TextureFileFormat.Dds
+            && TextureAlphaInspector.IsKnownFullyTransparent(
+                await File.ReadAllBytesAsync(path, cancellationToken)
+                    .ConfigureAwait(false),
+                metadata))
+        {
+            return false;
+        }
+
+        var classification = new TextureSemanticClassifier().Classify(Path.GetFileName(path), metadata);
+        return classification.CanUseColorUpscaler
+            && classification.Kind is TextureKind.Color or TextureKind.Cutout;
+    }
+
+    private static bool HasSafeContainer(TextureMetadata metadata) =>
+        metadata.FileFormat switch
+        {
+            TextureFileFormat.Dds => !metadata.UsesDx10Header
+                && metadata.TexconvFormat is not null
+                && SafeLegacyDdsFormats.Contains(metadata.TexconvFormat),
+            TextureFileFormat.Bmp => metadata.BitsPerPixel is 8 or 32
+                && !metadata.IsCompressed,
+            TextureFileFormat.Tga => metadata.BitsPerPixel == 32 && !metadata.IsCompressed,
+            _ => false
+        };
+
+    private static int GetValidatedResultMipCount(
+        string logicalName,
+        TextureFileFormat format,
+        NativeTextureProcessResult result,
+        bool generateMipMaps)
+    {
+        var expected = format == TextureFileFormat.Dds
+            ? TextureMipPolicy.Calculate(
+                result.Dimensions.OutputWidth,
+                result.Dimensions.OutputHeight,
+                generateMipMaps,
+                result.UsedCutoutMipFloor)
+            : 1;
+        if (result.ExpectedMipCount != expected)
+        {
+            throw new InvalidDataException(
+                $"Native processing reported {result.ExpectedMipCount} mip levels for {logicalName}; "
+                + $"the selected mip policy requires {expected}.");
+        }
+
+        return expected;
+    }
+
+    private static async Task CopyAsync(
+        string sourcePath,
+        string destinationPath,
+        CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(destinationPath))!);
+        await using var source = new FileStream(
+            sourcePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            128 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var destination = new FileStream(
+            destinationPath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None,
+            128 * 1024,
+            FileOptions.Asynchronous | FileOptions.WriteThrough);
+        await source.CopyToAsync(destination, cancellationToken).ConfigureAwait(false);
+        await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+        destination.Flush(flushToDisk: true);
+    }
+
+    private async Task TryCreatePreviewAsync(
+        StagedArtifactBuildContext context,
+        TextureMetadata originalMetadata,
+        UpscaleDimensions enhancedDimensions,
+        CancellationToken cancellationToken)
+    {
+        var relativeDirectory = Path.GetDirectoryName(context.RelativeInstallPath);
+        if (previewCollector is null
+            || !previewCollector.TryReserve(
+                string.IsNullOrWhiteSpace(relativeDirectory) ? "loose-textures" : relativeDirectory,
+                Path.GetFileName(context.RelativeInstallPath),
+                out var previewIndex))
+        {
+            return;
+        }
+
+        var originalImagePath = Path.Combine(context.PreviewDirectory, $"{previewIndex:D3}-before.png");
+        var enhancedImagePath = Path.Combine(context.PreviewDirectory, $"{previewIndex:D3}-after.png");
+        try
+        {
+            Directory.CreateDirectory(context.PreviewDirectory);
+            await processor.CreatePngPreviewAsync(
+                context.SourcePath,
+                originalImagePath,
+                enhancedDimensions.OutputWidth,
+                enhancedDimensions.OutputHeight,
+                nearestNeighbor: false,
+                cancellationToken).ConfigureAwait(false);
+            await processor.CreatePngPreviewAsync(
+                context.DestinationPath,
+                enhancedImagePath,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            previewCollector.Complete(previewIndex, new TexturePreviewEntry(
+                context.RelativeInstallPath,
+                Path.GetFileName(context.RelativeInstallPath),
+                originalImagePath,
+                enhancedImagePath,
+                originalMetadata.Width,
+                originalMetadata.Height,
+                enhancedDimensions.OutputWidth,
+                enhancedDimensions.OutputHeight));
+        }
+        catch (Exception exception) when (exception is IOException
+                                           or UnauthorizedAccessException
+                                           or InvalidDataException
+                                           or NativeProcessException)
+        {
+            TryDelete(originalImagePath);
+            TryDelete(enhancedImagePath);
+            previewCollector.Abandon(previewIndex);
+            counter.Warn($"Could not create the preview for {context.RelativeInstallPath}: {exception.Message}");
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // The enclosing staged-build cleanup owns any remaining partial preview.
+        }
+    }
+}
