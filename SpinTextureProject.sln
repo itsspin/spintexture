@@ -1,0 +1,31 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SpinTexture.Core", "src\SpinTexture.Core\SpinTexture.Core.csproj", "{122D5045-A716-450B-B09A-24BA70506022}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SpinTexture.App", "src\SpinTexture.App\SpinTexture.App.csproj", "{EC347EB1-D042-460B-8290-9CB29335737B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SpinTexture.SelfTest", "src\SpinTexture.SelfTest\SpinTexture.SelfTest.csproj", "{D8BA49CC-AAC9-4ED4-8CF1-1B4440D46444}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{122D5045-A716-450B-B09A-24BA70506022}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{122D5045-A716-450B-B09A-24BA70506022}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{122D5045-A716-450B-B09A-24BA70506022}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{122D5045-A716-450B-B09A-24BA70506022}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EC347EB1-D042-460B-8290-9CB29335737B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EC347EB1-D042-460B-8290-9CB29335737B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EC347EB1-D042-460B-8290-9CB29335737B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EC347EB1-D042-460B-8290-9CB29335737B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D8BA49CC-AAC9-4ED4-8CF1-1B4440D46444}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D8BA49CC-AAC9-4ED4-8CF1-1B4440D46444}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D8BA49CC-AAC9-4ED4-8CF1-1B4440D46444}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D8BA49CC-AAC9-4ED4-8CF1-1B4440D46444}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

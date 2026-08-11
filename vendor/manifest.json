@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "components": [
+    {
+      "name": "Microsoft DirectXTex texconv",
+      "version": "2026.5.8.1",
+      "source": "https://github.com/microsoft/DirectXTex/releases/tag/may2026",
+      "path": "texconv.exe",
+      "bytes": 966480,
+      "sha256": "DCFDEC10244E02CF5037FBA089C55FB7E1326B1C8181742D77D15FA5CB5EEF06",
+      "license": "MIT"
+    },
+    {
+      "name": "Real-ESRGAN ncnn Vulkan worker",
+      "version": "0.2.0 / 2022-04-24",
+      "source": "https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.5.0",
+      "path": "realesrgan/realesrgan-ncnn-vulkan.exe",
+      "bytes": 6161408,
+      "sha256": "07E49F7CBB4EDE01AE4DD4C399D3A7E5846E3D2085C3128EFF881E55CB7B1A0C",
+      "license": "MIT"
+    },
+    {
+      "name": "Microsoft Visual C++ OpenMP runtime",
+      "version": "14.x",
+      "source": "https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist",
+      "path": "realesrgan/vcomp140.dll",
+      "bytes": 182704,
+      "sha256": "8F72EF2E483465444B2059FC6744D6CB22CD8D8A27F6FA56BEFD2A42DCD0F78B",
+      "license": "Microsoft Visual C++ Redistributable runtime terms"
+    },
+    {
+      "name": "RealESRGAN x4plus native model",
+      "version": "0.2.5.0",
+      "source": "https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.5.0",
+      "path": "realesrgan/models/realesrgan-x4plus.bin",
+      "bytes": 33424520,
+      "sha256": "713EE713B0353AFAA27976F0563A64A5043BD70B9BD8936C2E26E25EBCDBCDDF",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "RealESRGAN x4plus native graph",
+      "version": "0.2.5.0",
+      "source": "https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.5.0",
+      "path": "realesrgan/models/realesrgan-x4plus.param",
+      "bytes": 116029,
+      "sha256": "35330ECECCEA33B6C397A72548E788D5D53BECEE4734C50B7FADA36E89F10A86",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "RealESRNet x4plus native model",
+      "version": "0.1.1",
+      "source": "https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.1.1",
+      "path": "realesrgan/models/realesrnet-x4plus.bin",
+      "bytes": 33424520,
+      "sha256": "26BCCFCC82D9E8260C0C6B0DFFB34AB297982740882D1F33C6D423F70B562C40",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "RealESRNet x4plus native graph",
+      "version": "0.1.1",
+      "source": "https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.1.1",
+      "path": "realesrgan/models/realesrnet-x4plus.param",
+      "bytes": 116029,
+      "sha256": "35330ECECCEA33B6C397A72548E788D5D53BECEE4734C50B7FADA36E89F10A86",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "Upscayl ncnn Vulkan custom-model worker",
+      "version": "20251207-174704",
+      "source": "https://github.com/upscayl/upscayl-ncnn/releases/tag/20251207-174704",
+      "path": "upscayl/upscayl-bin.exe",
+      "bytes": 7763968,
+      "sha256": "294D31BE8F29D047C0D91A8DCD5E739616ECE56BCE3188AC688F9A52D70ABE60",
+      "license": "AGPL-3.0"
+    },
+    {
+      "name": "PBRify Upscaler SPAN V4 native weights",
+      "version": "4x-PBRify_UpscalerSPANV4",
+      "source": "https://github.com/Kim2091/PBRify_Remix/blob/main/Extras/Old_Models/4x-PBRify_UpscalerSPANV4.pth",
+      "path": "upscayl/models/4x-PBRify_UpscalerSPANV4.bin",
+      "bytes": 854776,
+      "sha256": "FCCCDC9E527C7CE9CD8E7330B4F99EA93E14674BB52FA85C686BF28840DD8B5F",
+      "sourceSha256": "D1F1FA1AF7A5AB23FCF143E75AAC4951E6C52D56BF77D9CCD4D004A4831D0461",
+      "conversion": "PyTorch SPAN checkpoint folded and exported to FP16 ncnn with pnnx 20260526",
+      "license": "CC0-1.0"
+    },
+    {
+      "name": "PBRify Upscaler SPAN V4 native graph",
+      "version": "4x-PBRify_UpscalerSPANV4",
+      "source": "https://github.com/Kim2091/PBRify_Remix/blob/main/Extras/Old_Models/4x-PBRify_UpscalerSPANV4.pth",
+      "path": "upscayl/models/4x-PBRify_UpscalerSPANV4.param",
+      "bytes": 5840,
+      "sha256": "0C1DD030E390722E4BB1C83EAE84C7B3A6D146A7EB08B4CE30B7E5EA34477F3A",
+      "license": "CC0-1.0"
+    }
+  ]
+}

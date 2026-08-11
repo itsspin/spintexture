@@ -1,0 +1,879 @@
+using System.Buffers.Binary;
+using SpinTexture.Core.Imaging;
+
+namespace SpinTexture.Core.Textures;
+
+public sealed record TextureColorStatistics(
+    long Samples,
+    double MeanRed,
+    double MeanGreen,
+    double MeanBlue,
+    double MeanLuminance,
+    double LuminanceStandardDeviation,
+    double ExtremeLuminanceFraction);
+
+public sealed record TextureColorGainAnchor(
+    TgaPixelBuffer Image,
+    double RedGain,
+    double GreenGain,
+    double BlueGain);
+
+/// <summary>
+/// A deliberately small, dependency-free 32-bit working buffer for texconv-produced TGA files.
+/// Pixels are normalized to top-left RGBA order in memory.
+/// </summary>
+public sealed class TgaPixelBuffer
+{
+    private readonly byte[] _rgba;
+
+    private TgaPixelBuffer(int width, int height, byte[] rgba)
+    {
+        Width = width;
+        Height = height;
+        _rgba = rgba;
+    }
+
+    public int Width { get; }
+    public int Height { get; }
+    internal ReadOnlyMemory<byte> RgbaPixels => _rgba;
+
+    public static async Task<TgaPixelBuffer> ReadPngFileAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        return await Task.Run(
+            () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return FromPixelImage(PixelImage.LoadPng(path));
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task WritePngFileAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        await Task.Run(
+            () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                ToPixelImage().SavePng(path, flushToDisk: false);
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public static async Task<TgaPixelBuffer> ReadFileAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+        return Read(bytes);
+    }
+
+    public static TgaPixelBuffer Read(ReadOnlySpan<byte> data)
+    {
+        if (data.Length < 18)
+        {
+            throw new InvalidDataException("TGA data is shorter than its header.");
+        }
+
+        var idLength = data[0];
+        var colorMapType = data[1];
+        var imageType = data[2];
+        var width = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(12, 2));
+        var height = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice(14, 2));
+        var bitsPerPixel = data[16];
+        var descriptor = data[17];
+
+        if (colorMapType != 0 || imageType != 2 || width == 0 || height == 0 || bitsPerPixel is not (24 or 32))
+        {
+            throw new NotSupportedException("The seam-safe working stage requires an uncompressed 24- or 32-bit true-color TGA.");
+        }
+
+        var bytesPerPixel = bitsPerPixel / 8;
+        var pixelOffset = checked(18 + idLength);
+        var pixelBytes = checked(width * height * bytesPerPixel);
+        if (pixelOffset > data.Length || pixelBytes > data.Length - pixelOffset)
+        {
+            throw new InvalidDataException("TGA pixel data is truncated.");
+        }
+
+        var topOrigin = (descriptor & 0x20) != 0;
+        var rightOrigin = (descriptor & 0x10) != 0;
+        var rgba = new byte[checked(width * height * 4)];
+
+        for (var fileY = 0; fileY < height; fileY++)
+        {
+            var targetY = topOrigin ? fileY : height - 1 - fileY;
+            for (var fileX = 0; fileX < width; fileX++)
+            {
+                var targetX = rightOrigin ? width - 1 - fileX : fileX;
+                var sourceIndex = pixelOffset + ((fileY * width) + fileX) * bytesPerPixel;
+                var targetIndex = ((targetY * width) + targetX) * 4;
+                rgba[targetIndex] = data[sourceIndex + 2];
+                rgba[targetIndex + 1] = data[sourceIndex + 1];
+                rgba[targetIndex + 2] = data[sourceIndex];
+                rgba[targetIndex + 3] = bytesPerPixel == 4 ? data[sourceIndex + 3] : byte.MaxValue;
+            }
+        }
+
+        return new TgaPixelBuffer(width, height, rgba);
+    }
+
+    public async Task WriteFileAsync(string path, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        var destinationDirectory = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (!string.IsNullOrWhiteSpace(destinationDirectory))
+        {
+            Directory.CreateDirectory(destinationDirectory);
+        }
+
+        var bytes = ToBytes();
+        await File.WriteAllBytesAsync(path, bytes, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal PixelImage ToPixelImage()
+    {
+        var bgra = new byte[_rgba.Length];
+        for (var index = 0; index < _rgba.Length; index += 4)
+        {
+            bgra[index] = _rgba[index + 2];
+            bgra[index + 1] = _rgba[index + 1];
+            bgra[index + 2] = _rgba[index];
+            bgra[index + 3] = _rgba[index + 3];
+        }
+
+        return new PixelImage(Width, Height, bgra);
+    }
+
+    internal static TgaPixelBuffer FromPixelImage(PixelImage image)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        var rgba = new byte[image.Pixels.Length];
+        for (var index = 0; index < rgba.Length; index += 4)
+        {
+            rgba[index] = image.Pixels[index + 2];
+            rgba[index + 1] = image.Pixels[index + 1];
+            rgba[index + 2] = image.Pixels[index];
+            rgba[index + 3] = image.Pixels[index + 3];
+        }
+
+        return new TgaPixelBuffer(image.Width, image.Height, rgba);
+    }
+
+    public TgaPixelBuffer WithOpaqueAlpha()
+    {
+        var pixels = (byte[])_rgba.Clone();
+        for (var index = 3; index < pixels.Length; index += 4)
+        {
+            pixels[index] = byte.MaxValue;
+        }
+
+        return new TgaPixelBuffer(Width, Height, pixels);
+    }
+
+    public bool HasLikelyCutoutAlpha()
+    {
+        var transparent = 0;
+        var opaque = 0;
+        var intermediate = 0;
+        for (var index = 3; index < _rgba.Length; index += 4)
+        {
+            var alpha = _rgba[index];
+            if (alpha <= 8)
+            {
+                transparent++;
+            }
+            else if (alpha >= 247)
+            {
+                opaque++;
+            }
+            else
+            {
+                intermediate++;
+            }
+        }
+
+        var pixels = _rgba.Length / 4;
+        return transparent > 0
+            && opaque > 0
+            && intermediate <= Math.Max(1, pixels / 20);
+    }
+
+    public bool HasSoftTranslucentAlpha()
+    {
+        var intermediate = 0;
+        for (var index = 3; index < _rgba.Length; index += 4)
+        {
+            var alpha = _rgba[index];
+            if (alpha > 8 && alpha < 247)
+            {
+                intermediate++;
+            }
+        }
+
+        var pixels = _rgba.Length / 4;
+        return intermediate > Math.Max(1, pixels / 20);
+    }
+
+    public bool IsFullyTransparent(byte threshold = 8)
+    {
+        for (var index = 3; index < _rgba.Length; index += 4)
+        {
+            if (_rgba[index] > threshold)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public TgaPixelBuffer DilateRgbIntoTransparentPixels(byte visibleThreshold = 128)
+    {
+        var pixels = (byte[])_rgba.Clone();
+        var pixelCount = checked(Width * Height);
+        var visited = new bool[pixelCount];
+        var queue = new int[pixelCount];
+        var head = 0;
+        var tail = 0;
+
+        for (var pixel = 0; pixel < pixelCount; pixel++)
+        {
+            if (pixels[(pixel * 4) + 3] >= visibleThreshold)
+            {
+                visited[pixel] = true;
+                queue[tail++] = pixel;
+            }
+        }
+
+        // An entirely transparent texture has no meaningful color to extend.
+        if (tail == 0)
+        {
+            return new TgaPixelBuffer(Width, Height, pixels);
+        }
+
+        while (head < tail)
+        {
+            var pixel = queue[head++];
+            var x = pixel % Width;
+            var y = pixel / Width;
+            if (x > 0)
+            {
+                Visit(pixel - 1, pixel);
+            }
+
+            if (x + 1 < Width)
+            {
+                Visit(pixel + 1, pixel);
+            }
+
+            if (y > 0)
+            {
+                Visit(pixel - Width, pixel);
+            }
+
+            if (y + 1 < Height)
+            {
+                Visit(pixel + Width, pixel);
+            }
+        }
+
+        return new TgaPixelBuffer(Width, Height, pixels);
+
+        void Visit(int target, int source)
+        {
+            if (visited[target])
+            {
+                return;
+            }
+
+            var targetOffset = target * 4;
+            var sourceOffset = source * 4;
+            pixels[targetOffset] = pixels[sourceOffset];
+            pixels[targetOffset + 1] = pixels[sourceOffset + 1];
+            pixels[targetOffset + 2] = pixels[sourceOffset + 2];
+            visited[target] = true;
+            queue[tail++] = target;
+        }
+    }
+
+    public TextureColorStatistics CalculateVisibleColorStatistics(byte alphaThreshold = 8)
+    {
+        long samples = 0;
+        long extremes = 0;
+        double redSum = 0;
+        double greenSum = 0;
+        double blueSum = 0;
+        double luminanceMean = 0;
+        double luminanceMoment = 0;
+
+        for (var offset = 0; offset < _rgba.Length; offset += 4)
+        {
+            if (_rgba[offset + 3] < alphaThreshold)
+            {
+                continue;
+            }
+
+            var red = _rgba[offset];
+            var green = _rgba[offset + 1];
+            var blue = _rgba[offset + 2];
+            var luminance = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue);
+            samples++;
+            redSum += red;
+            greenSum += green;
+            blueSum += blue;
+            var delta = luminance - luminanceMean;
+            luminanceMean += delta / samples;
+            luminanceMoment += delta * (luminance - luminanceMean);
+            if (luminance <= 1 || luminance >= 254)
+            {
+                extremes++;
+            }
+        }
+
+        if (samples == 0)
+        {
+            return new TextureColorStatistics(0, 0, 0, 0, 0, 0, 0);
+        }
+
+        return new TextureColorStatistics(
+            samples,
+            redSum / samples,
+            greenSum / samples,
+            blueSum / samples,
+            luminanceMean,
+            Math.Sqrt(luminanceMoment / samples),
+            (double)extremes / samples);
+    }
+
+    public TextureColorGainAnchor AnchorVisibleChannelMeansFrom(
+        TgaPixelBuffer source,
+        double minimumGain = 0.90,
+        double maximumGain = 1.10,
+        byte alphaThreshold = 8)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (minimumGain <= 0 || maximumGain < minimumGain)
+        {
+            throw new ArgumentOutOfRangeException(nameof(minimumGain));
+        }
+
+        var sourceStatistics = source.CalculateVisibleColorStatistics(alphaThreshold);
+        var enhancedStatistics = CalculateVisibleColorStatistics(alphaThreshold);
+        var redGain = CalculateStableGain(
+            sourceStatistics.MeanRed,
+            enhancedStatistics.MeanRed,
+            minimumGain,
+            maximumGain);
+        var greenGain = CalculateStableGain(
+            sourceStatistics.MeanGreen,
+            enhancedStatistics.MeanGreen,
+            minimumGain,
+            maximumGain);
+        var blueGain = CalculateStableGain(
+            sourceStatistics.MeanBlue,
+            enhancedStatistics.MeanBlue,
+            minimumGain,
+            maximumGain);
+        var output = (byte[])_rgba.Clone();
+        for (var offset = 0; offset < output.Length; offset += 4)
+        {
+            output[offset] = ClampByte(output[offset] * redGain);
+            output[offset + 1] = ClampByte(output[offset + 1] * greenGain);
+            output[offset + 2] = ClampByte(output[offset + 2] * blueGain);
+        }
+
+        return new TextureColorGainAnchor(
+            new TgaPixelBuffer(Width, Height, output),
+            redGain,
+            greenGain,
+            blueGain);
+    }
+
+    public TgaPixelBuffer AddWrappedBorder(int padding)
+    {
+        return AddBorder(padding, wrap: true);
+    }
+
+    public TgaPixelBuffer AddClampedBorder(int padding)
+    {
+        return AddBorder(padding, wrap: false);
+    }
+
+    private TgaPixelBuffer AddBorder(int padding, bool wrap)
+    {
+        if (padding < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(padding));
+        }
+
+        if (padding == 0)
+        {
+            return new TgaPixelBuffer(Width, Height, (byte[])_rgba.Clone());
+        }
+
+        var outputWidth = checked(Width + (padding * 2));
+        var outputHeight = checked(Height + (padding * 2));
+        if (outputWidth > ushort.MaxValue || outputHeight > ushort.MaxValue)
+        {
+            throw new NotSupportedException("The wrapped working TGA would exceed the TGA dimension limit.");
+        }
+
+        var output = new byte[checked(outputWidth * outputHeight * 4)];
+        for (var outputY = 0; outputY < outputHeight; outputY++)
+        {
+            var sourceY = wrap
+                ? Mod(outputY - padding, Height)
+                : Math.Clamp(outputY - padding, 0, Height - 1);
+            for (var outputX = 0; outputX < outputWidth; outputX++)
+            {
+                var sourceX = wrap
+                    ? Mod(outputX - padding, Width)
+                    : Math.Clamp(outputX - padding, 0, Width - 1);
+                Buffer.BlockCopy(
+                    _rgba,
+                    ((sourceY * Width) + sourceX) * 4,
+                    output,
+                    ((outputY * outputWidth) + outputX) * 4,
+                    4);
+            }
+        }
+
+        return new TgaPixelBuffer(outputWidth, outputHeight, output);
+    }
+
+    public TgaPixelBuffer Crop(int left, int top, int width, int height)
+    {
+        if (left < 0 || top < 0 || width <= 0 || height <= 0
+            || left > Width - width || top > Height - height)
+        {
+            throw new ArgumentOutOfRangeException(nameof(left), "Crop rectangle must be contained by the image.");
+        }
+
+        var output = new byte[checked(width * height * 4)];
+        for (var y = 0; y < height; y++)
+        {
+            Buffer.BlockCopy(
+                _rgba,
+                (((top + y) * Width) + left) * 4,
+                output,
+                y * width * 4,
+                width * 4);
+        }
+
+        return new TgaPixelBuffer(width, height, output);
+    }
+
+    public TgaPixelBuffer WithScaledAlphaFrom(
+        TgaPixelBuffer source,
+        bool preserveCoverage,
+        bool wrapEdges = true)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        var output = (byte[])_rgba.Clone();
+
+        for (var y = 0; y < Height; y++)
+        {
+            var sourceY = (((y + 0.5) * source.Height) / Height) - 0.5;
+            var y0 = (int)Math.Floor(sourceY);
+            var yFraction = sourceY - y0;
+            var y1 = y0 + 1;
+
+            for (var x = 0; x < Width; x++)
+            {
+                var sourceX = (((x + 0.5) * source.Width) / Width) - 0.5;
+                var x0 = (int)Math.Floor(sourceX);
+                var xFraction = sourceX - x0;
+                var x1 = x0 + 1;
+                var alpha = BilinearAlpha(
+                    source,
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    xFraction,
+                    yFraction,
+                    wrapEdges);
+                output[((y * Width) + x) * 4 + 3] = (byte)Math.Clamp((int)Math.Round(alpha), 0, 255);
+            }
+        }
+
+        if (preserveCoverage)
+        {
+            MatchCoverage(source._rgba, output, alphaThreshold: 128);
+        }
+
+        return new TgaPixelBuffer(Width, Height, output);
+    }
+
+    public TgaPixelBuffer RenormalizeNormals(bool reconstructPositiveZ = false)
+    {
+        var output = (byte[])_rgba.Clone();
+        for (var index = 0; index < output.Length; index += 4)
+        {
+            var x = (output[index] / 127.5) - 1;
+            var y = (output[index + 1] / 127.5) - 1;
+            var z = reconstructPositiveZ
+                ? Math.Sqrt(Math.Max(0, 1 - (x * x) - (y * y)))
+                : (output[index + 2] / 127.5) - 1;
+            var length = Math.Sqrt((x * x) + (y * y) + (z * z));
+            if (length < 0.000_001)
+            {
+                x = 0;
+                y = 0;
+                z = 1;
+            }
+            else
+            {
+                x /= length;
+                y /= length;
+                z /= length;
+            }
+
+            output[index] = EncodeNormalComponent(x);
+            output[index + 1] = EncodeNormalComponent(y);
+            output[index + 2] = EncodeNormalComponent(z);
+        }
+
+        return new TgaPixelBuffer(Width, Height, output);
+    }
+
+    /// <summary>
+    /// Uses enhanced luminance detail while retaining the baseline palette and alpha.
+    /// This keeps the Classic HD route visually anchored to the original texture.
+    /// </summary>
+    public static TgaPixelBuffer BlendLuminanceLocked(
+        TgaPixelBuffer baseline,
+        TgaPixelBuffer enhanced,
+        double strength)
+    {
+        ArgumentNullException.ThrowIfNull(baseline);
+        ArgumentNullException.ThrowIfNull(enhanced);
+        if (baseline.Width != enhanced.Width || baseline.Height != enhanced.Height)
+        {
+            throw new ArgumentException("Baseline and enhanced buffers must have identical dimensions.", nameof(enhanced));
+        }
+
+        strength = Math.Clamp(strength, 0, 1);
+        var output = new byte[baseline._rgba.Length];
+        for (var offset = 0; offset < output.Length; offset += 4)
+        {
+            var baseRed = (double)baseline._rgba[offset];
+            var baseGreen = baseline._rgba[offset + 1];
+            var baseBlue = baseline._rgba[offset + 2];
+            var enhancedRed = (double)enhanced._rgba[offset];
+            var enhancedGreen = enhanced._rgba[offset + 1];
+            var enhancedBlue = enhanced._rgba[offset + 2];
+
+            var baseLuma = (0.2126 * baseRed) + (0.7152 * baseGreen) + (0.0722 * baseBlue);
+            var enhancedLuma = (0.2126 * enhancedRed) + (0.7152 * enhancedGreen) + (0.0722 * enhancedBlue);
+            var targetLuma = baseLuma + ((enhancedLuma - baseLuma) * strength);
+            var targetRed = targetLuma + (baseRed - baseLuma);
+            var targetBlue = targetLuma + (baseBlue - baseLuma);
+            var targetGreen = (targetLuma - (0.2126 * targetRed) - (0.0722 * targetBlue)) / 0.7152;
+
+            output[offset] = ClampByte(targetRed);
+            output[offset + 1] = ClampByte(targetGreen);
+            output[offset + 2] = ClampByte(targetBlue);
+            output[offset + 3] = baseline._rgba[offset + 3];
+        }
+
+        return new TgaPixelBuffer(baseline.Width, baseline.Height, output);
+    }
+
+    /// <summary>
+    /// Transfers neural detail by frequency band while retaining the baseline palette and alpha.
+    /// Fine and structural residuals can be emphasized without accepting the enhanced image's
+    /// low-frequency color or lighting drift. Wrapped blur sampling keeps tiled edges coherent.
+    /// </summary>
+    public static TgaPixelBuffer BlendFrequencyDetailLocked(
+        TgaPixelBuffer baseline,
+        TgaPixelBuffer enhanced,
+        double fineStrength = 1.35,
+        double structureStrength = 1.05,
+        double toneStrength = 0.25,
+        double maximumLumaDelta = 48)
+    {
+        ArgumentNullException.ThrowIfNull(baseline);
+        ArgumentNullException.ThrowIfNull(enhanced);
+        if (baseline.Width != enhanced.Width || baseline.Height != enhanced.Height)
+        {
+            throw new ArgumentException("Baseline and enhanced buffers must have identical dimensions.", nameof(enhanced));
+        }
+
+        if (!double.IsFinite(fineStrength) || fineStrength < 0
+            || !double.IsFinite(structureStrength) || structureStrength < 0
+            || !double.IsFinite(toneStrength) || toneStrength < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(fineStrength), "Detail strengths must be finite and non-negative.");
+        }
+
+        if (!double.IsFinite(maximumLumaDelta) || maximumLumaDelta is < 0 or > 255)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumLumaDelta));
+        }
+
+        var pixelCount = checked(baseline.Width * baseline.Height);
+        var largeResidual = new float[pixelCount];
+        var smallResidual = new float[pixelCount];
+        var scratch = new float[pixelCount];
+        for (var pixel = 0; pixel < pixelCount; pixel++)
+        {
+            var offset = pixel * 4;
+            largeResidual[pixel] = (float)(Luminance(enhanced._rgba, offset) - Luminance(baseline._rgba, offset));
+        }
+
+        GaussianBlur5Wrapped(
+            largeResidual,
+            scratch,
+            smallResidual,
+            baseline.Width,
+            baseline.Height);
+        GaussianBlur5Wrapped(
+            smallResidual,
+            scratch,
+            largeResidual,
+            baseline.Width,
+            baseline.Height);
+
+        var output = new byte[baseline._rgba.Length];
+        for (var pixel = 0; pixel < pixelCount; pixel++)
+        {
+            var offset = pixel * 4;
+            var baseRed = (double)baseline._rgba[offset];
+            var baseGreen = baseline._rgba[offset + 1];
+            var baseBlue = baseline._rgba[offset + 2];
+            var baseLuma = Luminance(baseline._rgba, offset);
+            var enhancedLuma = Luminance(enhanced._rgba, offset);
+            var residual = enhancedLuma - baseLuma;
+            var fineDetail = residual - smallResidual[pixel];
+            var structuralDetail = smallResidual[pixel] - largeResidual[pixel];
+            var toneDifference = largeResidual[pixel];
+            var lumaDelta = (fineDetail * fineStrength)
+                + (structuralDetail * structureStrength)
+                + (toneDifference * toneStrength);
+            lumaDelta = Math.Clamp(lumaDelta, -maximumLumaDelta, maximumLumaDelta);
+
+            var targetLuma = baseLuma + lumaDelta;
+            var targetRed = targetLuma + (baseRed - baseLuma);
+            var targetBlue = targetLuma + (baseBlue - baseLuma);
+            var targetGreen = (targetLuma - (0.2126 * targetRed) - (0.0722 * targetBlue)) / 0.7152;
+
+            output[offset] = ClampByte(targetRed);
+            output[offset + 1] = ClampByte(targetGreen);
+            output[offset + 2] = ClampByte(targetBlue);
+            output[offset + 3] = baseline._rgba[offset + 3];
+        }
+
+        return new TgaPixelBuffer(baseline.Width, baseline.Height, output);
+    }
+
+    private byte[] ToBytes()
+    {
+        var output = new byte[checked(18 + (Width * Height * 4))];
+        output[2] = 2;
+        BinaryPrimitives.WriteUInt16LittleEndian(output.AsSpan(12, 2), checked((ushort)Width));
+        BinaryPrimitives.WriteUInt16LittleEndian(output.AsSpan(14, 2), checked((ushort)Height));
+        output[16] = 32;
+        output[17] = 0x28; // Top-left origin, eight alpha bits.
+
+        var outputIndex = 18;
+        for (var index = 0; index < _rgba.Length; index += 4)
+        {
+            output[outputIndex++] = _rgba[index + 2];
+            output[outputIndex++] = _rgba[index + 1];
+            output[outputIndex++] = _rgba[index];
+            output[outputIndex++] = _rgba[index + 3];
+        }
+
+        return output;
+    }
+
+    private static double BilinearAlpha(
+        TgaPixelBuffer source,
+        int x0,
+        int y0,
+        int x1,
+        int y1,
+        double xFraction,
+        double yFraction,
+        bool wrapEdges)
+    {
+        var a00 = source.AlphaAt(x0, y0, wrapEdges);
+        var a10 = source.AlphaAt(x1, y0, wrapEdges);
+        var a01 = source.AlphaAt(x0, y1, wrapEdges);
+        var a11 = source.AlphaAt(x1, y1, wrapEdges);
+        var top = a00 + ((a10 - a00) * xFraction);
+        var bottom = a01 + ((a11 - a01) * xFraction);
+        return top + ((bottom - top) * yFraction);
+    }
+
+    private byte AlphaAt(int x, int y, bool wrapEdges)
+    {
+        var sampledX = wrapEdges ? Mod(x, Width) : Math.Clamp(x, 0, Width - 1);
+        var sampledY = wrapEdges ? Mod(y, Height) : Math.Clamp(y, 0, Height - 1);
+        return _rgba[((sampledY * Width) + sampledX) * 4 + 3];
+    }
+
+    private static double Luminance(byte[] rgba, int offset) =>
+        (0.2126 * rgba[offset]) + (0.7152 * rgba[offset + 1]) + (0.0722 * rgba[offset + 2]);
+
+    private static void GaussianBlur5Wrapped(
+        float[] source,
+        float[] scratch,
+        float[] destination,
+        int width,
+        int height)
+    {
+        var minusTwoX = new int[width];
+        var minusOneX = new int[width];
+        var plusOneX = new int[width];
+        var plusTwoX = new int[width];
+        for (var x = 0; x < width; x++)
+        {
+            minusTwoX[x] = Mod(x - 2, width);
+            minusOneX[x] = Mod(x - 1, width);
+            plusOneX[x] = Mod(x + 1, width);
+            plusTwoX[x] = Mod(x + 2, width);
+        }
+
+        for (var y = 0; y < height; y++)
+        {
+            var row = y * width;
+            for (var x = 0; x < width; x++)
+            {
+                scratch[row + x] = (
+                    source[row + minusTwoX[x]]
+                    + (4 * source[row + minusOneX[x]])
+                    + (6 * source[row + x])
+                    + (4 * source[row + plusOneX[x]])
+                    + source[row + plusTwoX[x]]) / 16;
+            }
+        }
+
+        var minusTwoY = new int[height];
+        var minusOneY = new int[height];
+        var plusOneY = new int[height];
+        var plusTwoY = new int[height];
+        for (var y = 0; y < height; y++)
+        {
+            minusTwoY[y] = Mod(y - 2, height);
+            minusOneY[y] = Mod(y - 1, height);
+            plusOneY[y] = Mod(y + 1, height);
+            plusTwoY[y] = Mod(y + 2, height);
+        }
+
+        for (var y = 0; y < height; y++)
+        {
+            var row = y * width;
+            var minusTwoRow = minusTwoY[y] * width;
+            var minusOneRow = minusOneY[y] * width;
+            var plusOneRow = plusOneY[y] * width;
+            var plusTwoRow = plusTwoY[y] * width;
+            for (var x = 0; x < width; x++)
+            {
+                destination[row + x] = (
+                    scratch[minusTwoRow + x]
+                    + (4 * scratch[minusOneRow + x])
+                    + (6 * scratch[row + x])
+                    + (4 * scratch[plusOneRow + x])
+                    + scratch[plusTwoRow + x]) / 16;
+            }
+        }
+    }
+
+    private static byte ClampByte(double value) =>
+        (byte)Math.Clamp(Math.Round(value), byte.MinValue, byte.MaxValue);
+
+    private static double CalculateStableGain(
+        double sourceMean,
+        double enhancedMean,
+        double minimumGain,
+        double maximumGain)
+    {
+        // Very dark channels have an unstable ratio and usually represent an
+        // intentional palette bias. Leave them untouched instead of amplifying
+        // quantization noise.
+        if (sourceMean < 8 || enhancedMean < 8)
+        {
+            return 1;
+        }
+
+        return Math.Clamp(sourceMean / enhancedMean, minimumGain, maximumGain);
+    }
+
+    private static void MatchCoverage(byte[] source, byte[] destination, byte alphaThreshold)
+    {
+        var sourcePixels = source.Length / 4;
+        var destinationPixels = destination.Length / 4;
+        var coveredSourcePixels = CountCovered(source, alphaThreshold);
+        var targetCoveredPixels = (int)Math.Round(
+            (double)coveredSourcePixels / sourcePixels * destinationPixels,
+            MidpointRounding.AwayFromZero);
+
+        var low = -255;
+        var high = 255;
+        while (low <= high)
+        {
+            var adjustment = low + ((high - low) / 2);
+            var covered = CountCovered(destination, alphaThreshold, adjustment);
+            if (covered < targetCoveredPixels)
+            {
+                low = adjustment + 1;
+            }
+            else
+            {
+                high = adjustment - 1;
+            }
+        }
+
+        var selectedAdjustment = Math.Clamp(low, -255, 255);
+        for (var index = 3; index < destination.Length; index += 4)
+        {
+            // Preserve fully transparent and fully opaque source regions.
+            // Coverage correction is only needed on the interpolated edge
+            // samples; shifting the endpoints makes foliage and decals
+            // globally translucent and creates visible halos.
+            if (destination[index] is > byte.MinValue and < byte.MaxValue)
+            {
+                destination[index] = (byte)Math.Clamp(
+                    destination[index] + selectedAdjustment,
+                    0,
+                    255);
+            }
+        }
+    }
+
+    private static int CountCovered(byte[] pixels, byte threshold, int adjustment = 0)
+    {
+        var count = 0;
+        for (var index = 3; index < pixels.Length; index += 4)
+        {
+            var alpha = pixels[index];
+            var adjusted = alpha is byte.MinValue or byte.MaxValue
+                ? alpha
+                : Math.Clamp(alpha + adjustment, 0, 255);
+            if (adjusted >= threshold)
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private static int Mod(int value, int divisor)
+    {
+        var result = value % divisor;
+        return result < 0 ? result + divisor : result;
+    }
+
+    private static byte EncodeNormalComponent(double value) =>
+        (byte)Math.Clamp((int)Math.Round((Math.Clamp(value, -1, 1) + 1) * 127.5), 0, 255);
+}

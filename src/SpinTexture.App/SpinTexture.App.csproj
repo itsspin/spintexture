@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>SpinTexture</AssemblyName>
+    <RootNamespace>SpinTexture.App</RootNamespace>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\SpinTexture.Core\SpinTexture.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\..\vendor\texconv.exe" Link="Tools\texconv.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\vendor\realesrgan\realesrgan-ncnn-vulkan.exe" Link="Tools\realesrgan\realesrgan-ncnn-vulkan.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\vendor\realesrgan\vcomp140.dll" Link="Tools\realesrgan\vcomp140.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\vendor\realesrgan\models\realesrgan-x4plus.bin" Link="Tools\realesrgan\models\realesrgan-x4plus.bin" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\vendor\realesrgan\models\realesrgan-x4plus.param" Link="Tools\realesrgan\models\realesrgan-x4plus.param" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\vendor\realesrgan\models\realesrnet-x4plus.bin" Link="Tools\realesrgan\models\realesrnet-x4plus.bin" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\vendor\realesrgan\models\realesrnet-x4plus.param" Link="Tools\realesrgan\models\realesrnet-x4plus.param" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\vendor\upscayl\upscayl-bin.exe" Link="Tools\upscayl\upscayl-bin.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" Condition="Exists('..\..\vendor\upscayl\upscayl-bin.exe')" />
+    <Content Include="..\..\vendor\upscayl\models\*.bin" Link="Tools\upscayl\models\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\vendor\upscayl\models\*.param" Link="Tools\upscayl\models\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\vendor\licenses\*" Link="ThirdPartyLicenses\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\vendor\manifest.json" Link="Tools\manifest.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  </ItemGroup>
+</Project>
