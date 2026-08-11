@@ -14,6 +14,12 @@ It does **not** inject a DLL, hook Direct3D, install ReShade, modify the game ex
 
 ![Enhanced skeleton texture comparison](docs/media/enhanced-skeleton-comparison.jpg)
 
+### Interactive original vs enhanced comparison
+
+[![Open the SpinTexture original vs enhanced slider](docs/media/comparisons/characters-enhanced.png)](https://itsspin.github.io/spintexture/)
+
+**[Open the interactive comparison gallery](https://itsspin.github.io/spintexture/)** to drag or swipe between an unchanged original client screenshot and the same scene using SpinTexture-enhanced character and equipment textures. The gallery is also keyboard accessible with the arrow keys. Small pose differences come from the game's live idle animations; neither capture was altered to manufacture detail.
+
 ## Download
 
 Download the latest `SpinTexture-<version>-win-x64.zip` from [GitHub Releases](https://github.com/itsspin/spintexture/releases/latest), verify the accompanying SHA-256 file, and extract the whole folder. Keep `Tools` beside `SpinTexture.exe`.

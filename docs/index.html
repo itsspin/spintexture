@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Drag across an original EverQuest Legends capture and the same scene enhanced by SpinTexture.">
+  <meta name="theme-color" content="#070a0f">
+  <title>SpinTexture — Original vs Enhanced</title>
+  <link rel="stylesheet" href="comparison.css">
+</head>
+<body>
+  <main class="page-shell">
+    <header class="hero">
+      <a class="brand" href="https://github.com/itsspin/spintexture" aria-label="SpinTexture on GitHub">
+        <span class="brand-mark" aria-hidden="true">S</span>
+        <span>SpinTexture</span>
+      </a>
+      <p class="eyebrow">Interactive image comparison</p>
+      <h1>Original art direction.<br><span>Sharper texture detail.</span></h1>
+      <p class="intro">Drag the handle, swipe across the image, or focus the slider and use the arrow keys. The left side is the original client capture; the right side uses textures staged by SpinTexture.</p>
+    </header>
+
+    <section class="comparison-card" aria-labelledby="comparison-title">
+      <div class="comparison-heading">
+        <div>
+          <p class="kicker">Characters + equipment</p>
+          <h2 id="comparison-title">Original vs SpinTexture Enhanced</h2>
+        </div>
+        <output class="position-output" data-position-output aria-live="polite">50% reveal</output>
+      </div>
+
+      <figure>
+        <div class="comparison" data-comparison style="--position: 50%;">
+          <img
+            class="comparison-image comparison-image--enhanced"
+            src="media/comparisons/characters-enhanced.png"
+            width="3440"
+            height="1440"
+            alt="EverQuest Legends characters and equipment using SpinTexture enhanced textures">
+
+          <div class="comparison-original" aria-hidden="true">
+            <img
+              class="comparison-image"
+              src="media/comparisons/characters-original.png"
+              width="3440"
+              height="1440"
+              alt="">
+          </div>
+
+          <span class="image-label image-label--original">Original</span>
+          <span class="image-label image-label--enhanced">Enhanced</span>
+
+          <div class="divider" aria-hidden="true">
+            <span class="divider-grip">
+              <svg viewBox="0 0 32 32" role="img" aria-label="Drag left or right">
+                <path d="M13 9 6 16l7 7M19 9l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
+          </div>
+
+          <input
+            class="comparison-range"
+            data-comparison-range
+            type="range"
+            min="0"
+            max="100"
+            value="50"
+            aria-label="Reveal original and enhanced image"
+            aria-valuetext="50 percent original, 50 percent enhanced">
+        </div>
+        <figcaption>Captured at the same location and camera framing. Small pose differences are from the game's live idle animations; neither screenshot was altered to manufacture detail.</figcaption>
+      </figure>
+    </section>
+
+    <section class="facts" aria-label="About this comparison">
+      <article>
+        <span class="fact-number">01</span>
+        <h2>Game-faithful restoration</h2>
+        <p>SpinTexture keeps the source palette and overall material identity in view while restoring texture detail and reducing blur.</p>
+      </article>
+      <article>
+        <span class="fact-number">02</span>
+        <h2>No graphics injection</h2>
+        <p>No DLL injection, Direct3D hook, ReShade layer, or executable modification. Enhanced archives are staged, verified, backed up, and reversible.</p>
+      </article>
+      <article>
+        <span class="fact-number">03</span>
+        <h2>Your client, your assets</h2>
+        <p>The public project contains no EverQuest assets. SpinTexture processes files from the user's own installed client.</p>
+      </article>
+    </section>
+
+    <footer>
+      <p>See how it works, review safety details, or download the latest Windows build.</p>
+      <div class="footer-links">
+        <a href="https://github.com/itsspin/spintexture">View source</a>
+        <a class="primary-link" href="https://github.com/itsspin/spintexture/releases/latest">Download latest release</a>
+      </div>
+    </footer>
+  </main>
+
+  <script src="comparison.js" defer></script>
+</body>
+</html>
