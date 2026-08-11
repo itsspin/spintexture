@@ -2,14 +2,14 @@ namespace SpinTexture.Core.Textures;
 
 /// <summary>
 /// Defines the exact mip chain emitted for enhanced textures. Alpha-tested
-/// cutouts intentionally stop at 4x4: smaller levels can collapse sparse
-/// coverage into a uniformly translucent texel and make distant foliage or
-/// similar geometry disappear in the legacy renderer.
+/// cutouts intentionally keep only their enhanced top level. The legacy
+/// renderer applies its alpha test after minification, and generated soft-alpha
+/// levels can cross that cutoff as the camera angle changes. That makes crossed
+/// foliage planes appear and disappear in a distance halo even when nominal
+/// coverage is preserved. The source assets use this same single-level policy.
 /// </summary>
 public static class TextureMipPolicy
 {
-    public const int CutoutMinimumMipDimension = 4;
-
     public static int Calculate(
         int width,
         int height,
@@ -26,7 +26,7 @@ public static class TextureMipPolicy
             throw new ArgumentOutOfRangeException(nameof(height), "Texture height must be positive.");
         }
 
-        if (!generateMipMaps)
+        if (!generateMipMaps || useCutoutFloor)
         {
             return 1;
         }
@@ -38,13 +38,6 @@ public static class TextureMipPolicy
         {
             var nextWidth = Math.Max(1, currentWidth >> 1);
             var nextHeight = Math.Max(1, currentHeight >> 1);
-            if (useCutoutFloor
-                && (nextWidth < CutoutMinimumMipDimension
-                    || nextHeight < CutoutMinimumMipDimension))
-            {
-                break;
-            }
-
             currentWidth = nextWidth;
             currentHeight = nextHeight;
             count++;

@@ -567,15 +567,15 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
         }
 
         var prompt = pack.IsCutoutMipRepairCandidate
-            ? "Upgrade this pack's foliage/cutout mipmaps?\n\n"
-              + "SpinTexture will SHA-256 verify the complete baseline and create a new immutable replacement. Only previously enhanced alpha-tested textures that use the retired full mip chain are reprocessed. Prior enhanced opaque textures are reused, source-identical entries are left original, and the existing staged pack is never modified."
+            ? "Upgrade this pack's foliage/cutout compatibility?\n\n"
+              + "SpinTexture will SHA-256 verify the complete baseline and create a new immutable replacement. Only previously enhanced alpha-tested textures that use angle-sensitive generated mip levels are reprocessed. Prior enhanced opaque textures are reused, source-identical entries are left original, and the existing staged pack is never modified."
             : "Salvage this legacy character pack?\n\n"
               + "Every texture already enhanced successfully will be reused byte-for-byte. Only unchanged eligible textures are retried with the current safe pipeline; newly supported classic indexed character and armor BMPs use the palette-stable Classic HD route. The completed original pack is never modified, and packs built with the current pipeline do not need this second pass.";
         var answer = MessageBox.Show(
             this,
             prompt,
             pack.IsCutoutMipRepairCandidate
-                ? "Upgrade cutout mipmaps"
+                ? "Upgrade cutout compatibility"
                 : "Repair legacy pack",
             MessageBoxButton.OKCancel,
             MessageBoxImage.Information);
@@ -586,7 +586,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
 
         await RunOperationAsync(
             pack.IsCutoutMipRepairCandidate
-                ? "Hash-verifying the baseline and upgrading only stale enhanced cutouts..."
+                ? "Hash-verifying the baseline and upgrading only angle-sensitive enhanced cutouts..."
                 : "Hash-verifying prior work and repairing only missing textures...",
             async (progress, token) =>
             {
@@ -599,7 +599,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
                 return result.StagedBuild.ManifestPath;
             },
             successMessage: pack.IsCutoutMipRepairCandidate
-                ? "Cutout mip upgrade complete. Opaque successes were reused, only stale enhanced cutouts were regenerated, and the new replacement is checked with your other selected packs."
+                ? "Cutout compatibility upgrade complete. Opaque successes were reused, only angle-sensitive enhanced cutouts were regenerated, and the new replacement is checked with your other selected packs."
                 : "Repair pack complete. Prior successes were reused; the repaired replacement is checked with your other selected packs.",
             replaceSelectedManifestPath: pack.ManifestPath)
             .ConfigureAwait(true);
@@ -1191,7 +1191,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
                 && canRepairSourceMismatch
                 && !isSourceRepair;
             RepairStatusText = IsCutoutMipRepairCandidate
-                ? "One-time pipeline upgrade available: verify the full baseline, reuse opaque successes, and regenerate only previously enhanced alpha-tested foliage, armor, and model textures with bounded 4\u00D74 terminal mips."
+                ? "One-time cutout compatibility upgrade available: verify the full baseline, reuse opaque successes, and regenerate only previously enhanced alpha-tested foliage, armor, and model textures without angle-sensitive generated mip levels."
                 : isCharacterScope
                 ? CanRepair
                     ? "Legacy pack: reuse prior output and add the current race, armor, and protected control-texture coverage."
@@ -1202,7 +1202,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
                 ? "Managed source mismatch detected: reuse unaffected complete archives and rebuild only the affected archives from verified originals."
                 : string.Empty;
             RepairButtonText = IsCutoutMipRepairCandidate
-                ? "Upgrade Cutout Mips"
+                ? "Upgrade Cutout Compatibility"
                 : "Repair Legacy Pack";
             SelectionHint = IsComposition
                 ? "Generated combinations are not selectable. Check their source packs instead."

@@ -17,7 +17,7 @@ public static class TexturePipelineSelfTests
     {
         output ??= TextWriter.Null;
         await CutoutMipPolicySelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
-        await output.WriteLineAsync("Cutout mip-floor command and integration tests passed.")
+        await output.WriteLineAsync("Cutout compatibility command and integration tests passed.")
             .ConfigureAwait(false);
         await WorldCutoutRepairSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Immutable World/zone cutout revision-repair tests passed.")
@@ -154,7 +154,7 @@ public static class TexturePipelineSelfTests
             TextureProcessingPipeline.RequiresRepair(
                 Report(revision: 1, isRepair: true),
                 AssetScope.CharactersAndEquipmentOnly),
-            "a revision-1 character pack should receive the bounded cutout upgrade");
+            "a revision-1 character pack should receive the cutout compatibility upgrade");
         Assert(
             TextureProcessingPipeline.RequiresCutoutMipUpgrade(
                 Report(revision: 0, isRepair: true),
@@ -879,13 +879,13 @@ public static class TexturePipelineSelfTests
             "memory-constrained systems should keep one post-processing lane");
 
         AssertEqual(
-            9,
+            1,
             TextureMipPolicy.Calculate(1024, 1024, generateMipMaps: true, useCutoutFloor: true),
-            "1024-square cutout mip floor should retain L0 through the 4x4 L8 level");
+            "1024-square cutout should retain only its enhanced top level");
         AssertEqual(
-            7,
+            1,
             TextureMipPolicy.Calculate(1024, 256, generateMipMaps: true, useCutoutFloor: true),
-            "rectangular cutout mip floor should stop before either dimension falls below four");
+            "rectangular cutout should retain only its enhanced top level");
         AssertEqual(
             11,
             TextureMipPolicy.Calculate(1024, 1024, generateMipMaps: true, useCutoutFloor: false),
@@ -916,12 +916,12 @@ public static class TexturePipelineSelfTests
             metadata,
             1024,
             1024,
-            mipCount: 9,
+            mipCount: 1,
             preserveAlphaCoverage: true);
         Assert(command.Arguments.Contains("-wrap"), "texconv encode should use wrap sampling");
-        Assert(command.Arguments.Contains("--keep-coverage"), "cutout mipmaps should preserve alpha coverage");
+        Assert(command.Arguments.Contains("--keep-coverage"), "cutout encoding should preserve alpha coverage");
         Assert(command.Arguments.Contains("BC1_UNORM"), "DDS compression should be preserved");
-        AssertEqual("9", GetCommandArgument(command.Arguments, "-m")!, "cutout texconv mip count");
+        AssertEqual("1", GetCommandArgument(command.Arguments, "-m")!, "cutout texconv mip count");
 
         var clampedCommand = new DirectXTexCommandBuilder().CreateEncode(
             "C:\\tools\\texconv.exe",

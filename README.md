@@ -56,7 +56,7 @@ When the checked selection is an additive superset of the active pack, SpinTextu
 
 **Repair Source Mismatch** is a separate recovery path for a World or zone pack that was accidentally built while older enhanced archives were active. It exact-verifies the completed pack and managed install provenance, reuses every unaffected complete archive, and rebuilds only archives proven to have used a prior SpinTexture output as their source. Unknown game-patch changes, missing backups, and corrupt provenance are blocked instead of guessed. The original staged pack remains unchanged.
 
-**Upgrade Cutout Mips** appears once for older completed Characters + Equipment, World, combined World + Characters, and selected-zone packs. It creates a new immutable replacement, raw-copies the prior compressed chunks for valid opaque enhancements, leaves source-identical entries untouched, and regenerates only previously enhanced alpha-tested textures whose old mip chain reaches unsafe 2x2 or 1x1 levels. Fresh builds already use the bounded cutout policy and do not need this upgrade.
+**Upgrade Cutout Compatibility** appears once for older completed Characters + Equipment, World, combined World + Characters, and selected-zone packs. It creates a new immutable replacement, raw-copies the prior compressed chunks for valid opaque enhancements, leaves source-identical entries untouched, and regenerates only previously enhanced alpha-tested textures without generated soft-alpha mip levels that can cross the legacy renderer's cutoff as the camera angle changes. Fresh builds already use the single-level cutout policy and do not need this upgrade.
 
 ## Presets and “4K”
 
