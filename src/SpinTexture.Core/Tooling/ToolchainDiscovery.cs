@@ -104,7 +104,8 @@ public sealed class ToolchainDiscovery
 
         if (models is null)
         {
-            diagnostics.Add("A models folder containing both realesrnet-x4plus and realesrgan-x4plus was not found.");
+            diagnostics.Add(
+                "A complete models folder containing realesrnet-x4plus, realesrgan-x4plus, and realesrgan-x4plus-anime was not found.");
         }
 
         if ((textureUpscaler is null) != (textureModels is null))
@@ -157,7 +158,7 @@ public sealed class ToolchainDiscovery
         }
     }
 
-    private static bool IsSupportedModelDirectory(string directory)
+    internal static bool IsSupportedModelDirectory(string directory)
     {
         if (!Directory.Exists(directory))
         {
@@ -165,7 +166,8 @@ public sealed class ToolchainDiscovery
         }
 
         return HasModel(directory, "realesrnet-x4plus")
-            && HasModel(directory, "realesrgan-x4plus");
+            && HasModel(directory, "realesrgan-x4plus")
+            && HasModel(directory, "realesrgan-x4plus-anime");
     }
 
     private static bool HasModel(string directory, string modelName) =>

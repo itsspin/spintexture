@@ -159,6 +159,8 @@ internal static class Program
                 throw new FileNotFoundException(string.Join(" ", tools.Diagnostics));
             }
 
+            var nativeProgress = new Progress<NativeOutputLine>(line =>
+                Console.WriteLine($"[{line.Stream}] {line.Text}"));
             var result = await new NativeTextureProcessor(tools).ProcessAsync(
                 new NativeTextureProcessRequest(
                     sourcePath,
@@ -172,7 +174,9 @@ internal static class Program
                         maximumDimension,
                         GenerateMipMaps: true,
                         InstallAfterBuild: false,
-                        SelectedZone: "single-texture"))).ConfigureAwait(false);
+                        SelectedZone: "single-texture")),
+                nativeProgress,
+                cancellationToken: default).ConfigureAwait(false);
             Console.WriteLine($"{sourcePath} -> {destinationPath}");
             Console.WriteLine($"{metadata.Width}x{metadata.Height} -> {result.Dimensions.OutputWidth}x{result.Dimensions.OutputHeight}");
             Console.WriteLine(result.ProcessingRoute);

@@ -745,7 +745,7 @@
                                             <Grid>
                                                 <Image Stretch="UniformToFill" RenderOptions.BitmapScalingMode="HighQuality">
                                                     <Image.Source>
-                                                        <BitmapImage UriSource="Assets/Examples/characters-original.png" DecodePixelWidth="620" CacheOption="OnLoad" />
+                                                        <BitmapImage UriSource="pack://application:,,,/Assets/Examples/characters-original.png" DecodePixelWidth="620" CacheOption="OnLoad" />
                                                     </Image.Source>
                                                 </Image>
                                                 <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="7" Padding="7,3" CornerRadius="3" Background="#D0101114">
@@ -757,7 +757,7 @@
                                             <Grid>
                                                 <Image Stretch="UniformToFill" RenderOptions.BitmapScalingMode="HighQuality">
                                                     <Image.Source>
-                                                        <BitmapImage UriSource="Assets/Examples/characters-enhanced.png" DecodePixelWidth="620" CacheOption="OnLoad" />
+                                                        <BitmapImage UriSource="pack://application:,,,/Assets/Examples/characters-enhanced.png" DecodePixelWidth="620" CacheOption="OnLoad" />
                                                     </Image.Source>
                                                 </Image>
                                                 <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="7" Padding="7,3" CornerRadius="3" Background="#D016372D">

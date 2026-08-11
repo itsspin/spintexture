@@ -636,11 +636,9 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder
             {
                 var processResult = outcome.Result
                     ?? throw new InvalidDataException("Native texture batching returned neither output nor an error.");
-                if (processResult.ProcessingRoute.Contains("fallback", StringComparison.OrdinalIgnoreCase))
-                {
-                    counter.Warn(
-                        $"{item.Entry.Name} used the faithful fallback because the game-texture model was unavailable or failed its fidelity gate.");
-                }
+                var usedFallback = processResult.ProcessingRoute.Contains(
+                    "fallback",
+                    StringComparison.OrdinalIgnoreCase);
 
                 var enhancedMetadata = await sniffer.ReadFileAsync(
                     item.EnhancedTexturePath,
@@ -667,6 +665,13 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder
                         item.Metadata.TexconvFormat,
                         processResult.ExpectedMipCount));
                 counter.Enhanced(enhancedLength);
+                if (usedFallback)
+                {
+                    counter.Fallback();
+                    counter.Warn(
+                        $"{item.Entry.Name} used the faithful fallback because the requested model was unavailable or failed its fidelity gate.");
+                }
+
                 await TryCreatePreviewAsync(
                     context,
                     item.Entry.Name,

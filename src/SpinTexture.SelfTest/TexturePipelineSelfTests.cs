@@ -75,7 +75,8 @@ public static class TexturePipelineSelfTests
         await output.WriteLineAsync("Credential-free enhanced game launch tests passed.")
             .ConfigureAwait(false);
         TestTextureModelSelection();
-        await output.WriteLineAsync("Texture-specialized model selection tests passed.").ConfigureAwait(false);
+        TestPresetAwareFidelityGate();
+        await output.WriteLineAsync("Texture model discovery and preset fidelity-gate tests passed.").ConfigureAwait(false);
         await TestWrappedTgaAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Seam-safe TGA tests passed.").ConfigureAwait(false);
         if (string.Equals(
@@ -1055,8 +1056,10 @@ public static class TexturePipelineSelfTests
         var root = Path.Combine(Path.GetTempPath(), $"spintexture-models-{Guid.NewGuid():N}");
         var legacyModels = Path.Combine(root, "legacy-models");
         var textureModels = Path.Combine(root, "models");
+        var discoveryModels = Path.Combine(root, "discovery-models");
         Directory.CreateDirectory(legacyModels);
         Directory.CreateDirectory(textureModels);
+        Directory.CreateDirectory(discoveryModels);
         try
         {
             File.WriteAllBytes(Path.Combine(legacyModels, "realesrgan-x4plus.param"), [1]);
@@ -1065,6 +1068,29 @@ public static class TexturePipelineSelfTests
             File.WriteAllBytes(Path.Combine(legacyModels, "realesrnet-x4plus.bin"), [1]);
             File.WriteAllBytes(Path.Combine(legacyModels, "realesrgan-x4plus-anime.param"), [1]);
             File.WriteAllBytes(Path.Combine(legacyModels, "realesrgan-x4plus-anime.bin"), [1]);
+
+            foreach (var modelName in new[]
+                     {
+                         RealEsrganCommandBuilder.LegacyFaithfulModelName,
+                         RealEsrganCommandBuilder.LegacyDetailModelName
+                     })
+            {
+                File.WriteAllBytes(Path.Combine(discoveryModels, $"{modelName}.param"), [1]);
+                File.WriteAllBytes(Path.Combine(discoveryModels, $"{modelName}.bin"), [1]);
+            }
+
+            Assert(
+                !ToolchainDiscovery.IsSupportedModelDirectory(discoveryModels),
+                "toolchain discovery must reject a model directory missing the anime model");
+            File.WriteAllBytes(
+                Path.Combine(discoveryModels, $"{RealEsrganCommandBuilder.IllustratedModelName}.param"),
+                [1]);
+            File.WriteAllBytes(
+                Path.Combine(discoveryModels, $"{RealEsrganCommandBuilder.IllustratedModelName}.bin"),
+                [1]);
+            Assert(
+                ToolchainDiscovery.IsSupportedModelDirectory(discoveryModels),
+                "toolchain discovery should accept the complete three-model set");
 
             var legacyBuilder = new RealEsrganCommandBuilder();
             var fallback = legacyBuilder.ResolveModel(legacyModels, TexturePreset.ClassicHd);
@@ -1171,6 +1197,50 @@ public static class TexturePipelineSelfTests
         {
             DeleteTree(root);
         }
+    }
+
+    private static void TestPresetAwareFidelityGate()
+    {
+        var visible = new TextureColorStatistics(
+            Samples: 64,
+            MeanRed: 100,
+            MeanGreen: 100,
+            MeanBlue: 100,
+            MeanLuminance: 100,
+            LuminanceStandardDeviation: 20,
+            ExtremeLuminanceFraction: 0);
+        var stylizedButNotFaithful = new NativeTextureProcessor.TextureFidelityMetrics(
+            visible,
+            visible,
+            MeanLuminanceDrift: 2,
+            MaximumMeanChannelDrift: 3,
+            RoundTripMeanSquaredError: 200,
+            RoundTripLuminancePsnr: 30,
+            SourceEdgeEnergy: 1,
+            EdgeEnergyRatio: 0.45,
+            ExtremeLuminanceGrowth: 0);
+
+        var faithfulRejected = false;
+        try
+        {
+            NativeTextureProcessor.ValidateNeuralOutputForPreset(
+                TexturePreset.Faithful,
+                stylizedButNotFaithful);
+        }
+        catch (InvalidDataException)
+        {
+            faithfulRejected = true;
+        }
+
+        Assert(
+            faithfulRejected,
+            "the regression fixture must remain outside the strict Faithful fidelity budget");
+        NativeTextureProcessor.ValidateNeuralOutputForPreset(
+            TexturePreset.Illustrated,
+            stylizedButNotFaithful);
+        NativeTextureProcessor.ValidateNeuralOutputForPreset(
+            TexturePreset.RusticPainted,
+            stylizedButNotFaithful);
     }
 
     private static void TestArtDirectionAndEffectPolicies()
