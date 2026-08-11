@@ -88,7 +88,16 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 "Stylizes texture art; it does not add toon outlines to 3D geometry",
                 "Real-ESRGAN x4plus-anime",
                 "Cleaner painted forms and less photographic surface noise",
-                "Moderate route; faithful fallback protected")
+                "Moderate route; faithful fallback protected"),
+            new PresetOptionViewModel(
+                TexturePreset.RusticPainted,
+                "Rustic Painted Fantasy",
+                "WATERCOLOR-INSPIRED / EARTHY",
+                "Builds clean illustrated detail, then applies bounded earthy palette shaping for a darker hand-painted fantasy character.",
+                "Muted stone, wood, foliage, cloth, and armor without replacing the original composition",
+                "Real-ESRGAN x4plus-anime + SpinTexture painted grade",
+                "Warm shadows, olive greens, restrained saturation, and subtle painted tone planes",
+                "Moderate route; stylized fidelity gate and faithful fallback")
         ];
 
         ScopeOptions =
@@ -974,6 +983,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             TexturePreset.ClassicHd => 1.55,
             TexturePreset.MaximumDetail => 2.55,
             TexturePreset.Illustrated => 1.70,
+            TexturePreset.RusticPainted => 1.82,
             _ => 1.55
         };
 
@@ -1014,6 +1024,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             TexturePreset.ClassicHd => 0.18,
             TexturePreset.MaximumDetail => 0.51,
             TexturePreset.Illustrated => 0.26,
+            TexturePreset.RusticPainted => 0.29,
             _ => 0.18
         };
         double minutes = Math.Max(1, archiveCount * minutesPerArchive);
@@ -1067,6 +1078,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 TexturePreset.ClassicHd => 0.18,
                 TexturePreset.MaximumDetail => 0.51,
                 TexturePreset.Illustrated => 0.26,
+                TexturePreset.RusticPainted => 0.29,
                 _ => 0.18
             };
             minutes = Math.Max(1, estimate.SelectedArchives * minutesPerArchive);

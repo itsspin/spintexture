@@ -767,7 +767,7 @@
                                         </Border>
                                     </Grid>
                                     <TextBlock Grid.Row="2" Margin="1,8,1,0" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap"
-                                               Text="This pair demonstrates the recommended default only. Illustrated and Material Detail previews are generated from your own selected-zone build so SpinTexture never substitutes a marketing mockup for actual output." />
+                                               Text="This pair demonstrates the recommended default only. Illustrated, Rustic Painted, and Material Detail previews are generated from your own selected-zone build so SpinTexture never substitutes a marketing mockup for actual output." />
                                 </Grid>
                             </Border>
                         </StackPanel>

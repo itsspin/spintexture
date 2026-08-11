@@ -75,7 +75,7 @@ public sealed class RealEsrganCommandBuilder
         var modelName = preset switch
         {
             TexturePreset.Faithful => LegacyFaithfulModelName,
-            TexturePreset.Illustrated => IllustratedModelName,
+            TexturePreset.Illustrated or TexturePreset.RusticPainted => IllustratedModelName,
             _ => LegacyDetailModelName
         };
         return new TextureUpscaleModelSelection(

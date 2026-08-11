@@ -39,7 +39,6 @@ vendor/realesrgan/input*.jpg
 vendor/realesrgan/onepiece_demo.mp4
 vendor/realesrgan/vcomp140d.dll
 vendor/realesrgan/models/realesr-animevideov3-*
-vendor/realesrgan/models/realesrgan-x4plus-anime.*
 
 # IDE and OS files
 *.user

@@ -1147,6 +1147,25 @@ public static class TexturePipelineSelfTests
             Assert(
                 !illustratedCommand.Arguments.Contains("-x"),
                 "Illustrated should not silently enable the maximum-detail TTA route");
+
+            var rustic = legacyBuilder.ResolveModel(legacyModels, TexturePreset.RusticPainted);
+            AssertEqual(
+                RealEsrganCommandBuilder.IllustratedModelName,
+                rustic.Name,
+                "Rustic Painted should build on the validated illustrated reconstruction model");
+            var rusticCommand = legacyBuilder.CreateUpscale(
+                Path.Combine(root, "realesrgan-ncnn-vulkan.exe"),
+                legacyModels,
+                Path.Combine(root, "rustic-input-directory"),
+                Path.Combine(root, "rustic-output-directory"),
+                TexturePreset.RusticPainted);
+            AssertEqual(
+                RealEsrganCommandBuilder.IllustratedModelName,
+                GetCommandArgument(rusticCommand.Arguments, "-n")!,
+                "Rustic Painted command model");
+            Assert(
+                !rusticCommand.Arguments.Contains("-x"),
+                "Rustic Painted should not silently enable the maximum-detail TTA route");
         }
         finally
         {
@@ -1197,7 +1216,7 @@ public static class TexturePipelineSelfTests
                 "qeynos.s3d",
                 "stone01.dds",
                 TextureOverrideAction.Reprocess,
-                TexturePreset.Illustrated)
+                TexturePreset.RusticPainted)
         ]);
         try
         {
@@ -1289,6 +1308,43 @@ public static class TexturePipelineSelfTests
         AssertEqual(4, clamped.Height, "clamped height");
         var cropped = wrapped.Crop(1, 1, 2, 2);
         AssertEqual(2, cropped.Width, "cropped width");
+
+        var rusticSourceBytes = new byte[18 + (2 * 2 * 4)];
+        rusticSourceBytes[2] = 2;
+        BinaryPrimitives.WriteUInt16LittleEndian(rusticSourceBytes.AsSpan(12), 2);
+        BinaryPrimitives.WriteUInt16LittleEndian(rusticSourceBytes.AsSpan(14), 2);
+        rusticSourceBytes[16] = 32;
+        rusticSourceBytes[17] = 0x28;
+        var rusticColors = new (byte R, byte G, byte B, byte A)[]
+        {
+            (52, 118, 42, 255),
+            (132, 86, 48, 197),
+            (64, 82, 132, 83),
+            (214, 188, 142, 0)
+        };
+        for (var pixel = 0; pixel < rusticColors.Length; pixel++)
+        {
+            var offset = 18 + (pixel * 4);
+            rusticSourceBytes[offset] = rusticColors[pixel].B;
+            rusticSourceBytes[offset + 1] = rusticColors[pixel].G;
+            rusticSourceBytes[offset + 2] = rusticColors[pixel].R;
+            rusticSourceBytes[offset + 3] = rusticColors[pixel].A;
+        }
+
+        var rusticSource = TgaPixelBuffer.Read(rusticSourceBytes);
+        var rusticPainted = rusticSource.ApplyRusticPaintedGrade();
+        AssertSequenceEqual(
+            rusticSource.RgbaPixels.Span.ToArray().Where((_, index) => index % 4 == 3).ToArray(),
+            rusticPainted.RgbaPixels.Span.ToArray().Where((_, index) => index % 4 == 3).ToArray(),
+            "rustic painted grading must preserve alpha byte-for-byte");
+        Assert(
+            !rusticSource.RgbaPixels.Span.SequenceEqual(rusticPainted.RgbaPixels.Span),
+            "rustic painted grading should create a visible bounded color change");
+        var rusticSourceStats = rusticSource.CalculateVisibleColorStatistics();
+        var rusticPaintedStats = rusticPainted.CalculateVisibleColorStatistics();
+        Assert(
+            Math.Abs(rusticSourceStats.MeanLuminance - rusticPaintedStats.MeanLuminance) <= 10,
+            "rustic painted grading must keep mean luminance inside its stylized safety budget");
 
         var temporaryPath = Path.Combine(Path.GetTempPath(), $"spintexture-tga-{Guid.NewGuid():N}.tga");
         var pngPath = Path.Combine(Path.GetTempPath(), $"spintexture-tga-{Guid.NewGuid():N}.png");
@@ -1678,6 +1734,7 @@ public static class TexturePipelineSelfTests
         var missingOutputDestinationPathTwo = Path.Combine(root, "result", "lavastorm-rock-missing-output-2.tga");
         var classicDestinationPath = Path.Combine(root, "result", "lavastorm-rock-classic.tga");
         var illustratedDestinationPath = Path.Combine(root, "result", "lavastorm-rock-illustrated.tga");
+        var rusticDestinationPath = Path.Combine(root, "result", "lavastorm-rock-rustic-painted.tga");
         // Real profiles can already be deeply nested before per-build and
         // per-texture names are appended. Native processing must isolate its
         // intermediates from those legacy Win32 path-length limits.
@@ -2004,6 +2061,47 @@ public static class TexturePipelineSelfTests
                 .ConfigureAwait(false);
             Assert(illustratedMetadata is not null, "Illustrated output should be a readable TGA");
             AssertEqual(64, illustratedMetadata!.Width, "Illustrated smoke output width");
+
+            var rusticResult = await processor.ProcessAsync(
+                new NativeTextureProcessRequest(
+                    sourcePath,
+                    rusticDestinationPath,
+                    workPath,
+                    metadata,
+                    classification,
+                    new UpscaleOptions(
+                        TexturePreset.RusticPainted,
+                        AssetScope.SelectedZone,
+                        MaximumDimension: 64,
+                        GenerateMipMaps: false,
+                        InstallAfterBuild: false,
+                        SelectedZone: "lavastorm"),
+                    WrapPadding: 4),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            AssertEqual(64, rusticResult.Dimensions.OutputWidth, "Rustic Painted smoke target width");
+            Assert(
+                rusticResult.ProcessingRoute.Contains(
+                    "rustic painted",
+                    StringComparison.OrdinalIgnoreCase),
+                "Rustic Painted smoke should exercise the illustrated model plus the bounded painted grade");
+            var rusticMetadata = await new TextureHeaderSniffer()
+                .ReadFileAsync(rusticDestinationPath, cancellationToken)
+                .ConfigureAwait(false);
+            Assert(rusticMetadata is not null, "Rustic Painted output should be a readable TGA");
+            AssertEqual(64, rusticMetadata!.Width, "Rustic Painted smoke output width");
+            var illustratedPixels = await TgaPixelBuffer
+                .ReadFileAsync(illustratedDestinationPath, cancellationToken)
+                .ConfigureAwait(false);
+            var rusticPixels = await TgaPixelBuffer
+                .ReadFileAsync(rusticDestinationPath, cancellationToken)
+                .ConfigureAwait(false);
+            Assert(
+                !illustratedPixels.RgbaPixels.Span.SequenceEqual(rusticPixels.RgbaPixels.Span),
+                "Rustic Painted output should be visibly distinct from ungraded Illustrated output");
+            Assert(
+                rusticPixels.RgbaPixels.Span.ToArray().Where((_, index) => index % 4 == 3)
+                    .All(alpha => alpha == byte.MaxValue),
+                "Rustic Painted native route should retain fully opaque alpha exactly");
         }
         finally
         {

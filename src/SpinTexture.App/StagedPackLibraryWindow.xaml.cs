@@ -1079,6 +1079,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         TexturePreset.ClassicHd => "Texture HD",
         TexturePreset.MaximumDetail => "Material Detail",
         TexturePreset.Illustrated => "Illustrated / Clean Painted",
+        TexturePreset.RusticPainted => "Rustic Painted Fantasy",
         _ => preset.ToString()
     };
 

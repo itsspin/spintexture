@@ -976,6 +976,14 @@ public sealed class NativeTextureProcessor
         }
 
         ValidateNeuralOutput(fidelity);
+        if (key.WorkerPreset == TexturePreset.RusticPainted)
+        {
+            var painted = cropped.ApplyRusticPaintedGrade(
+                GetRusticPaintedStrength(job.Request));
+            ValidateStylizedOutput(CalculateFidelityMetrics(job.Decoded, painted));
+            cropped = painted;
+        }
+
         var mergedPath = Path.Combine(job.OperationDirectory, "merged.tga");
         await cropped.WriteFileAsync(mergedPath, cancellationToken).ConfigureAwait(false);
         var mipResult = await EncodeToDestinationAsync(
@@ -1018,6 +1026,8 @@ public sealed class NativeTextureProcessor
         {
             TexturePreset.MaximumDetail => "Batched Real-ESRGAN maximum-detail reconstruction with TTA",
             TexturePreset.Illustrated => "Batched Real-ESRGAN illustrated reconstruction",
+            TexturePreset.RusticPainted =>
+                "Batched illustrated reconstruction with bounded rustic painted grading",
             TexturePreset.Faithful when job.EffectivePreset != TexturePreset.Faithful =>
                 "Batched faithful Real-ESRNet reconstruction (fidelity fallback)",
             _ => "Batched Real-ESRNet faithful color restoration with seam-safe border"
@@ -1214,7 +1224,15 @@ public sealed class NativeTextureProcessor
         // The previous dual-pass frequency blend suppressed the material detail
         // users selected this profile to see. Alpha is still restored separately
         // in RunNeuralColorPassAsync, including cutout coverage preservation.
-        await primary.Image.WriteFileAsync(mergedPath, cancellationToken).ConfigureAwait(false);
+        var finalImage = primary.Image;
+        if (effectivePreset == TexturePreset.RusticPainted)
+        {
+            finalImage = finalImage.ApplyRusticPaintedGrade(
+                GetRusticPaintedStrength(request));
+            ValidateStylizedOutput(CalculateFidelityMetrics(decoded, finalImage));
+        }
+
+        await finalImage.WriteFileAsync(mergedPath, cancellationToken).ConfigureAwait(false);
 
         await EncodeToDestinationAsync(
             request,
@@ -1240,6 +1258,8 @@ public sealed class NativeTextureProcessor
                 "Real-ESRGAN maximum-detail reconstruction with TTA",
             TexturePreset.Illustrated =>
                 "Real-ESRGAN illustrated reconstruction",
+            TexturePreset.RusticPainted =>
+                "Real-ESRGAN illustrated reconstruction with bounded rustic painted grading",
             _ =>
                 "Real-ESRNet faithful color restoration with wrapped border"
         };
@@ -1396,6 +1416,45 @@ public sealed class NativeTextureProcessor
                 "The neural output introduced too many clipped black or white pixels "
                 + $"(+{fidelity.ExtremeLuminanceGrowth:P1}).");
         }
+    }
+
+    private static void ValidateStylizedOutput(TextureFidelityMetrics fidelity)
+    {
+        if (fidelity.SourceStatistics.Samples == 0)
+        {
+            return;
+        }
+
+        if (fidelity.EnhancedStatistics.Samples == 0
+            || fidelity.MeanLuminanceDrift > 10
+            || fidelity.MaximumMeanChannelDrift > 20
+            || fidelity.RoundTripLuminancePsnr < 24
+            || (fidelity.SourceEdgeEnergy >= 0.5
+                && fidelity.EdgeEnergyRatio is < 0.60 or > 2.15)
+            || fidelity.ExtremeLuminanceGrowth > 0.02)
+        {
+            throw new InvalidDataException(
+                "The rustic painted output exceeded its bounded palette, structure, or clipping limits.");
+        }
+    }
+
+    private static double GetRusticPaintedStrength(NativeTextureProcessRequest request)
+    {
+        var strength = request.Options.Scope switch
+        {
+            AssetScope.SpellEffectsOnly => 0.42,
+            AssetScope.CharactersAndEquipmentOnly => 0.76,
+            AssetScope.WorldCharactersAndEquipment => 0.86,
+            AssetScope.AllSafeTextures => 0.86,
+            _ => 1.0
+        };
+
+        if (request.Classification.Kind == TextureKind.Cutout)
+        {
+            strength *= 0.72;
+        }
+
+        return strength;
     }
 
     private static TextureFidelityMetrics CalculateFidelityMetrics(

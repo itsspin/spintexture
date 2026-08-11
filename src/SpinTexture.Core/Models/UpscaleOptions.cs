@@ -5,7 +5,8 @@ public enum TexturePreset
     Faithful,
     ClassicHd,
     MaximumDetail,
-    Illustrated
+    Illustrated,
+    RusticPainted
 }
 
 public enum AssetScope
