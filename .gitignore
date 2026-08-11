@@ -1,0 +1,52 @@
+# Build and SDK state
+**/bin/
+**/obj/
+**/artifacts/
+.artifacts/
+.dotnet/
+.dotnet-cli/
+.nuget/
+publish/
+artifacts/
+
+# Local analysis and benchmark output
+.bench-*/
+benchmark-*/
+perf-audit/
+pilot-workspace*/
+quality-v2/
+TestResults/
+coverage/
+coverage.*
+*.trx
+
+# Local environment files and credentials
+.env
+.env.*
+!.env.example
+
+# SpinTexture managed runtime data (never source-controlled)
+Tools/
+Cache/
+Staging/
+Backups/
+Logs/
+
+# Downloaded/vendor source archives that are not used by the build
+vendor/*.zip
+vendor/realesrnet-*/
+vendor/realesrgan/input*.jpg
+vendor/realesrgan/onepiece_demo.mp4
+vendor/realesrgan/vcomp140d.dll
+vendor/realesrgan/models/realesr-animevideov3-*
+vendor/realesrgan/models/realesrgan-x4plus-anime.*
+
+# IDE and OS files
+*.user
+*.suo
+.vs/
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+.DS_Store
