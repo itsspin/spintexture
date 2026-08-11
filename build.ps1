@@ -143,6 +143,8 @@ $requiredPublishedFiles = @(
     (Join-Path $resolvedPublishRoot 'docs\SAFETY_AND_RESTORE.md'),
     (Join-Path $resolvedPublishRoot 'Tools\texconv.exe'),
     (Join-Path $resolvedPublishRoot 'Tools\realesrgan\realesrgan-ncnn-vulkan.exe'),
+    (Join-Path $resolvedPublishRoot 'Tools\realesrgan\vcomp140.dll'),
+    (Join-Path $resolvedPublishRoot 'Tools\manifest.json'),
     (Join-Path $resolvedPublishRoot 'Tools\realesrgan\models\realesrgan-x4plus.bin'),
     (Join-Path $resolvedPublishRoot 'Tools\realesrgan\models\realesrgan-x4plus.param'),
     (Join-Path $resolvedPublishRoot 'Tools\realesrgan\models\realesrnet-x4plus.bin'),
@@ -157,6 +159,19 @@ foreach ($publishedFile in $requiredPublishedFiles) {
     if (-not (Test-Path -LiteralPath $publishedFile -PathType Leaf)) {
         throw "Published release is incomplete: $publishedFile"
     }
+}
+
+$startupSmoke = Start-Process `
+    -FilePath (Join-Path $resolvedPublishRoot 'SpinTexture.exe') `
+    -ArgumentList '--startup-smoke' `
+    -WorkingDirectory $resolvedPublishRoot `
+    -PassThru
+if (-not $startupSmoke.WaitForExit(60000)) {
+    Stop-Process -Id $startupSmoke.Id -Force -ErrorAction SilentlyContinue
+    throw 'Published SpinTexture startup smoke test timed out.'
+}
+if ($startupSmoke.ExitCode -ne 0) {
+    throw "Published SpinTexture startup smoke test failed with exit code $($startupSmoke.ExitCode)."
 }
 
 $manifest = Get-ChildItem -LiteralPath $resolvedPublishRoot -File -Recurse | ForEach-Object {

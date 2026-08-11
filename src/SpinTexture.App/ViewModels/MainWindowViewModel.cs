@@ -79,7 +79,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 "Most aggressive result; review a small zone first",
                 "Real-ESRGAN x4plus with TTA",
                 "Sharper generated material texture and contrast",
-                "Slowest route; TTA adds a second inference pass"),
+                "Slowest route; eight-view TTA performs substantially more GPU work"),
             new PresetOptionViewModel(
                 TexturePreset.Illustrated,
                 "Illustrated / Clean Painted",
@@ -106,7 +106,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             new ScopeOptionViewModel(AssetScope.WorldOnly, "World only", "Terrain, architecture, and safe world objects."),
             new ScopeOptionViewModel(AssetScope.CharactersAndEquipmentOnly, "Characters + equipment only", "Race models, armor, weapons, and dedicated wearable-item packs without the world."),
             new ScopeOptionViewModel(AssetScope.WorldCharactersAndEquipment, "World + characters", "Adds supported character and equipment textures."),
-            new ScopeOptionViewModel(AssetScope.SpellEffectsOnly, "Spell effects", "Preview-first enhancement of supported loose spell and particle art."),
+            new ScopeOptionViewModel(
+                AssetScope.SpellEffectsOnly,
+                "Spell effects",
+                "Preview-first loose effect art. Soft-translucent particles keep original alpha and use Original Clarity instead of stylization."),
             new ScopeOptionViewModel(AssetScope.AllSafeTextures, "All safe textures", "Every classified texture that is safe to transform.")
         ];
 
@@ -602,6 +605,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 cancellationToken);
 
             AddLog("DONE", $"Staged {result.Report.Statistics.EnhancedTextures:N0} enhanced textures without changing the live client.");
+            if (result.Report.Statistics.FallbackTextures > 0)
+            {
+                AddLog(
+                    "SAFE",
+                    $"{result.Report.Statistics.FallbackTextures:N0} texture(s) used a validated fallback route because the requested model output did not meet its safety gate.");
+            }
             foreach (string warning in result.Report.Statistics.Warnings.Take(12))
             {
                 AddLog("WARN", warning);

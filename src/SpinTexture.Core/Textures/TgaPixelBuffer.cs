@@ -432,9 +432,13 @@ public sealed class TgaPixelBuffer
             // Preserve the illustrated model's structure while taking the edge
             // off synthetic saturation that can look out of place on old meshes.
             var saturationScale = 1 - (strength * (0.075 + (0.045 * shadow)));
-            var targetLuma = luma - (strength * (2 + (3.5 * shadow)));
+            // Shape midtones without crushing already-dark source texels. This
+            // retains painted depth while preventing the grade from growing
+            // clipped-black regions on armor, hair, and night textures.
+            var targetLuma = luma
+                - (strength * (1.5 + (2.5 * shadow)) * midtone);
             var paintedBand = Math.Round(targetLuma / 14) * 14;
-            targetLuma += (paintedBand - targetLuma) * (0.16 * strength);
+            targetLuma += (paintedBand - targetLuma) * (0.16 * strength * midtone);
             targetLuma = Math.Clamp(targetLuma, 0, 255);
 
             var candidateRed = targetLuma

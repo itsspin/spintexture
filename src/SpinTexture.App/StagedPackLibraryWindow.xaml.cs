@@ -1246,7 +1246,11 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                         : $"{FormatPreset(manifest.Options.Preset)} \u00B7 {manifest.Options.MaximumDimension:N0}px \u00B7 "
                           + (report is null
                               ? string.Empty
-                              : $"{report.Statistics.EnhancedTextures:N0} enhanced \u00B7 {report.Statistics.PreservedTextures:N0} protected/missing \u00B7 ")
+                              : $"{report.Statistics.EnhancedTextures:N0} enhanced \u00B7 "
+                                + (report.Statistics.FallbackTextures > 0
+                                    ? $"{report.Statistics.FallbackTextures:N0} validated fallbacks \u00B7 "
+                                    : string.Empty)
+                                + $"{report.Statistics.PreservedTextures:N0} protected/missing \u00B7 ")
                           + $"{ArtifactCount:N0} archives \u00B7 {FormatBytes(StagedBytes)} \u00B7 "
                           + manifest.CreatedUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
             StateText = IsComposition
@@ -1270,6 +1274,9 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                   + $"The report records {report!.Statistics.EnhancedTextures:N0} newly enhanced, "
                   + $"{report!.Statistics.ReusedTextures:N0} reused, and "
                   + $"{report!.Statistics.PreservedTextures:N0} protected or still-missing texture entries. "
+                  + (report!.Statistics.FallbackTextures > 0
+                      ? $"{report.Statistics.FallbackTextures:N0} textures used a validated safety fallback instead of the requested model route. "
+                      : string.Empty)
                   + "Archive conflicts are checked before composition.";
             var isCharacterScope = manifest?.Options.Scope is
                 AssetScope.CharactersAndEquipmentOnly

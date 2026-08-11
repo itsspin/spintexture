@@ -7,13 +7,55 @@ namespace SpinTexture.App;
 
 public partial class App : Application
 {
+    private const string StartupSmokeArgument = "--startup-smoke";
+
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
 
         if (e.Args.Length == 0)
         {
-            new MainWindow().Show();
+            try
+            {
+                new MainWindow().Show();
+            }
+            catch (Exception exception)
+            {
+                var logPath = TryWriteStartupFailure(exception);
+                MessageBox.Show(
+                    "SpinTexture could not open its main window. No game files were changed."
+                    + (logPath is null
+                        ? string.Empty
+                        : $"\n\nDiagnostic details were saved to:\n{logPath}"),
+                    "SpinTexture startup failed",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+                Shutdown(1);
+            }
+
+            return;
+        }
+
+        if (e.Args.Length == 1
+            && e.Args[0].Equals(StartupSmokeArgument, StringComparison.Ordinal))
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            try
+            {
+                var window = new MainWindow();
+                window.ApplyTemplate();
+                window.Measure(new Size(1440, 900));
+                window.Arrange(new Rect(0, 0, 1440, 900));
+                window.UpdateLayout();
+                window.Close();
+                Shutdown(0);
+            }
+            catch (Exception exception)
+            {
+                TryWriteStartupFailure(exception);
+                Shutdown(1);
+            }
+
             return;
         }
 
@@ -97,4 +139,25 @@ public partial class App : Application
             "SpinTexture could not start Enhanced EQ",
             MessageBoxButton.OK,
             MessageBoxImage.Warning);
+
+    private static string? TryWriteStartupFailure(Exception exception)
+    {
+        try
+        {
+            var directory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "SpinTexture",
+                "Logs");
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, "startup-error.log");
+            File.WriteAllText(
+                path,
+                $"{DateTimeOffset.UtcNow:O}{Environment.NewLine}{exception}");
+            return path;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }

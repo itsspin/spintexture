@@ -132,11 +132,9 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder
                     // that opposite-edge sampling is intended.
                     WrapEdges: false),
                 cancellationToken).ConfigureAwait(false);
-            if (result.ProcessingRoute.Contains("fallback", StringComparison.OrdinalIgnoreCase))
-            {
-                counter.Warn(
-                    $"{context.RelativeInstallPath} used the legacy Real-ESRGAN fallback because the game-texture model was unavailable.");
-            }
+            var usedFallback = result.ProcessingRoute.Contains(
+                "fallback",
+                StringComparison.OrdinalIgnoreCase);
 
             var output = await sniffer.ReadFileAsync(context.DestinationPath, cancellationToken).ConfigureAwait(false);
             var expectedMipCount = GetValidatedResultMipCount(
@@ -163,6 +161,12 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder
                 result.Dimensions,
                 cancellationToken).ConfigureAwait(false);
             counter.Enhanced(new FileInfo(context.DestinationPath).Length);
+            if (usedFallback)
+            {
+                counter.Fallback();
+                counter.Warn(
+                    $"{context.RelativeInstallPath} used a validated fallback because the requested model was unavailable or failed its fidelity gate.");
+            }
         }
         catch (Exception exception) when (exception is NativeProcessException
                                                or InvalidDataException

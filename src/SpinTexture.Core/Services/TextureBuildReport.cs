@@ -86,6 +86,7 @@ public sealed record TextureBuildStatistics(
     IReadOnlyList<string> Warnings)
 {
     public int ReusedTextures { get; init; }
+    public int FallbackTextures { get; init; }
 }
 
 public sealed record TextureBuildReport(
@@ -120,6 +121,7 @@ internal sealed class TextureBuildCounter
     private int enhanced;
     private int preserved;
     private int reused;
+    private int fallback;
     private long sourceBytes;
     private long enhancedBytes;
 
@@ -160,6 +162,14 @@ internal sealed class TextureBuildCounter
         }
     }
 
+    public void Fallback()
+    {
+        lock (gate)
+        {
+            fallback++;
+        }
+    }
+
     public void Preserve(string reason)
     {
         lock (gate)
@@ -193,7 +203,8 @@ internal sealed class TextureBuildCounter
                 new Dictionary<string, int>(reasons, StringComparer.OrdinalIgnoreCase),
                 warnings.ToArray())
             {
-                ReusedTextures = reused
+                ReusedTextures = reused,
+                FallbackTextures = fallback
             };
         }
     }

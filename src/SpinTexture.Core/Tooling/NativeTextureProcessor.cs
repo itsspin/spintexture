@@ -705,7 +705,7 @@ public sealed class NativeTextureProcessor
                 {
                     nativeProgress?.Report(new NativeOutputLine(
                         NativeOutputStream.StandardError,
-                        $"{Path.GetFileName(job.Request.SourcePath)} failed the {key.WorkerPreset} fidelity gate; queued for the faithful ESRNet fallback batch."));
+                        $"{Path.GetFileName(job.Request.SourcePath)} failed the {key.WorkerPreset} fidelity gate; queued for the faithful ESRNet fallback batch. {completion.Error.Message}"));
                     faithfulRetries.Add(job);
                 }
                 else
@@ -975,7 +975,7 @@ public sealed class NativeTextureProcessor
             fidelity = anchoredFidelity;
         }
 
-        ValidateNeuralOutput(fidelity);
+        ValidateNeuralOutputForPreset(key.WorkerPreset, fidelity);
         if (key.WorkerPreset == TexturePreset.RusticPainted)
         {
             var painted = cropped.ApplyRusticPaintedGrade(
@@ -1364,15 +1364,23 @@ public sealed class NativeTextureProcessor
                 wrapEdges: request.WrapEdges);
         }
 
-        ValidateNeuralOutput(decoded, cropped);
+        ValidateNeuralOutputForPreset(
+            preset,
+            CalculateFidelityMetrics(decoded, cropped));
         return new NeuralColorPassResult(cropped, model);
     }
 
-    private static void ValidateNeuralOutput(
-        TgaPixelBuffer source,
-        TgaPixelBuffer enhanced)
+    internal static void ValidateNeuralOutputForPreset(
+        TexturePreset preset,
+        TextureFidelityMetrics fidelity)
     {
-        ValidateNeuralOutput(CalculateFidelityMetrics(source, enhanced));
+        if (preset is TexturePreset.Illustrated or TexturePreset.RusticPainted)
+        {
+            ValidateStylizedOutput(fidelity);
+            return;
+        }
+
+        ValidateNeuralOutput(fidelity);
     }
 
     private static void ValidateNeuralOutput(TextureFidelityMetrics fidelity)
@@ -1430,11 +1438,16 @@ public sealed class NativeTextureProcessor
             || fidelity.MaximumMeanChannelDrift > 20
             || fidelity.RoundTripLuminancePsnr < 24
             || (fidelity.SourceEdgeEnergy >= 0.5
-                && fidelity.EdgeEnergyRatio is < 0.60 or > 2.15)
+                && fidelity.EdgeEnergyRatio is < 0.40 or > 2.15)
             || fidelity.ExtremeLuminanceGrowth > 0.02)
         {
             throw new InvalidDataException(
-                "The rustic painted output exceeded its bounded palette, structure, or clipping limits.");
+                "The stylized output exceeded its bounded fidelity limits "
+                + $"(luma {fidelity.MeanLuminanceDrift:0.00}, "
+                + $"channel {fidelity.MaximumMeanChannelDrift:0.00}, "
+                + $"PSNR {fidelity.RoundTripLuminancePsnr:0.00} dB, "
+                + $"edge {fidelity.EdgeEnergyRatio:0.00}x, "
+                + $"clipping growth {fidelity.ExtremeLuminanceGrowth:P1}).");
         }
     }
 
@@ -2038,7 +2051,7 @@ public sealed class NativeTextureProcessor
         NativeTextureProcessResult? Result,
         Exception? Error);
 
-    private sealed record TextureFidelityMetrics(
+    internal sealed record TextureFidelityMetrics(
         TextureColorStatistics SourceStatistics,
         TextureColorStatistics EnhancedStatistics,
         double MeanLuminanceDrift,
