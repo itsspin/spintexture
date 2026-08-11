@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Windows.Data;
 using System.Windows.Media.Imaging;
 using SpinTexture.Core.Services;
+using SpinTexture.Core.Models;
 
 namespace SpinTexture.App.ViewModels;
 
@@ -30,7 +31,7 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
     private bool isImageLoading;
     private double zoom = 1;
 
-    public PreviewGalleryViewModel(string manifestPath)
+    public PreviewGalleryViewModel(string manifestPath, bool canApplyChoices = false)
     {
         if (string.IsNullOrWhiteSpace(manifestPath))
         {
@@ -38,9 +39,16 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
         }
 
         ManifestPath = Path.GetFullPath(manifestPath);
+        CanApplyChoices = canApplyChoices;
         manifestDirectory = Path.GetDirectoryName(ManifestPath) ?? Environment.CurrentDirectory;
         EntriesView = CollectionViewSource.GetDefaultView(Entries);
         EntriesView.Filter = FilterEntry;
+        EntriesView.SortDescriptions.Add(new SortDescription(
+            nameof(PreviewGalleryEntryViewModel.ArchivePath),
+            ListSortDirection.Ascending));
+        EntriesView.SortDescriptions.Add(new SortDescription(
+            nameof(PreviewGalleryEntryViewModel.LogicalName),
+            ListSortDirection.Ascending));
 
         ZoomInCommand = new RelayCommand(_ => Zoom += 0.25, _ => Zoom < MaximumZoom);
         ZoomOutCommand = new RelayCommand(_ => Zoom -= 0.25, _ => Zoom > MinimumZoom);
@@ -57,6 +65,16 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
     public RelayCommand ZoomOutCommand { get; }
     public RelayCommand ResetZoomCommand { get; }
     public RelayCommand FitZoomCommand { get; }
+    public IReadOnlyList<TextureChoiceOptionViewModel> ChoiceOptions { get; } =
+    [
+        new("Use pack result", null, null),
+        new("Keep original", TextureOverrideAction.PreserveOriginal, null),
+        new("Redo: Original Clarity", TextureOverrideAction.Reprocess, TexturePreset.Faithful),
+        new("Redo: Texture HD", TextureOverrideAction.Reprocess, TexturePreset.ClassicHd),
+        new("Redo: Material Detail", TextureOverrideAction.Reprocess, TexturePreset.MaximumDetail),
+        new("Redo: Illustrated / Clean Painted", TextureOverrideAction.Reprocess, TexturePreset.Illustrated)
+    ];
+    public bool CanApplyChoices { get; }
 
     public PreviewGalleryEntryViewModel? SelectedEntry
     {
@@ -175,6 +193,19 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
         : Math.Abs(Zoom - CalculateFitZoom()) < 0.001
             ? $"Fit overview - downsampled to {Zoom * 100:0.#}% for display"
             : $"Scaled inspection view - {Zoom * 100:0.#}% of output pixels";
+    public bool HasPendingChoices => CanApplyChoices && Entries.Any(entry => entry.SelectedChoice.Action is not null);
+    public string PendingChoiceText => HasPendingChoices
+        ? $"Create revised pack ({Entries.Count(entry => entry.SelectedChoice.Action is not null):N0} selected)"
+        : "Choose Keep original or a Redo style";
+
+    public IReadOnlyList<TextureOverride> GetTextureOverrides() => Entries
+        .Where(entry => entry.SelectedChoice.Action is not null)
+        .Select(entry => new TextureOverride(
+            entry.ArchivePath,
+            entry.LogicalName,
+            entry.SelectedChoice.Action!.Value,
+            entry.SelectedChoice.Preset))
+        .ToArray();
 
     private void LoadManifest()
     {
@@ -210,6 +241,7 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
                 throw new InvalidDataException("The preview manifest is missing required build information.");
             }
 
+            var indexedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (TexturePreviewEntry entry in manifest.Entries
                          .OrderBy(item => item.ArchivePath, StringComparer.OrdinalIgnoreCase)
                          .ThenBy(item => item.LogicalName, StringComparer.OrdinalIgnoreCase))
@@ -217,8 +249,24 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
                 var galleryEntry = new PreviewGalleryEntryViewModel(entry, manifestDirectory);
                 if (galleryEntry.HasValidMetadata)
                 {
+                    galleryEntry.SelectedChoice = ChoiceOptions[0];
+                    galleryEntry.ChoiceChanged += OnEntryChoiceChanged;
                     Entries.Add(galleryEntry);
+                    indexedKeys.Add(CreateEntryKey(entry.ArchivePath, entry.LogicalName));
                 }
+            }
+
+            foreach (var entry in manifest.ReviewEntries ?? [])
+            {
+                if (!indexedKeys.Add(CreateEntryKey(entry.ArchivePath, entry.LogicalName)))
+                {
+                    continue;
+                }
+
+                var galleryEntry = new PreviewGalleryEntryViewModel(entry);
+                galleryEntry.SelectedChoice = ChoiceOptions[0];
+                galleryEntry.ChoiceChanged += OnEntryChoiceChanged;
+                Entries.Add(galleryEntry);
             }
 
             if (Entries.Count == 0)
@@ -241,6 +289,9 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
             ImageStatusText = "Preview manifest could not be loaded";
         }
     }
+
+    private static string CreateEntryKey(string archivePath, string logicalName) =>
+        $"{archivePath?.Trim().Replace('\\', '/')}|{logicalName?.Trim()}";
 
     private bool FilterEntry(object item)
     {
@@ -327,6 +378,8 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
             (not null, not null) => "Full-resolution pair loaded - both sides use identical output dimensions",
             (null, not null) => "Original preview image is missing",
             (not null, null) => "Enhanced preview image is missing",
+            _ when !entry.HasImagePair =>
+                "Indexed texture - choose Keep original or a Redo style; a full image pair was not captured",
             _ => "Both preview images are missing"
         };
 
@@ -390,6 +443,16 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
         imageLoadCancellation?.Cancel();
         imageLoadCancellation?.Dispose();
         imageLoadCancellation = null;
+        foreach (var entry in Entries)
+        {
+            entry.ChoiceChanged -= OnEntryChoiceChanged;
+        }
+    }
+
+    private void OnEntryChoiceChanged(object? sender, EventArgs e)
+    {
+        OnPropertyChanged(nameof(HasPendingChoices));
+        OnPropertyChanged(nameof(PendingChoiceText));
     }
 
     private sealed record ImageLoadResult(
@@ -398,8 +461,9 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
         string Status);
 }
 
-public sealed class PreviewGalleryEntryViewModel
+public sealed class PreviewGalleryEntryViewModel : ObservableObject
 {
+    private TextureChoiceOptionViewModel selectedChoice = TextureChoiceOptionViewModel.Default;
     public PreviewGalleryEntryViewModel(TexturePreviewEntry entry, string manifestDirectory)
     {
         ArchivePath = entry.ArchivePath ?? string.Empty;
@@ -414,6 +478,18 @@ public sealed class PreviewGalleryEntryViewModel
                     ?? PreviewGalleryViewModel.LoadBitmap(OriginalImagePath, 180);
     }
 
+    public PreviewGalleryEntryViewModel(TextureReviewEntry entry)
+    {
+        ArchivePath = entry.ArchivePath ?? string.Empty;
+        LogicalName = string.IsNullOrWhiteSpace(entry.LogicalName) ? "Unnamed texture" : entry.LogicalName;
+        OriginalImagePath = string.Empty;
+        EnhancedImagePath = string.Empty;
+        OriginalWidth = entry.OriginalWidth;
+        OriginalHeight = entry.OriginalHeight;
+        EnhancedWidth = entry.EnhancedWidth;
+        EnhancedHeight = entry.EnhancedHeight;
+    }
+
     public string ArchivePath { get; }
     public string LogicalName { get; }
     public string OriginalImagePath { get; }
@@ -423,13 +499,30 @@ public sealed class PreviewGalleryEntryViewModel
     public int EnhancedWidth { get; }
     public int EnhancedHeight { get; }
     public BitmapSource? Thumbnail { get; }
+    public event EventHandler? ChoiceChanged;
+    public TextureChoiceOptionViewModel SelectedChoice
+    {
+        get => selectedChoice;
+        set
+        {
+            if (SetProperty(ref selectedChoice, value ?? TextureChoiceOptionViewModel.Default))
+            {
+                ChoiceChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
+    }
 
     public bool HasValidMetadata =>
         OriginalWidth > 0
         && OriginalHeight > 0
         && EnhancedWidth > 0
-        && EnhancedHeight > 0
-        && (!string.IsNullOrWhiteSpace(OriginalImagePath) || !string.IsNullOrWhiteSpace(EnhancedImagePath));
+        && EnhancedHeight > 0;
+    public bool HasImagePair =>
+        !string.IsNullOrWhiteSpace(OriginalImagePath)
+        || !string.IsNullOrWhiteSpace(EnhancedImagePath);
+    public string PreviewAvailabilityText => HasImagePair
+        ? "FULL BEFORE / AFTER"
+        : "INDEXED • SELECTABLE";
 
     public string ArchiveName => string.IsNullOrWhiteSpace(ArchivePath)
         ? "Loose texture"
@@ -475,6 +568,15 @@ public sealed class PreviewGalleryEntryViewModel
                 || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
                 || relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal))
             {
+                // Older preview manifests store absolute image paths. When the
+                // verified pack library is relocated, accept only the same
+                // generated filename inside the new manifest directory.
+                var relocatedCandidate = Path.Combine(previewRoot, Path.GetFileName(path));
+                if (File.Exists(relocatedCandidate))
+                {
+                    return relocatedCandidate;
+                }
+
                 return string.Empty;
             }
 
@@ -485,4 +587,12 @@ public sealed class PreviewGalleryEntryViewModel
             return path;
         }
     }
+}
+
+public sealed record TextureChoiceOptionViewModel(
+    string Label,
+    TextureOverrideAction? Action,
+    TexturePreset? Preset)
+{
+    public static TextureChoiceOptionViewModel Default { get; } = new("Use pack result", null, null);
 }

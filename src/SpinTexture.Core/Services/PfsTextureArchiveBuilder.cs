@@ -162,6 +162,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder
             .ToArray();
         var sourceTexturePaths = new List<string>();
         var enhancedTexturePaths = new List<string>();
+        var textureOverrides = TextureOverridePolicy.CreateLookup(
+            context.Options.TextureOverrides);
         if (rebuildFromReuseArchive)
         {
             if (new FileInfo(reuseArchivePath!).Length > uint.MaxValue)
@@ -209,6 +211,30 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder
                     entry,
                     sourceTexturePath,
                     cancellationToken).ConfigureAwait(false);
+                var textureOverride = TextureOverridePolicy.Find(
+                    textureOverrides,
+                    context.RelativeInstallPath,
+                    entry.Name);
+                if (textureOverride?.Action == TextureOverrideAction.PreserveOriginal)
+                {
+                    counter.Preserve("User selected original texture");
+                    var restored = await RestoreOriginalIfBaselineChangedAsync(
+                        reuseArchive,
+                        entry,
+                        sourceTexturePath,
+                        context.WorkingDirectory,
+                        index,
+                        replacements,
+                        enhancedTexturePaths,
+                        cancellationToken).ConfigureAwait(false);
+                    if (!restored)
+                    {
+                        TryDeleteTemporaryFile(sourceTexturePath);
+                    }
+
+                    continue;
+                }
+                var forceReprocess = textureOverride?.Action == TextureOverrideAction.Reprocess;
                 if (!entryAllowed)
                 {
                     var restored = await RestoreOriginalIfBaselineChangedAsync(
@@ -314,7 +340,20 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder
                     continue;
                 }
 
-                if (reuseArchive is not null
+                var reviewDimensions = UpscaleDimensions.Calculate(
+                    metadata.Width,
+                    metadata.Height,
+                    context.Options.MaximumDimension);
+                previewCollector?.RegisterReview(new TextureReviewEntry(
+                    context.RelativeInstallPath,
+                    entry.Name,
+                    metadata.Width,
+                    metadata.Height,
+                    reviewDimensions.OutputWidth,
+                    reviewDimensions.OutputHeight));
+
+                if (!forceReprocess
+                    && reuseArchive is not null
                     && reuseArchive.TryGetEntry(entry.Name, out var reusedEntry)
                     && reusedEntry is not null)
                 {
@@ -434,6 +473,10 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder
                         || Math.Max(metadata.Width, metadata.Height) < 128))
                 {
                     textureOptions = context.Options with { Preset = TexturePreset.Faithful };
+                }
+                if (forceReprocess && textureOverride?.Preset is { } selectedPreset)
+                {
+                    textureOptions = context.Options with { Preset = selectedPreset };
                 }
 
                 pendingTextures.Add(new PendingTexture(

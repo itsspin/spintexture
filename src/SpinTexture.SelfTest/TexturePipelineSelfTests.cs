@@ -23,6 +23,7 @@ public static class TexturePipelineSelfTests
         await output.WriteLineAsync("Immutable World/zone cutout revision-repair tests passed.")
             .ConfigureAwait(false);
         TestHeaderSniffingAndClassification();
+        TestArtDirectionAndEffectPolicies();
         TestTextureProcessingPipelineRevision();
         await output.WriteLineAsync("Texture metadata tests passed.").ConfigureAwait(false);
         await ControlTextureAndIndexedBmpSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
@@ -54,6 +55,9 @@ public static class TexturePipelineSelfTests
             .ConfigureAwait(false);
         await StagedPackDeletionSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Guarded staged-pack deletion tests passed.")
+            .ConfigureAwait(false);
+        await StagedPackStorageSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
+        await output.WriteLineAsync("Verified staged-pack storage migration tests passed.")
             .ConfigureAwait(false);
         await SelectedPackSwitchSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Selected staged-pack switch tests passed.")
@@ -1059,6 +1063,8 @@ public static class TexturePipelineSelfTests
             File.WriteAllBytes(Path.Combine(legacyModels, "realesrgan-x4plus.bin"), [1]);
             File.WriteAllBytes(Path.Combine(legacyModels, "realesrnet-x4plus.param"), [1]);
             File.WriteAllBytes(Path.Combine(legacyModels, "realesrnet-x4plus.bin"), [1]);
+            File.WriteAllBytes(Path.Combine(legacyModels, "realesrgan-x4plus-anime.param"), [1]);
+            File.WriteAllBytes(Path.Combine(legacyModels, "realesrgan-x4plus-anime.bin"), [1]);
 
             var legacyBuilder = new RealEsrganCommandBuilder();
             var fallback = legacyBuilder.ResolveModel(legacyModels, TexturePreset.ClassicHd);
@@ -1123,10 +1129,91 @@ public static class TexturePipelineSelfTests
                 RealEsrganCommandBuilder.LegacyFaithfulModelName,
                 faithful.Name,
                 "Faithful should retain its conservative model");
+            var illustrated = legacyBuilder.ResolveModel(legacyModels, TexturePreset.Illustrated);
+            AssertEqual(
+                RealEsrganCommandBuilder.IllustratedModelName,
+                illustrated.Name,
+                "Illustrated should use the bundled official illustrated model");
+            var illustratedCommand = legacyBuilder.CreateUpscale(
+                Path.Combine(root, "realesrgan-ncnn-vulkan.exe"),
+                legacyModels,
+                Path.Combine(root, "input-directory"),
+                Path.Combine(root, "output-directory"),
+                TexturePreset.Illustrated);
+            AssertEqual(
+                RealEsrganCommandBuilder.IllustratedModelName,
+                GetCommandArgument(illustratedCommand.Arguments, "-n")!,
+                "Illustrated command model");
+            Assert(
+                !illustratedCommand.Arguments.Contains("-x"),
+                "Illustrated should not silently enable the maximum-detail TTA route");
         }
         finally
         {
             DeleteTree(root);
+        }
+    }
+
+    private static void TestArtDirectionAndEffectPolicies()
+    {
+        var color = new TextureMetadata(
+            TextureFileFormat.Dds,
+            "DXT1",
+            256,
+            256,
+            1,
+            4,
+            TextureAlphaStatus.None,
+            IsCompressed: true,
+            IsTopDown: false,
+            IsCubeMap: false,
+            IsVolumeTexture: false,
+            1,
+            "BC1_UNORM",
+            UsesDx10Header: false);
+        Assert(
+            SpellEffectTexturePolicy.CanEnhance(@"SpellEffects\fire01.dds", color),
+            "single-image spell art should be eligible for the explicit effect scope");
+        Assert(
+            !SpellEffectTexturePolicy.CanEnhance(@"SpellEffects\fire_atlas.dds", color),
+            "packed effect atlases must remain protected");
+        Assert(
+            !SpellEffectTexturePolicy.CanEnhance(@"textures\fire01.dds", color),
+            "ordinary loose textures must not leak into the spell-effect scope");
+
+        var normal = color with
+        {
+            PayloadFormat = "DXT5",
+            TexconvFormat = "BC3_UNORM",
+            AlphaStatus = TextureAlphaStatus.Explicit
+        };
+        Assert(
+            !SpellEffectTexturePolicy.CanEnhance(@"SpellEffects\fire_n.dds", normal),
+            "technical maps in effect folders must remain protected");
+
+        TextureOverridePolicy.ValidateAll(
+        [
+            new TextureOverride(
+                "qeynos.s3d",
+                "stone01.dds",
+                TextureOverrideAction.Reprocess,
+                TexturePreset.Illustrated)
+        ]);
+        try
+        {
+            TextureOverridePolicy.ValidateAll(
+            [
+                new TextureOverride(
+                    "../qeynos.s3d",
+                    "stone01.dds",
+                    TextureOverrideAction.PreserveOriginal)
+            ]);
+            throw new InvalidOperationException(
+                "Self-test failed: texture choices must reject path traversal.");
+        }
+        catch (InvalidDataException)
+        {
+            // Expected.
         }
     }
 
@@ -1590,6 +1677,7 @@ public static class TexturePipelineSelfTests
         var missingOutputDestinationPathOne = Path.Combine(root, "result", "lavastorm-rock-missing-output-1.tga");
         var missingOutputDestinationPathTwo = Path.Combine(root, "result", "lavastorm-rock-missing-output-2.tga");
         var classicDestinationPath = Path.Combine(root, "result", "lavastorm-rock-classic.tga");
+        var illustratedDestinationPath = Path.Combine(root, "result", "lavastorm-rock-illustrated.tga");
         // Real profiles can already be deeply nested before per-build and
         // per-texture names are appended. Native processing must isolate its
         // intermediates from those legacy Win32 path-length limits.
@@ -1888,6 +1976,34 @@ public static class TexturePipelineSelfTests
                 .ConfigureAwait(false);
             Assert(classicOutputMetadata is not null, "Classic HD output should be a readable TGA");
             AssertEqual(64, classicOutputMetadata!.Width, "Classic HD smoke output width");
+
+            var illustratedResult = await processor.ProcessAsync(
+                new NativeTextureProcessRequest(
+                    sourcePath,
+                    illustratedDestinationPath,
+                    workPath,
+                    metadata,
+                    classification,
+                    new UpscaleOptions(
+                        TexturePreset.Illustrated,
+                        AssetScope.SelectedZone,
+                        MaximumDimension: 64,
+                        GenerateMipMaps: false,
+                        InstallAfterBuild: false,
+                        SelectedZone: "lavastorm"),
+                    WrapPadding: 4),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            AssertEqual(64, illustratedResult.Dimensions.OutputWidth, "Illustrated smoke target width");
+            Assert(
+                illustratedResult.ProcessingRoute.Contains(
+                    "illustrated",
+                    StringComparison.OrdinalIgnoreCase),
+                "Illustrated smoke should exercise the bundled illustrated model without an unreported route change");
+            var illustratedMetadata = await new TextureHeaderSniffer()
+                .ReadFileAsync(illustratedDestinationPath, cancellationToken)
+                .ConfigureAwait(false);
+            Assert(illustratedMetadata is not null, "Illustrated output should be a readable TGA");
+            AssertEqual(64, illustratedMetadata!.Width, "Illustrated smoke output width");
         }
         finally
         {

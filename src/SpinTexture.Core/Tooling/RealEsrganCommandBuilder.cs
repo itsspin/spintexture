@@ -8,6 +8,7 @@ public sealed class RealEsrganCommandBuilder
     public const int ModelScale = 4;
     public const string LegacyFaithfulModelName = "realesrnet-x4plus";
     public const string LegacyDetailModelName = "realesrgan-x4plus";
+    public const string IllustratedModelName = "realesrgan-x4plus-anime";
 
     public NativeProcessCommand CreateUpscale(
         string executablePath,
@@ -71,10 +72,14 @@ public sealed class RealEsrganCommandBuilder
     public TextureUpscaleModelSelection ResolveModel(string modelsPath, TexturePreset preset)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(modelsPath);
+        var modelName = preset switch
+        {
+            TexturePreset.Faithful => LegacyFaithfulModelName,
+            TexturePreset.Illustrated => IllustratedModelName,
+            _ => LegacyDetailModelName
+        };
         return new TextureUpscaleModelSelection(
-            preset == TexturePreset.Faithful
-                ? LegacyFaithfulModelName
-                : LegacyDetailModelName,
+            modelName,
             IsTextureSpecialized: false);
     }
 

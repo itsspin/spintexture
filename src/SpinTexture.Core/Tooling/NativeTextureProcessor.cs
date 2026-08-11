@@ -1017,6 +1017,7 @@ public sealed class NativeTextureProcessor
         return key.WorkerPreset switch
         {
             TexturePreset.MaximumDetail => "Batched Real-ESRGAN maximum-detail reconstruction with TTA",
+            TexturePreset.Illustrated => "Batched Real-ESRGAN illustrated reconstruction",
             TexturePreset.Faithful when job.EffectivePreset != TexturePreset.Faithful =>
                 "Batched faithful Real-ESRNet reconstruction (fidelity fallback)",
             _ => "Batched Real-ESRNet faithful color restoration with seam-safe border"
@@ -1237,6 +1238,8 @@ public sealed class NativeTextureProcessor
                 "Single-pass texture reconstruction (legacy Real-ESRGAN fallback)",
             TexturePreset.MaximumDetail =>
                 "Real-ESRGAN maximum-detail reconstruction with TTA",
+            TexturePreset.Illustrated =>
+                "Real-ESRGAN illustrated reconstruction",
             _ =>
                 "Real-ESRNet faithful color restoration with wrapped border"
         };

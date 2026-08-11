@@ -1,14 +1,11 @@
-<Window x:Class="SpinTexture.App.StagedPackLibraryWindow"
+<UserControl x:Class="SpinTexture.App.StagedPackLibraryWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="SpinTexture - Staged Pack Library"
-        Width="1420" Height="880" MinWidth="1080" MinHeight="700"
-        WindowStartupLocation="CenterOwner"
         Background="#08090C" Foreground="#F4F0E7"
         FontFamily="Segoe UI" FontSize="13"
         TextOptions.TextFormattingMode="Display"
         UseLayoutRounding="True">
-    <Window.Resources>
+    <UserControl.Resources>
         <SolidColorBrush x:Key="Panel" Color="#111318" />
         <SolidColorBrush x:Key="PanelRaised" Color="#171A20" />
         <SolidColorBrush x:Key="PanelInset" Color="#0B0D11" />
@@ -120,7 +117,7 @@
             <Setter Property="FontSize" Value="13" />
             <Setter Property="VerticalContentAlignment" Value="Center" />
         </Style>
-    </Window.Resources>
+    </UserControl.Resources>
 
     <Grid Margin="24">
         <Grid.RowDefinitions>
@@ -136,11 +133,14 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel>
-                <TextBlock Text="STAGED PACK LIBRARY" Style="{StaticResource Eyebrow}" />
-                <TextBlock Text="Choose, inspect, repair, or remove completed packs"
+                <TextBlock Text="MANAGE TEXTURE PACKS" Style="{StaticResource Eyebrow}" />
+                <TextBlock Text="Choose which completed packs should be active"
                            FontSize="28" FontWeight="SemiBold" Margin="0,5,0,0" />
-                <TextBlock Text="Checkmarks define the next install set. Highlighted rows are for preview, repair, and deletion; Ctrl/Shift-click highlights several rows."
+                <TextBlock Text="A checkmark means “include this pack the next time I install.” Clicking the rest of a row only opens its details; it does not add or remove that pack."
                            Style="{StaticResource Caption}" FontSize="13" Margin="0,7,18,0" />
+                <TextBlock Text="{Binding PackStorageText}" Foreground="#8FA6A1" FontSize="11"
+                           TextTrimming="CharacterEllipsis" Margin="0,6,18,0"
+                           ToolTip="Change this location from Pack Storage Settings on the main window." />
             </StackPanel>
             <Button Grid.Column="1" Content="Refresh Library" Click="Refresh_Click"
                     VerticalAlignment="Bottom" Margin="12,0,0,0"
@@ -151,7 +151,10 @@
                 Background="#0D1015" BorderBrush="{StaticResource Border}"
                 BorderThickness="1" CornerRadius="8">
             <WrapPanel VerticalAlignment="Center">
-                <TextBlock Text="STATUS KEY" Style="{StaticResource Eyebrow}" VerticalAlignment="Center" Margin="0,0,16,0" />
+                <TextBlock Text="QUICK GUIDE" Style="{StaticResource Eyebrow}" VerticalAlignment="Center" Margin="0,0,16,0" />
+                <TextBlock Text="1  Check packs" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,16,0" />
+                <TextBlock Text="2  Review the summary" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,16,0" />
+                <TextBlock Text="3  Install checked packs" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,22,0" />
                 <Border Background="#17352B" BorderBrush="#356A57" BorderThickness="1" CornerRadius="4" Padding="8,4" Margin="0,0,7,0">
                     <TextBlock Text="ACTIVE" Foreground="{StaticResource Safe}" FontSize="11" FontWeight="Bold" />
                 </Border>
@@ -159,15 +162,7 @@
                 <Border Background="#20252C" BorderBrush="#4A525E" BorderThickness="1" CornerRadius="4" Padding="8,4" Margin="0,0,7,0">
                     <TextBlock Text="STAGED" Foreground="#E9EDF3" FontSize="11" FontWeight="Bold" />
                 </Border>
-                <TextBlock Text="reusable build" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="0,0,18,0" />
-                <Border Background="#382B18" BorderBrush="#785C2F" BorderThickness="1" CornerRadius="4" Padding="8,4" Margin="0,0,7,0">
-                    <TextBlock Text="REPAIR AVAILABLE" Foreground="{StaticResource Warning}" FontSize="11" FontWeight="Bold" />
-                </Border>
-                <TextBlock Text="focused pack can be upgraded" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="0,0,18,0" />
-                <Border Background="#451F22" BorderBrush="#8A4149" BorderThickness="1" CornerRadius="4" Padding="8,4" Margin="0,0,7,0">
-                    <TextBlock Text="SOURCE MISMATCH" Foreground="#FFB9BE" FontSize="11" FontWeight="Bold" />
-                </Border>
-                <TextBlock Text="repair before install" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+                <TextBlock Text="saved and reusable" Style="{StaticResource Caption}" VerticalAlignment="Center" />
             </WrapPanel>
         </Border>
 
@@ -193,38 +188,41 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <StackPanel>
-                            <TextBlock Text="1 / BUILD THE INSTALL SET" Style="{StaticResource Eyebrow}" />
-                            <TextBlock Text="Completed packs by category" Style="{StaticResource SectionTitle}" Margin="0,4,0,0" />
-                            <TextBlock Text="Click a row for focused details. Ctrl/Shift-click several rows, then use the bulk controls below."
+                            <TextBlock Text="1 / CHECK PACKS TO INCLUDE" Style="{StaticResource Eyebrow}" />
+                            <TextBlock Text="Available completed packs" Style="{StaticResource SectionTitle}" Margin="0,4,0,0" />
+                            <TextBlock Text="Use the checkbox inside each card. To manage several cards at once, Ctrl/Shift-click their rows so they have an orange outline."
                                        Style="{StaticResource Caption}" Margin="0,4,16,0" />
                         </StackPanel>
-                        <TextBlock Grid.Column="1" Text="{Binding SelectionText}" Foreground="{StaticResource Safe}"
-                                   FontSize="12" FontWeight="SemiBold" TextAlignment="Right" VerticalAlignment="Bottom" />
+                        <StackPanel Grid.Column="1" Width="210">
+                            <TextBlock Text="SHOW CATEGORY" Foreground="{StaticResource Muted}" FontSize="10" FontWeight="Bold" />
+                            <ComboBox ItemsSource="{Binding CategoryFilters}" SelectedItem="{Binding SelectedCategoryFilter}"
+                                      Margin="0,5,0,7" AutomationProperties.Name="Pack category filter" />
+                            <TextBlock Text="{Binding SelectionText}" Foreground="{StaticResource Safe}"
+                                       FontSize="11" FontWeight="SemiBold" TextAlignment="Right" TextWrapping="Wrap" />
+                        </StackPanel>
                     </Grid>
 
-                    <Border Grid.Row="1" Background="{StaticResource PanelInset}" BorderBrush="{StaticResource Border}"
-                            BorderThickness="1" CornerRadius="7" Padding="10,10,4,2" Margin="0,0,0,11">
-                        <WrapPanel>
-                            <Button Content="Check Highlighted" Style="{StaticResource ToolbarButton}"
-                                    Click="CheckHighlighted_Click" IsEnabled="{Binding CanCheckHighlighted}"
-                                    ToolTip="Add every highlighted installable row to the install set." />
-                            <Button Content="Uncheck Highlighted" Style="{StaticResource ToolbarButton}"
-                                    Click="UncheckHighlighted_Click" IsEnabled="{Binding CanUncheckHighlighted}"
-                                    ToolTip="Remove every highlighted installable row from the install set." />
-                            <Button Content="Keep Current + Highlighted" Style="{StaticResource ToolbarButton}"
-                                    Click="AddHighlightedToCurrent_Click" IsEnabled="{Binding CanAddHighlightedToCurrent}"
-                                    Background="#1A3028" BorderBrush="#356A57"
-                                    ToolTip="Keep every currently active source component checked and add the highlighted rows." />
-                            <Button Content="Use Current Only" Style="{StaticResource ToolbarButton}"
-                                    Click="CheckCurrentInstall_Click" IsEnabled="{Binding CanCheckCurrentInstall}"
-                                    ToolTip="Reset checkmarks to the source packs that make up the current enhanced install." />
-                            <Button Content="Check All Eligible" Style="{StaticResource ToolbarButton}"
-                                    Click="CheckAll_Click" IsEnabled="{Binding CanCheckAll}"
-                                    ToolTip="Check every source pack. Conflicting archives are still blocked safely before install." />
-                            <Button Content="Clear Checks" Style="{StaticResource ToolbarButton}"
-                                    Click="ClearChecks_Click" IsEnabled="{Binding CanClearChecks}" />
-                        </WrapPanel>
-                    </Border>
+                    <Expander Grid.Row="1" Header="Advanced multi-pack selection tools" Margin="0,0,0,11"
+                              Foreground="#D9DDE4" ToolTip="Most users only need the checkbox in each pack card.">
+                        <Border Background="{StaticResource PanelInset}" BorderBrush="{StaticResource Border}"
+                                BorderThickness="1" CornerRadius="7" Padding="10,10,4,2" Margin="0,7,0,0">
+                            <WrapPanel>
+                                <Button Content="Add Highlighted to Install" Style="{StaticResource ToolbarButton}"
+                                        Click="CheckHighlighted_Click" IsEnabled="{Binding CanCheckHighlighted}" />
+                                <Button Content="Remove Highlighted from Install" Style="{StaticResource ToolbarButton}"
+                                        Click="UncheckHighlighted_Click" IsEnabled="{Binding CanUncheckHighlighted}" />
+                                <Button Content="Keep Active + Add Highlighted" Style="{StaticResource ToolbarButton}"
+                                        Click="AddHighlightedToCurrent_Click" IsEnabled="{Binding CanAddHighlightedToCurrent}"
+                                        Background="#1A3028" BorderBrush="#356A57" />
+                                <Button Content="Reset Checks to Active Packs" Style="{StaticResource ToolbarButton}"
+                                        Click="CheckCurrentInstall_Click" IsEnabled="{Binding CanCheckCurrentInstall}" />
+                                <Button Content="Check Every Compatible Pack" Style="{StaticResource ToolbarButton}"
+                                        Click="CheckAll_Click" IsEnabled="{Binding CanCheckAll}" />
+                                <Button Content="Clear All Checkmarks" Style="{StaticResource ToolbarButton}"
+                                        Click="ClearChecks_Click" IsEnabled="{Binding CanClearChecks}" />
+                            </WrapPanel>
+                        </Border>
+                    </Expander>
 
                     <ListBox x:Name="PackList" Grid.Row="2"
                              ItemsSource="{Binding PacksView}"
@@ -269,8 +267,8 @@
                                                   Margin="0,3,14,0" Padding="2"
                                                   AutomationProperties.Name="{Binding Title}">
                                             <StackPanel Margin="5,0,0,0">
-                                                <TextBlock Text="INSTALL" Foreground="#E9EDF3" FontSize="11" FontWeight="Bold" />
-                                                <TextBlock Text="SET" Foreground="#AAB0BA" FontSize="10" FontWeight="SemiBold" />
+                                                <TextBlock Text="INCLUDE" Foreground="#E9EDF3" FontSize="11" FontWeight="Bold" />
+                                                <TextBlock Text="WHEN INSTALLING" Foreground="#AAB0BA" FontSize="9" FontWeight="SemiBold" />
                                             </StackPanel>
                                         </CheckBox>
                                         <StackPanel Grid.Column="1">
@@ -336,36 +334,36 @@
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
                     <StackPanel>
-                        <TextBlock Text="2 / FOCUSED DETAILS + MANAGEMENT" Style="{StaticResource Eyebrow}" />
-                        <TextBlock Text="Inspect one; manage one or many" Style="{StaticResource SectionTitle}" Margin="0,4,0,0" />
+                        <TextBlock Text="2 / FOCUSED PACK" Style="{StaticResource Eyebrow}" />
+                        <TextBlock Text="Review, repair, or remove one pack" Style="{StaticResource SectionTitle}" Margin="0,4,0,0" />
                         <TextBlock Text="{Binding HighlightedSelectionText}" Style="{StaticResource Caption}" Margin="0,4,0,0" />
                     </StackPanel>
 
                     <Border Grid.Row="1" Background="{StaticResource PanelInset}" BorderBrush="{StaticResource Border}"
                             BorderThickness="1" CornerRadius="7" Padding="12" Margin="0,13,0,11">
                         <StackPanel>
-                            <TextBlock Text="{Binding SelectedPack.Title, TargetNullValue=Highlight a pack to inspect it.}"
+                            <TextBlock Text="{Binding SelectedPack.Title, TargetNullValue=Click a pack card to see its details.}"
                                        FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding SelectedPack.ContentsSummary, TargetNullValue='Preview, repair, and source-repair actions apply only to the focused pack. Delete applies to every highlighted row after a fresh safety preflight.'}"
+                            <TextBlock Text="{Binding SelectedPack.ContentsSummary, TargetNullValue='The checkbox controls installation. Clicking a card controls which pack is shown here. Ctrl/Shift-click several cards only when you want a bulk action.'}"
                                        Foreground="#D2D6DD" FontSize="12" TextWrapping="Wrap" LineHeight="18" Margin="0,7,0,0" />
                         </StackPanel>
                     </Border>
 
                     <StackPanel Grid.Row="2">
                         <WrapPanel>
-                            <Button Content="Open Focused Preview" Click="Preview_Click" IsEnabled="{Binding CanPreview}"
+                            <Button Content="Open This Pack’s Preview" Click="Preview_Click" IsEnabled="{Binding CanPreview}"
                                     Background="#193027" BorderBrush="#356A57" />
                             <Button Content="{Binding SelectedPack.RepairButtonText, TargetNullValue=Repair Focused Pack}"
-                                    Click="Repair_Click" IsEnabled="{Binding CanRepair}"
+                                    Click="Repair_Click" IsEnabled="{Binding CanRepair}" ToolTip="Creates a new corrected pack while preserving this completed pack."
                                     Background="#26324A" BorderBrush="#526D9E" />
-                            <Button Content="Repair Focused Source" Click="RepairSourceMismatch_Click"
+                            <Button Content="Fix This Pack’s Source Mismatch" Click="RepairSourceMismatch_Click"
                                     IsEnabled="{Binding CanRepairSourceMismatch}"
                                     Background="#382B18" BorderBrush="#785C2F" />
-                            <Button Content="Delete Highlighted..." Click="Delete_Click" IsEnabled="{Binding CanDelete}"
+                            <Button Content="{Binding DeleteButtonText}" Click="Delete_Click" IsEnabled="{Binding CanDelete}"
                                     Background="#3A1D20" BorderBrush="#8C4A53" Foreground="#FFDADD"
                                     ToolTip="Preflight and permanently delete every highlighted pack. Active or referenced packs block the whole operation." />
                         </WrapPanel>
-                        <TextBlock Text="Preview and repair use the focused row. Delete uses every orange-highlighted row and never touches live game files."
+                        <TextBlock Text="Preview and repair affect only the pack named above. Delete affects every orange-outlined row and never deletes live game files or original backups."
                                    Style="{StaticResource Caption}" FontSize="11" Margin="0,0,0,9" />
                     </StackPanel>
 
@@ -374,7 +372,7 @@
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="*" />
                         </Grid.RowDefinitions>
-                        <TextBlock Text="ARCHIVES IN FOCUSED PACK" Foreground="{StaticResource Muted}"
+                        <TextBlock Text="GAME ARCHIVES PROVIDED BY THIS PACK" Foreground="{StaticResource Muted}"
                                    FontSize="11" FontWeight="Bold" Margin="2,2,0,8" />
                         <ListBox Grid.Row="1" ItemsSource="{Binding SelectedPack.ArtifactPaths}"
                                  Background="#0B0D11" BorderBrush="{StaticResource Border}" BorderThickness="1"
@@ -420,7 +418,7 @@
                                  Foreground="{StaticResource Accent}" BorderThickness="0" />
                 </Grid>
                 <CheckBox Grid.Row="1" IsChecked="{Binding IsInstallAcknowledged}" Margin="0,10,0,0">
-                    <TextBlock Text="I reviewed the checkmarked install set and understand that installing custom client files may be unsupported."
+                    <TextBlock Text="I reviewed the checked packs above and understand that installing custom client files may be unsupported."
                                TextWrapping="Wrap" FontSize="12" Foreground="#CDD1D8" />
                 </CheckBox>
                 <Grid Grid.Row="2" Margin="0,10,0,0">
@@ -433,8 +431,8 @@
                                VerticalAlignment="Center" Margin="0,0,18,0" />
                     <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
                         <Button Content="Cancel Operation" Click="Cancel_Click" IsEnabled="{Binding IsBusy}" />
-                        <Button Content="Close" Click="Close_Click" IsEnabled="{Binding CanClose}" />
-                        <Button Content="Verify + Install Checkmarked Set" Click="Install_Click"
+                        <Button Content="Back to Build" Click="Close_Click" IsEnabled="{Binding CanClose}" />
+                        <Button Content="{Binding InstallButtonText}" Click="Install_Click"
                                 IsEnabled="{Binding CanInstall}" IsDefault="True"
                                 Background="#9B3B16" BorderBrush="#F1793D" Foreground="White"
                                 ToolTip="Exact-verify, conflict-check, and install only the checkmarked set. AI upscaling is not rerun." />
@@ -443,4 +441,4 @@
             </Grid>
         </Border>
     </Grid>
-</Window>
+</UserControl>

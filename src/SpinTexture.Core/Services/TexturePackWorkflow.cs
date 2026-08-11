@@ -5,6 +5,7 @@ using SpinTexture.Core.Archives;
 using SpinTexture.Core.Models;
 using SpinTexture.Core.Pipeline;
 using SpinTexture.Core.Tooling;
+using SpinTexture.Core.Textures;
 
 namespace SpinTexture.Core.Services;
 
@@ -104,6 +105,7 @@ public sealed class TexturePackWorkflow
                 nameof(options),
                 "The texture cap must be 1024, 2048, or 4096 pixels.");
         }
+        TextureOverridePolicy.ValidateAll(options.TextureOverrides);
 
         var originalSources = await PrepareBuildOriginalSourcesAsync(
                 paths,
@@ -120,7 +122,7 @@ public sealed class TexturePackWorkflow
 
         var archiveScopes = DiscoverArchiveScopes(paths.InstallPath);
         var selectedArchives = SelectArchives(archiveScopes, options);
-        if (selectedArchives.Count == 0)
+        if (selectedArchives.Count == 0 && options.Scope != AssetScope.SpellEffectsOnly)
         {
             throw new InvalidOperationException("The selected scope did not resolve to any EverQuest archives.");
         }
@@ -147,7 +149,7 @@ public sealed class TexturePackWorkflow
             progress,
             cancellationToken).ConfigureAwait(false);
 
-        if (options.Scope == AssetScope.AllSafeTextures)
+        if (options.Scope is AssetScope.AllSafeTextures or AssetScope.SpellEffectsOnly)
         {
             await AddLooseTextureItemsAsync(
                 paths,
@@ -197,13 +199,17 @@ public sealed class TexturePackWorkflow
 
         string? previewManifestPath = null;
         var previewEntries = previewCollector.Snapshot();
-        if (previewEntries.Count > 0)
+        var reviewEntries = previewCollector.ReviewSnapshot();
+        if (previewEntries.Count > 0 || reviewEntries.Count > 0)
         {
             var previewManifest = new TexturePreviewManifest(
                 TexturePreviewManifest.CurrentSchemaVersion,
                 staged.BuildId,
                 DateTimeOffset.UtcNow,
-                previewEntries);
+                previewEntries)
+            {
+                ReviewEntries = reviewEntries
+            };
             previewManifestPath = Path.Combine(
                 staged.BuildDirectory,
                 "previews",
@@ -339,10 +345,13 @@ public sealed class TexturePackWorkflow
         string baselineManifestPath,
         TexturePreset retryPreset = TexturePreset.Faithful,
         IProgress<ProgressUpdate>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyList<TextureOverride>? textureOverrides = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentException.ThrowIfNullOrWhiteSpace(baselineManifestPath);
+        TextureOverridePolicy.ValidateAll(textureOverrides);
+        var isManualTextureRevision = textureOverrides is { Count: > 0 };
         var repairStartedUtc = DateTimeOffset.UtcNow;
         var validation = EverQuestInstall.Validate(paths.InstallPath);
         if (!validation.IsValid)
@@ -394,10 +403,16 @@ public sealed class TexturePackWorkflow
         var requiresPipelineRepair = TextureProcessingPipeline.RequiresRepair(
             baselineReport,
             baseline.Options.Scope);
-        var isCutoutMipRepair = TextureProcessingPipeline.RequiresCutoutMipUpgrade(
-            baselineReport,
-            baseline.Options.Scope);
-        if (isPipelineRepairScope && !requiresPipelineRepair)
+        if (isManualTextureRevision && requiresPipelineRepair)
+        {
+            throw new InvalidOperationException(
+                "Upgrade this staged pack to the current texture pipeline before applying individual texture choices. The baseline was left unchanged.");
+        }
+        var isCutoutMipRepair = !isManualTextureRevision
+            && TextureProcessingPipeline.RequiresCutoutMipUpgrade(
+                baselineReport,
+                baseline.Options.Scope);
+        if (!isManualTextureRevision && isPipelineRepairScope && !requiresPipelineRepair)
         {
             throw new InvalidOperationException(
                 "This staged pack already uses the current texture pipeline. The completed pack was left unchanged.");
@@ -429,6 +444,37 @@ public sealed class TexturePackWorkflow
                 artifact.Entry.StagedLength,
                 artifact.Entry.StagedSha256),
             StringComparer.OrdinalIgnoreCase);
+        if (isManualTextureRevision)
+        {
+            foreach (var choice in textureOverrides!)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var canonicalArchive = choice.ArchivePath
+                    .Trim()
+                    .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+                var artifact = baselineInfo.Artifacts.FirstOrDefault(candidate =>
+                    candidate.CanonicalRelativeInstallPath.Equals(
+                        canonicalArchive,
+                        StringComparison.OrdinalIgnoreCase));
+                if (artifact is null
+                    || !EverQuestInstall.IsPfsArchiveExtension(Path.GetExtension(canonicalArchive)))
+                {
+                    throw new InvalidDataException(
+                        $"The reviewed archive is not part of this verified PFS pack: {choice.ArchivePath}.");
+                }
+
+                await using var reviewedArchive = await PfsArchive.OpenAsync(
+                    artifact.PayloadPath,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                if (!reviewedArchive.TryGetEntry(choice.LogicalName, out var reviewedEntry)
+                    || reviewedEntry is null
+                    || !reviewedEntry.IsTexture)
+                {
+                    throw new InvalidDataException(
+                        $"The reviewed texture no longer exists in {choice.ArchivePath}: {choice.LogicalName}.");
+                }
+            }
+        }
 
         InstallManifest? activeInstall = null;
         string? activeInstallDirectory = null;
@@ -446,8 +492,11 @@ public sealed class TexturePackWorkflow
             // A revision upgrade must preserve the original pack's visual
             // profile. The explicit retry preset remains available to the
             // legacy character/equipment missing-texture repair.
-            Preset = isCutoutMipRepair ? baseline.Options.Preset : retryPreset,
-            InstallAfterBuild = false
+            Preset = isCutoutMipRepair || isManualTextureRevision
+                ? baseline.Options.Preset
+                : retryPreset,
+            InstallAfterBuild = false,
+            TextureOverrides = textureOverrides
         };
         var archiveScopes = DiscoverArchiveScopes(paths.InstallPath);
         var selectedArchives = SelectArchives(archiveScopes, repairOptions);
@@ -467,7 +516,7 @@ public sealed class TexturePackWorkflow
                 $"Repair coverage no longer includes {uncoveredBaselineArtifacts.Length:N0} archive(s) from the original pack ({examples}). The original staged pack remains intact; rebuild instead of creating an incomplete replacement.");
         }
 
-        var repairArchives = isCutoutMipRepair
+        var repairArchives = (isCutoutMipRepair || isManualTextureRevision)
             ? selectedArchives
                 .Where(path => baselineEntries.ContainsKey(
                     Path.GetRelativePath(paths.InstallPath, path)))
@@ -488,8 +537,8 @@ public sealed class TexturePackWorkflow
                     or AssetScope.WorldCharactersAndEquipment,
             reuseArchivePaths: reuseArchivePaths,
             reuseArchiveFingerprints: reuseArchiveFingerprints,
-            rebuildFromReuseArchive: isCutoutMipRepair,
-            retryUnchangedEntries: !isCutoutMipRepair);
+            rebuildFromReuseArchive: isCutoutMipRepair || isManualTextureRevision,
+            retryUnchangedEntries: !(isCutoutMipRepair || isManualTextureRevision));
 
         var items = new List<StagedBuildItem>();
         for (var index = 0; index < repairArchives.Count; index++)
@@ -499,7 +548,9 @@ public sealed class TexturePackWorkflow
             var relativePath = Path.GetRelativePath(paths.InstallPath, liveArchivePath);
             progress?.Report(new ProgressUpdate(
                 "Repair plan",
-                isCutoutMipRepair
+                isManualTextureRevision
+                    ? "Verifying prior output and locating only user-selected texture changes."
+                    : isCutoutMipRepair
                     ? "Verifying prior output and locating only enhanced cutouts built with the retired mip chain."
                     : "Verifying prior successes and locating only missing texture work.",
                 index,
@@ -562,7 +613,8 @@ public sealed class TexturePackWorkflow
         }
 
 
-        if (isCutoutMipRepair && items.Count != baselineEntries.Count)
+        if ((isCutoutMipRepair || isManualTextureRevision)
+            && items.Count != baselineEntries.Count)
         {
             throw new InvalidOperationException(
                 "The World/zone revision repair could not account for every archive in the verified baseline. The original staged pack remains intact; no incomplete replacement was created.");
@@ -573,13 +625,15 @@ public sealed class TexturePackWorkflow
                 paths,
                 repairOptions,
                 items,
-                RequireAllItems: isCutoutMipRepair),
+                RequireAllItems: isCutoutMipRepair || isManualTextureRevision),
             progress,
             cancellationToken).ConfigureAwait(false);
         var preliminaryStatistics = counter.Snapshot();
-        counter.Warn(isCutoutMipRepair
-            ? $"Cutout mip repair reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and reprocessed only changed alpha-tested outputs that failed the current mip policy; source-identical entries were not retried."
-            : $"Repair reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and retried only unchanged eligible entries.");
+        counter.Warn(isManualTextureRevision
+            ? $"Texture revision reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and changed only explicitly reviewed entries."
+            : isCutoutMipRepair
+                ? $"Cutout mip repair reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and reprocessed only changed alpha-tested outputs that failed the current mip policy; source-identical entries were not retried."
+                : $"Repair reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and retried only unchanged eligible entries.");
         var statistics = counter.Snapshot();
         if (statistics.EnhancedTextures == 0 && statistics.ReusedTextures == 0)
         {
@@ -601,6 +655,7 @@ public sealed class TexturePackWorkflow
             DurationSeconds = (repairCompletedUtc - repairStartedUtc).TotalSeconds,
             IsIncrementalRepair = true,
             IsCutoutMipRepair = isCutoutMipRepair,
+            IsManualTextureRevision = isManualTextureRevision,
             BaselineBuildId = baseline.BuildId,
             BaselineTexturePipelineRevision = baselineReport?.TexturePipelineRevision ?? 0,
             TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision
@@ -610,13 +665,17 @@ public sealed class TexturePackWorkflow
 
         string? previewManifestPath = null;
         var previewEntries = previewCollector.Snapshot();
-        if (previewEntries.Count > 0)
+        var reviewEntries = previewCollector.ReviewSnapshot();
+        if (previewEntries.Count > 0 || reviewEntries.Count > 0)
         {
             var previewManifest = new TexturePreviewManifest(
                 TexturePreviewManifest.CurrentSchemaVersion,
                 staged.BuildId,
                 DateTimeOffset.UtcNow,
-                previewEntries);
+                previewEntries)
+            {
+                ReviewEntries = reviewEntries
+            };
             previewManifestPath = Path.Combine(
                 staged.BuildDirectory,
                 "previews",
@@ -947,13 +1006,17 @@ public sealed class TexturePackWorkflow
 
         string? previewManifestPath = null;
         var previewEntries = previewCollector.Snapshot();
-        if (previewEntries.Count > 0)
+        var reviewEntries = previewCollector.ReviewSnapshot();
+        if (previewEntries.Count > 0 || reviewEntries.Count > 0)
         {
             var previewManifest = new TexturePreviewManifest(
                 TexturePreviewManifest.CurrentSchemaVersion,
                 staged.BuildId,
                 DateTimeOffset.UtcNow,
-                previewEntries);
+                previewEntries)
+            {
+                ReviewEntries = reviewEntries
+            };
             previewManifestPath = Path.Combine(
                 staged.BuildDirectory,
                 "previews",
@@ -1869,6 +1932,7 @@ public sealed class TexturePackWorkflow
             AssetScope.WorldCharactersAndEquipment => scopes.WorldArchives
                 .Concat(scopes.CharacterAndEquipmentArchives),
             AssetScope.AllSafeTextures => scopes.AllArchives,
+            AssetScope.SpellEffectsOnly => [],
             _ => throw new ArgumentOutOfRangeException(nameof(options))
         };
 
@@ -2107,8 +2171,16 @@ public sealed class TexturePackWorkflow
         IProgress<ProgressUpdate>? progress,
         CancellationToken cancellationToken)
     {
-        var loosePaths = EverQuestTextureScanner.EnumerateLooseTextures(paths.InstallPath).ToArray();
-        var builder = new LooseTextureArtifactBuilder(processor, counter, previewCollector);
+        var loosePaths = EverQuestTextureScanner.EnumerateLooseTextures(paths.InstallPath)
+            .Where(path => options.Scope != AssetScope.SpellEffectsOnly
+                || SpellEffectTexturePolicy.IsEffectPath(
+                    Path.GetRelativePath(paths.InstallPath, path)))
+            .ToArray();
+        var builder = new LooseTextureArtifactBuilder(
+            processor,
+            counter,
+            previewCollector,
+            allowSpellEffects: options.Scope == AssetScope.SpellEffectsOnly);
         for (var index = 0; index < loosePaths.Length; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -2138,10 +2210,17 @@ public sealed class TexturePackWorkflow
             var sourcePath = resolvedSource.Path;
             try
             {
-                if (await LooseTextureArtifactBuilder.IsCandidateAsync(
-                    sourcePath,
-                    options.MaximumDimension,
-                    cancellationToken).ConfigureAwait(false))
+                var isCandidate = options.Scope == AssetScope.SpellEffectsOnly
+                    ? await LooseTextureArtifactBuilder.IsSpellEffectCandidateAsync(
+                        sourcePath,
+                        relativePath,
+                        options.MaximumDimension,
+                        cancellationToken).ConfigureAwait(false)
+                    : await LooseTextureArtifactBuilder.IsCandidateAsync(
+                        sourcePath,
+                        options.MaximumDimension,
+                        cancellationToken).ConfigureAwait(false);
+                if (isCandidate)
                 {
                     items.Add(new StagedBuildItem(
                         relativePath,

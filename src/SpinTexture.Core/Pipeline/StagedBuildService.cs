@@ -26,6 +26,7 @@ public sealed class StagedBuildService
             throw new ArgumentException("A staged build must contain at least one install artifact.", nameof(request));
         }
 
+        using var stagingLock = StagingLibraryLock.Acquire(request.Paths.WorkspacePath);
         request.Paths.EnsureWorkspaceDirectories();
         var buildId = PathGuard.ValidateIdentifier(request.BuildId, "build");
         var buildDirectory = PathGuard.ResolveUnderRoot(request.Paths.StagingPath, buildId);

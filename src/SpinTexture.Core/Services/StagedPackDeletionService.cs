@@ -157,6 +157,7 @@ public sealed class StagedPackDeletionService
         ArgumentException.ThrowIfNullOrWhiteSpace(manifestPath);
         paths.EnsureWorkspaceDirectories();
         using var transactionLock = TransactionLock.Acquire(paths.WorkspacePath);
+        using var stagingLock = StagingLibraryLock.Acquire(paths.WorkspacePath);
 
         // This is intentionally a fresh plan under the same cross-process lock
         // held through deletion. Installs and composition commits cannot make the

@@ -8,6 +8,9 @@ public sealed record PresetOptionViewModel(
     string Eyebrow,
     string Description,
     string Detail,
+    string Model,
+    string Look,
+    string Performance,
     bool IsRecommended = false);
 
 public sealed record ScopeOptionViewModel(

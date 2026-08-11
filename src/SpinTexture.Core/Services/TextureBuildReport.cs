@@ -103,6 +103,7 @@ public sealed record TextureBuildReport(
     public bool IsIncrementalRepair { get; init; }
     public bool IsSourceMismatchRepair { get; init; }
     public bool IsCutoutMipRepair { get; init; }
+    public bool IsManualTextureRevision { get; init; }
     public string? BaselineBuildId { get; init; }
     public int BaselineTexturePipelineRevision { get; init; }
     public int ReusedArtifacts { get; init; }

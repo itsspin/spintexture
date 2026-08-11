@@ -12,13 +12,17 @@ SpinTexture is an offline texture-pack builder. It never runs inside EverQuest L
 6. **Fidelity gate.** The final reconstruction is reduced to the source grid and checked for palette/luminance drift, structural error, clipping, and lost or exaggerated edge energy. Aggressive output that fails retries through the Faithful route; a failed Faithful result is omitted and the original member remains unchanged.
 7. **Rebuild and verify in staging.** SpinTexture reconstructs the complete archive outside the game directory, reopens it, and verifies member names, CRCs, dimensions, formats, mip counts, preserved hashes, and the PFS 4 GiB limit.
 8. **Preview and compose.** Completed builds remain immutable in the Staged Pack Library. Compatible packs can be selected together without rerunning AI. Disjoint additions are promoted incrementally; conflicting whole archives are blocked.
+9. **Relocatable staged storage.** The large completed-pack library can be moved independently of backups and transaction metadata. Migration copies into a SpinTexture-owned destination, rejects reparse points and unrelated destination contents, SHA-256 verifies the complete file tree, commits the profile setting atomically, and only then attempts to remove the old managed copy.
 9. **Install transactionally.** Installation creates exact SHA-256 backups and uses atomic replacement, post-write verification, rollback, and crash-recovery manifests. Restore returns every managed artifact to its recorded original bytes.
 
 ## Upscale routes
 
 - **Faithful:** Real-ESRNet x4plus. Conservative restoration with minimal invented detail.
 - **Texture HD (recommended):** PBRify Upscaler SPAN V4 for compatible material/diffuse textures. Painted graphics, animated art, and soft alpha use the Faithful route. Failed specialized output retries Faithful.
-- **Maximum Detail:** Real-ESRGAN x4plus with its strongest reconstruction route and the same fidelity/fallback gates. Review this preset zone by zone.
+- **Material Detail:** Real-ESRGAN x4plus with test-time augmentation and the same fidelity/fallback gates. This is generated texture microdetail, not a PBR material or geometry replacement; review it zone by zone.
+- **Illustrated / Clean Painted:** the official Real-ESRGAN x4plus Anime model, packaged and SHA-256 pinned. It can simplify and clean painted texture forms but cannot add mesh outlines or replace the game renderer. It retains the same container, alpha, mip, fidelity, and Faithful-fallback gates.
+
+Each completed PFS build records a searchable safe-texture index. A review-driven revision can restore a selected member from the verified original or bypass reuse and reprocess only that member with a selected preset. All other valid enhanced members are raw-carried from the verified immutable baseline. Loose spell-effect art uses a separate conservative allowlist; packed sheets and technical/control resources remain protected.
 
 The selected maximum dimension is a ceiling, not a command to make every file 4K. SpinTexture chooses one meaningful neural enlargement and preserves aspect ratio.
 

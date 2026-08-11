@@ -33,6 +33,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private string _estimatedOutputText = "Analyze to estimate";
     private string _estimatedArchivesText = "—";
     private string _estimatedTimeText = "—";
+    private string _estimateBasisText = "Analyze the client for a hardware-aware forecast.";
     private string _workspaceText = "Staged workspace • live client remains unchanged";
     private string _installHealthText = "No enhanced pack is active";
     private string? _previewManifestPath;
@@ -53,23 +54,41 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         [
             new PresetOptionViewModel(
                 TexturePreset.Faithful,
-                "Faithful",
-                "UP TO 4× CONSERVATIVE",
+                "Original Clarity",
+                "FAITHFUL / LOW VARIANCE",
                 "Cleans compression noise and sharpens forms without inventing surface detail.",
-                "Best match to original pixels"),
+                "Best match to the original art",
+                "Real-ESRNet x4plus",
+                "Original palette, forms, and material character",
+                "Fastest neural route"),
             new PresetOptionViewModel(
                 TexturePreset.ClassicHd,
                 "Texture HD",
-                "4× BALANCED",
+                "NATURAL / RECOMMENDED",
                 "Uses a game-texture-trained model to reconstruct clearly visible stone, wood, cloth, and terrain detail.",
-                "Strong single pass • recommended for the world",
+                "Natural detail without changing the art direction",
+                "PBRify SPAN V4 + faithful safety fallback",
+                "Crisper surfaces while preserving the classic look",
+                "Fast balanced route",
                 IsRecommended: true),
             new PresetOptionViewModel(
                 TexturePreset.MaximumDetail,
-                "Maximum Detail",
-                "4× AGGRESSIVE",
-                "Stronger reconstruction for selected hero assets. Requires close visual review.",
-                "Highest detail • highest variance")
+                "Material Detail",
+                "STRONG / GENERATED DETAIL",
+                "Pushes rock, metal, cloth, and hero assets toward stronger microdetail. It does not add true PBR materials.",
+                "Most aggressive result; review a small zone first",
+                "Real-ESRGAN x4plus with TTA",
+                "Sharper generated material texture and contrast",
+                "Slowest route; TTA adds a second inference pass"),
+            new PresetOptionViewModel(
+                TexturePreset.Illustrated,
+                "Illustrated / Clean Painted",
+                "STYLIZED / CLEAN SHAPES",
+                "Uses the official illustrated Real-ESRGAN model for flatter painted detail and cleaner shapes.",
+                "Stylizes texture art; it does not add toon outlines to 3D geometry",
+                "Real-ESRGAN x4plus-anime",
+                "Cleaner painted forms and less photographic surface noise",
+                "Moderate route; faithful fallback protected")
         ];
 
         ScopeOptions =
@@ -78,6 +97,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             new ScopeOptionViewModel(AssetScope.WorldOnly, "World only", "Terrain, architecture, and safe world objects."),
             new ScopeOptionViewModel(AssetScope.CharactersAndEquipmentOnly, "Characters + equipment only", "Race models, armor, weapons, and dedicated wearable-item packs without the world."),
             new ScopeOptionViewModel(AssetScope.WorldCharactersAndEquipment, "World + characters", "Adds supported character and equipment textures."),
+            new ScopeOptionViewModel(AssetScope.SpellEffectsOnly, "Spell effects", "Preview-first enhancement of supported loose spell and particle art."),
             new ScopeOptionViewModel(AssetScope.AllSafeTextures, "All safe textures", "Every classified texture that is safe to transform.")
         ];
 
@@ -95,6 +115,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         OpenPreviewGalleryCommand = new RelayCommand(_ => OpenPreviewGallery(), _ => CanOpenPreviewGallery());
         OpenPackLibraryCommand = new RelayCommand(
             _ => PackLibraryRequested?.Invoke(InstallPath),
+            _ => !IsBusy && IsClientSignaturePresent);
+        OpenPackStorageCommand = new RelayCommand(
+            _ => PackStorageRequested?.Invoke(InstallPath),
             _ => !IsBusy && IsClientSignaturePresent);
         OpenNativeGraphicsCommand = new RelayCommand(
             _ => NativeGraphicsRequested?.Invoke(InstallPath),
@@ -119,13 +142,22 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public AsyncRelayCommand PlayEnhancedCommand { get; }
     public RelayCommand OpenPreviewGalleryCommand { get; }
     public RelayCommand OpenPackLibraryCommand { get; }
+    public RelayCommand OpenPackStorageCommand { get; }
     public RelayCommand OpenNativeGraphicsCommand { get; }
     public AsyncRelayCommand RestoreCommand { get; }
     public RelayCommand CancelCommand { get; }
 
     public event Action<string>? PreviewGalleryRequested;
     public event Action<string>? PackLibraryRequested;
+    public event Action<string>? PackStorageRequested;
     public event Action<string>? NativeGraphicsRequested;
+
+    public async Task RefreshAfterPackStorageMoveAsync()
+    {
+        PreviewManifestPath = null;
+        await RefreshPackLibraryStateAsync().ConfigureAwait(true);
+        AddLog("SAFE", "Staged-pack storage location updated; future builds and Pack Library actions use the new location.");
+    }
 
     public async Task RefreshPackLibraryStateAsync()
     {
@@ -425,6 +457,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         get => _estimatedTimeText;
         private set => SetProperty(ref _estimatedTimeText, value);
     }
+
+    public string EstimateBasisText
+    {
+        get => _estimateBasisText;
+        private set => SetProperty(ref _estimateBasisText, value);
+    }
+
+    public string HardwarePerformanceText =>
+        $"{Environment.ProcessorCount:N0} logical CPU threads detected · up to {Math.Clamp(Environment.ProcessorCount / 4, 1, 4):N0} bounded CPU lanes · one stable Vulkan GPU queue · up to 64 textures per neural batch";
 
     public string WorkspaceText
     {
@@ -886,6 +927,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         EstimatedOutputText = "Analyze to estimate";
         EstimatedArchivesText = "—";
         EstimatedTimeText = "—";
+        EstimateBasisText = "Analyze the client for a hardware-aware forecast.";
         WorkspaceText = "Staged workspace • live client remains unchanged";
         OnPropertyChanged(nameof(SelectedZone));
         OnPropertyChanged(nameof(IsZoneSelectionEnabled));
@@ -922,6 +964,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             AssetScope.CharactersAndEquipmentOnly => 0.60,
             AssetScope.WorldCharactersAndEquipment => 0.78,
             AssetScope.AllSafeTextures => 1.0,
+            AssetScope.SpellEffectsOnly => 0.035,
             _ => 0.34
         };
 
@@ -930,6 +973,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             TexturePreset.Faithful => 1.35,
             TexturePreset.ClassicHd => 1.55,
             TexturePreset.MaximumDetail => 2.55,
+            TexturePreset.Illustrated => 1.70,
             _ => 1.55
         };
 
@@ -969,6 +1013,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             TexturePreset.Faithful => 0.22,
             TexturePreset.ClassicHd => 0.18,
             TexturePreset.MaximumDetail => 0.51,
+            TexturePreset.Illustrated => 0.26,
             _ => 0.18
         };
         double minutes = Math.Max(1, archiveCount * minutesPerArchive);
@@ -978,6 +1023,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         EstimatedTimeText = minutes < 60
             ? $"~{Math.Ceiling(minutes):N0}–{Math.Ceiling(minutes * 1.8):N0} min"
             : $"~{minutes / 60:0.0}–{minutes * 1.8 / 60:0.0} hr";
+        EstimateBasisText = "First-run planning range from the selected archive count and preset cost; actual GPU speed and texture dimensions can move it.";
     }
 
     private bool TryUpdateEstimateFromHistory(UpscaleOptions options)
@@ -1020,6 +1066,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 TexturePreset.Faithful => 0.22,
                 TexturePreset.ClassicHd => 0.18,
                 TexturePreset.MaximumDetail => 0.51,
+                TexturePreset.Illustrated => 0.26,
                 _ => 0.18
             };
             minutes = Math.Max(1, estimate.SelectedArchives * minutesPerArchive);
@@ -1031,6 +1078,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         EstimatedTimeText = upperMinutes < 60
             ? $"~{Math.Ceiling(lowerMinutes):N0}-{Math.Ceiling(upperMinutes):N0} min ({basis})"
             : $"~{lowerMinutes / 60:0.0}-{upperMinutes / 60:0.0} hr ({basis})";
+        EstimateBasisText = estimate.Duration is not null
+            ? "Calibrated from your latest completed build with this exact scope, style, cap, and mip setting."
+            : "Calibrated from the output size and archive count of your latest matching staged pack.";
         return true;
     }
 
@@ -1056,6 +1106,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         PlayEnhancedCommand.RaiseCanExecuteChanged();
         OpenPreviewGalleryCommand.RaiseCanExecuteChanged();
         OpenPackLibraryCommand.RaiseCanExecuteChanged();
+        OpenPackStorageCommand.RaiseCanExecuteChanged();
         OpenNativeGraphicsCommand.RaiseCanExecuteChanged();
         RestoreCommand.RaiseCanExecuteChanged();
         CancelCommand.RaiseCanExecuteChanged();

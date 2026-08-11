@@ -4,7 +4,8 @@ public enum TexturePreset
 {
     Faithful,
     ClassicHd,
-    MaximumDetail
+    MaximumDetail,
+    Illustrated
 }
 
 public enum AssetScope
@@ -13,7 +14,8 @@ public enum AssetScope
     WorldOnly = 1,
     WorldCharactersAndEquipment = 2,
     AllSafeTextures = 3,
-    CharactersAndEquipmentOnly = 4
+    CharactersAndEquipmentOnly = 4,
+    SpellEffectsOnly = 5
 }
 
 public sealed record UpscaleOptions(
@@ -22,7 +24,8 @@ public sealed record UpscaleOptions(
     int MaximumDimension,
     bool GenerateMipMaps,
     bool InstallAfterBuild,
-    string? SelectedZone = null)
+    string? SelectedZone = null,
+    IReadOnlyList<TextureOverride>? TextureOverrides = null)
 {
     public static UpscaleOptions Recommended => new(
         TexturePreset.ClassicHd,
