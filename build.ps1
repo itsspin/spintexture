@@ -46,6 +46,8 @@ $requiredTools = @(
     (Join-Path $projectRoot 'vendor\realesrgan\models\realesrgan-x4plus.param'),
     (Join-Path $projectRoot 'vendor\realesrgan\models\realesrnet-x4plus.bin'),
     (Join-Path $projectRoot 'vendor\realesrgan\models\realesrnet-x4plus.param'),
+    (Join-Path $projectRoot 'vendor\realesrgan\models\realesrgan-x4plus-anime.bin'),
+    (Join-Path $projectRoot 'vendor\realesrgan\models\realesrgan-x4plus-anime.param'),
     (Join-Path $projectRoot 'vendor\upscayl\upscayl-bin.exe'),
     (Join-Path $projectRoot 'vendor\upscayl\models\4x-PBRify_UpscalerSPANV4.bin'),
     (Join-Path $projectRoot 'vendor\upscayl\models\4x-PBRify_UpscalerSPANV4.param')
@@ -145,6 +147,8 @@ $requiredPublishedFiles = @(
     (Join-Path $resolvedPublishRoot 'Tools\realesrgan\models\realesrgan-x4plus.param'),
     (Join-Path $resolvedPublishRoot 'Tools\realesrgan\models\realesrnet-x4plus.bin'),
     (Join-Path $resolvedPublishRoot 'Tools\realesrgan\models\realesrnet-x4plus.param'),
+    (Join-Path $resolvedPublishRoot 'Tools\realesrgan\models\realesrgan-x4plus-anime.bin'),
+    (Join-Path $resolvedPublishRoot 'Tools\realesrgan\models\realesrgan-x4plus-anime.param'),
     (Join-Path $resolvedPublishRoot 'Tools\upscayl\upscayl-bin.exe'),
     (Join-Path $resolvedPublishRoot 'Tools\upscayl\models\4x-PBRify_UpscalerSPANV4.bin'),
     (Join-Path $resolvedPublishRoot 'Tools\upscayl\models\4x-PBRify_UpscalerSPANV4.param')

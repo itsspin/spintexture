@@ -18,7 +18,137 @@ internal static class CutoutMipPolicySelfTests
         await TestFailedStaleCutoutRestoresOriginalAsync(cancellationToken).ConfigureAwait(false);
         await TestUnexpectedBaselineMemberFailsClosedAsync(cancellationToken).ConfigureAwait(false);
         await TestBaselineFingerprintRaceFailsClosedAsync(cancellationToken).ConfigureAwait(false);
+        await TestReviewedTextureOverridesAreSelectiveAsync(cancellationToken).ConfigureAwait(false);
         await TestLooseDetectedCutoutUsesResultMipMetadataAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task TestReviewedTextureOverridesAreSelectiveAsync(
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"spintexture-review-{Guid.NewGuid():N}");
+        var sourcePath = Path.Combine(root, "source.s3d");
+        var baselinePath = Path.Combine(root, "baseline.s3d");
+        var destinationPath = Path.Combine(root, "revised.s3d");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var sourceKeep = CreateDxt1(16, 16, 1, includeTransparentBlocks: false);
+            var sourceRedo = CreateDxt1(16, 16, 1, includeTransparentBlocks: false);
+            sourceRedo[^1] ^= 0x11;
+            var baselineKeep = CreateDxt1(64, 64, 1, includeTransparentBlocks: false);
+            var baselineRedo = CreateDxt1(64, 64, 1, includeTransparentBlocks: false);
+            baselineRedo[^1] ^= 0x22;
+            var revisedRedo = CreateDxt1(64, 64, 1, includeTransparentBlocks: false);
+            revisedRedo[^1] ^= 0x44;
+            await WriteArchiveAsync(
+                sourcePath,
+                [
+                    new PfsArchiveItem("keep.dds", sourceKeep),
+                    new PfsArchiveItem("redo.dds", sourceRedo)
+                ],
+                cancellationToken).ConfigureAwait(false);
+            await WriteArchiveAsync(
+                baselinePath,
+                [
+                    new PfsArchiveItem("keep.dds", baselineKeep),
+                    new PfsArchiveItem("redo.dds", baselineRedo)
+                ],
+                cancellationToken).ConfigureAwait(false);
+            var fingerprint = await FileIntegrity.FingerprintAsync(
+                baselinePath,
+                cancellationToken).ConfigureAwait(false);
+            var unavailableTools = new ExternalToolPaths(null, null, null, null, null, []);
+            var invocationCount = 0;
+            var builder = new PfsTextureArchiveBuilder(
+                new NativeTextureProcessor(unavailableTools),
+                new TextureBuildCounter(),
+                retryUnchangedEntries: false,
+                rebuildFromReuseArchive: true,
+                reuseArchivePaths: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["review.s3d"] = baselinePath
+                },
+                reuseArchiveFingerprints: new Dictionary<string, StagedPackFileFingerprint>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["review.s3d"] = new(fingerprint.Length, fingerprint.Sha256)
+                },
+                processBatch: async (requests, token) =>
+                {
+                    invocationCount++;
+                    AssertEqual(1, requests.Count, "only the reviewed redo texture should enter AI processing");
+                    AssertEqual(TexturePreset.Illustrated, requests[0].Options.Preset, "reviewed redo preset");
+                    await File.WriteAllBytesAsync(requests[0].DestinationPath, revisedRedo, token)
+                        .ConfigureAwait(false);
+                    return
+                    [
+                        new NativeTextureProcessOutcome(
+                            new NativeTextureProcessResult(
+                                requests[0].DestinationPath,
+                                UpscaleDimensions.Calculate(16, 16, 64),
+                                "Synthetic illustrated revision",
+                                TimeSpan.Zero),
+                            null)
+                    ];
+                });
+
+            await builder.BuildAsync(
+                new StagedArtifactBuildContext(
+                    "review.s3d",
+                    sourcePath,
+                    destinationPath,
+                    Path.Combine(root, "work"),
+                    Path.Combine(root, "previews"),
+                    new UpscaleOptions(
+                        TexturePreset.ClassicHd,
+                        AssetScope.SelectedZone,
+                        64,
+                        GenerateMipMaps: false,
+                        InstallAfterBuild: false,
+                        SelectedZone: "review",
+                        TextureOverrides:
+                        [
+                            new TextureOverride(
+                                "review.s3d",
+                                "keep.dds",
+                                TextureOverrideAction.PreserveOriginal),
+                            new TextureOverride(
+                                "review.s3d",
+                                "redo.dds",
+                                TextureOverrideAction.Reprocess,
+                                TexturePreset.Illustrated)
+                        ])),
+                cancellationToken).ConfigureAwait(false);
+
+            AssertEqual(1, invocationCount, "reviewed texture revision batch count");
+            await using var revised = await PfsArchive.OpenAsync(
+                destinationPath,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            var keptPayload = await revised.ReadEntryAsync(
+                "keep.dds",
+                cancellationToken).ConfigureAwait(false);
+            var redonePayload = await revised.ReadEntryAsync(
+                "redo.dds",
+                cancellationToken).ConfigureAwait(false);
+            AssertSequenceEqual(
+                sourceKeep,
+                keptPayload,
+                "Keep original must restore the exact verified source member");
+            AssertSequenceEqual(
+                revisedRedo,
+                redonePayload,
+                "Redo must replace only the selected member");
+            AssertEqual(
+                fingerprint,
+                await FileIntegrity.FingerprintAsync(baselinePath, cancellationToken).ConfigureAwait(false),
+                "texture revision must not mutate the prior staged pack");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
     }
 
     private static void TestDirectCompressedAlphaClassification()

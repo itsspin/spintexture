@@ -396,6 +396,74 @@ public sealed class TgaPixelBuffer
             blueGain);
     }
 
+    /// <summary>
+    /// Applies a bounded, deterministic fantasy-painting grade while retaining
+    /// the reconstructed luminance structure and the exact alpha plane. The
+    /// transform gently mutes chroma, warms shadow color, moves foliage greens
+    /// toward olive, and introduces very light painted tone planes. It does not
+    /// synthesize geometry or add random noise, so wrapped texture borders stay
+    /// deterministic and repeatable.
+    /// </summary>
+    public TgaPixelBuffer ApplyRusticPaintedGrade(double strength = 1)
+    {
+        if (!double.IsFinite(strength) || strength is < 0 or > 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(strength));
+        }
+
+        if (strength == 0)
+        {
+            return new TgaPixelBuffer(Width, Height, (byte[])_rgba.Clone());
+        }
+
+        var output = (byte[])_rgba.Clone();
+        for (var offset = 0; offset < output.Length; offset += 4)
+        {
+            var red = (double)_rgba[offset];
+            var green = (double)_rgba[offset + 1];
+            var blue = (double)_rgba[offset + 2];
+            var luma = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue);
+            var normalizedLuma = luma / 255;
+            var shadow = 1 - normalizedLuma;
+            var midtone = 1 - Math.Abs((normalizedLuma * 2) - 1);
+            var greenDominance = Math.Max(0, green - Math.Max(red, blue)) / 255;
+            var blueDominance = Math.Max(0, blue - Math.Max(red, green)) / 255;
+
+            // Preserve the illustrated model's structure while taking the edge
+            // off synthetic saturation that can look out of place on old meshes.
+            var saturationScale = 1 - (strength * (0.075 + (0.045 * shadow)));
+            var targetLuma = luma - (strength * (2 + (3.5 * shadow)));
+            var paintedBand = Math.Round(targetLuma / 14) * 14;
+            targetLuma += (paintedBand - targetLuma) * (0.16 * strength);
+            targetLuma = Math.Clamp(targetLuma, 0, 255);
+
+            var candidateRed = targetLuma
+                + ((red - luma) * saturationScale)
+                + (strength * ((3.5 * shadow) + (5 * greenDominance) + midtone));
+            var candidateGreen = targetLuma
+                + ((green - luma) * saturationScale)
+                + (strength * (0.75 * midtone));
+            var candidateBlue = targetLuma
+                + ((blue - luma) * saturationScale)
+                - (strength * ((5 * shadow) + (5 * greenDominance) + (2 * blueDominance)));
+
+            // Split-toning must not change the intended brightness curve. This
+            // correction keeps the grade visible in hue/chroma without crushing
+            // shadows or blowing highlights.
+            var candidateLuma = (0.2126 * candidateRed)
+                + (0.7152 * candidateGreen)
+                + (0.0722 * candidateBlue);
+            var lumaCorrection = targetLuma - candidateLuma;
+            output[offset] = ClampByte(candidateRed + lumaCorrection);
+            output[offset + 1] = ClampByte(candidateGreen + lumaCorrection);
+            output[offset + 2] = ClampByte(candidateBlue + lumaCorrection);
+            // Preserve source alpha byte-for-byte.
+            output[offset + 3] = _rgba[offset + 3];
+        }
+
+        return new TgaPixelBuffer(Width, Height, output);
+    }
+
     public TgaPixelBuffer AddWrappedBorder(int padding)
     {
         return AddBorder(padding, wrap: true);

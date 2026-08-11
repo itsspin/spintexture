@@ -17,7 +17,16 @@ public sealed record TexturePreviewManifest(
     IReadOnlyList<TexturePreviewEntry> Entries)
 {
     public const int CurrentSchemaVersion = 1;
+    public IReadOnlyList<TextureReviewEntry> ReviewEntries { get; init; } = [];
 }
+
+public sealed record TextureReviewEntry(
+    string ArchivePath,
+    string LogicalName,
+    int OriginalWidth,
+    int OriginalHeight,
+    int EnhancedWidth,
+    int EnhancedHeight);
 
 internal sealed class TexturePreviewCollector
 {
@@ -28,6 +37,7 @@ internal sealed class TexturePreviewCollector
     private readonly Dictionary<int, TexturePreviewEntry> entries = [];
     private readonly HashSet<string> reservedFamilies = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> archiveReservationCounts = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, TextureReviewEntry> reviewEntries = new(StringComparer.OrdinalIgnoreCase);
 
     public TexturePreviewCollector(int maximumEntries)
     {
@@ -112,6 +122,27 @@ internal sealed class TexturePreviewCollector
         lock (gate)
         {
             return entries.Values
+                .OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(entry => entry.LogicalName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+    }
+
+    public void RegisterReview(TextureReviewEntry entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        var key = $"{NormalizeArchiveKey(entry.ArchivePath)}|{entry.LogicalName.Trim()}";
+        lock (gate)
+        {
+            reviewEntries[key] = entry;
+        }
+    }
+
+    public IReadOnlyList<TextureReviewEntry> ReviewSnapshot()
+    {
+        lock (gate)
+        {
+            return reviewEntries.Values
                 .OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(entry => entry.LogicalName, StringComparer.OrdinalIgnoreCase)
                 .ToArray();

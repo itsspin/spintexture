@@ -1,0 +1,116 @@
+<UserControl x:Class="SpinTexture.App.PackStorageSettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Background="#08090C" Foreground="#F4F0E7"
+        FontFamily="Segoe UI" FontSize="14"
+        TextOptions.TextFormattingMode="Display" UseLayoutRounding="True">
+    <UserControl.Resources>
+        <SolidColorBrush x:Key="Panel" Color="#12151A" />
+        <SolidColorBrush x:Key="Inset" Color="#0B0D11" />
+        <SolidColorBrush x:Key="Border" Color="#343B46" />
+        <SolidColorBrush x:Key="Muted" Color="#B9BEC7" />
+        <SolidColorBrush x:Key="Accent" Color="#FF8A47" />
+        <SolidColorBrush x:Key="Safe" Color="#79E2B5" />
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#F4F0E7" />
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="#252A32" />
+            <Setter Property="Foreground" Value="#F4F0E7" />
+            <Setter Property="BorderBrush" Value="#4B5563" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="15,10" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="0,0,9,0" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+    </UserControl.Resources>
+
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel>
+            <TextBlock Text="SETTINGS / PACK STORAGE" Foreground="{StaticResource Accent}"
+                       FontSize="11" FontWeight="Bold" />
+            <TextBlock Text="Choose where completed texture packs live"
+                       FontSize="27" FontWeight="SemiBold" Margin="0,6,0,0" />
+            <TextBlock Margin="0,8,0,0" Foreground="{StaticResource Muted}" TextWrapping="Wrap" LineHeight="21"
+                       Text="Staged packs can use many gigabytes. Move only this reusable pack library to another internal or external drive; verified original backups, recovery records, settings, and the EverQuest client stay where they are." />
+        </StackPanel>
+
+        <Border Grid.Row="1" Background="{StaticResource Panel}" BorderBrush="{StaticResource Border}"
+                BorderThickness="1" CornerRadius="10" Padding="18" Margin="0,20,0,0">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock Text="CURRENT PACK LIBRARY" Foreground="{StaticResource Safe}"
+                           FontSize="11" FontWeight="Bold" />
+                <TextBox x:Name="CurrentPathBox" Grid.Row="1" Margin="0,9,0,0" Padding="10,8"
+                         IsReadOnly="True" Background="{StaticResource Inset}" Foreground="#F4F0E7"
+                         BorderBrush="{StaticResource Border}" TextWrapping="Wrap" />
+                <Grid Grid.Row="2" Margin="0,10,0,0">
+                    <TextBlock x:Name="CurrentSummaryText" Foreground="{StaticResource Muted}" />
+                    <Button Content="Open Folder" Click="OpenFolder_Click" HorizontalAlignment="Right"
+                            Padding="11,6" Margin="0" />
+                </Grid>
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="2" Background="{StaticResource Panel}" BorderBrush="{StaticResource Border}"
+                BorderThickness="1" CornerRadius="10" Padding="18" Margin="0,14,0,0">
+            <StackPanel>
+                <TextBlock Text="MOVE TO A DIFFERENT DRIVE OR FOLDER" Foreground="{StaticResource Accent}"
+                           FontSize="11" FontWeight="Bold" />
+                <TextBlock Text="Choose a parent folder. SpinTexture creates its own clearly named, install-specific subfolder and never takes ownership of unrelated files."
+                           Foreground="{StaticResource Muted}" TextWrapping="Wrap" LineHeight="20" Margin="0,7,0,0" />
+                <WrapPanel Margin="0,13,0,0">
+                    <Button Content="Choose Folder..." Click="ChooseFolder_Click" />
+                    <Button x:Name="DefaultButton" Content="Move Back to Default" Click="UseDefault_Click" />
+                </WrapPanel>
+                <Border Background="{StaticResource Inset}" BorderBrush="{StaticResource Border}"
+                        BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,5,0,0">
+                    <StackPanel>
+                        <TextBlock Text="PLANNED DESTINATION" Foreground="#AEB5C0" FontSize="10" FontWeight="Bold" />
+                        <TextBlock x:Name="DestinationText" Text="Choose a folder to preview the managed destination."
+                                   TextWrapping="Wrap" Margin="0,5,0,0" />
+                        <TextBlock x:Name="PlanSummaryText" Foreground="{StaticResource Muted}"
+                                   TextWrapping="Wrap" LineHeight="19" Margin="0,7,0,0" />
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </Border>
+
+        <Border Grid.Row="3" Background="#101419" BorderBrush="#305644" BorderThickness="1"
+                CornerRadius="9" Padding="15" Margin="0,14,0,0" VerticalAlignment="Top">
+            <StackPanel>
+                <TextBlock Text="SAFE TRANSFER" Foreground="{StaticResource Safe}" FontSize="11" FontWeight="Bold" />
+                <TextBlock Text="SpinTexture copies every staged file, verifies its SHA-256 hash, switches the saved location only after the complete copy matches, and then removes only the old managed staging folder. Builds and installed textures are never reprocessed during this move."
+                           Foreground="#D5DAD4" TextWrapping="Wrap" LineHeight="20" Margin="0,6,0,0" />
+                <ProgressBar x:Name="MoveProgress" Height="7" Margin="0,13,0,0"
+                             Minimum="0" Maximum="1" Background="#252B33" Foreground="{StaticResource Accent}" />
+                <TextBlock x:Name="StatusText" Foreground="{StaticResource Muted}" TextWrapping="Wrap"
+                           Margin="0,8,0,0" />
+            </StackPanel>
+        </Border>
+
+        <Grid Grid.Row="4" Margin="0,18,0,0">
+            <Button x:Name="CancelButton" Content="Cancel Transfer" Click="Cancel_Click"
+                    Visibility="Collapsed" HorizontalAlignment="Left" />
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="CloseButton" Content="Back to Build" Click="Close_Click" />
+                <Button x:Name="MoveButton" Content="Move + Verify Pack Library" Click="Move_Click"
+                        IsEnabled="False" Margin="0"
+                        Background="#9B3B16" BorderBrush="#F1793D" Foreground="White" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</UserControl>

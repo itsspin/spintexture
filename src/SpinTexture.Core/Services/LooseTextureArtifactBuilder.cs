@@ -22,11 +22,13 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder
         NativeTextureProcessRequest,
         CancellationToken,
         Task<NativeTextureProcessResult>> processTexture;
+    private readonly bool allowSpellEffects;
 
     public LooseTextureArtifactBuilder(
         NativeTextureProcessor processor,
         TextureBuildCounter counter,
         TexturePreviewCollector? previewCollector = null,
+        bool allowSpellEffects = false,
         Func<
             NativeTextureProcessRequest,
             CancellationToken,
@@ -35,6 +37,7 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder
         this.processor = processor;
         this.counter = counter;
         this.previewCollector = previewCollector;
+        this.allowSpellEffects = allowSpellEffects;
         this.processTexture = processTexture
             ?? ((request, cancellationToken) => processor.ProcessAsync(
                 request,
@@ -63,7 +66,10 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder
                 metadata);
         }
 
-        var classification = classifier.Classify(context.RelativeInstallPath, metadata);
+        var classification = allowSpellEffects
+            && SpellEffectTexturePolicy.CanEnhance(context.RelativeInstallPath, metadata)
+                ? SpellEffectTexturePolicy.CreateColorClassification(metadata)
+                : classifier.Classify(context.RelativeInstallPath, metadata);
         var unsafeIndexedBitmap = metadata.FileFormat == TextureFileFormat.Bmp
             && metadata.BitsPerPixel == 8
             && !LegacyIndexedBmp.CanEncode(
@@ -86,11 +92,24 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder
             return;
         }
 
+        var reviewDimensions = UpscaleDimensions.Calculate(
+            metadata.Width,
+            metadata.Height,
+            context.Options.MaximumDimension);
+        previewCollector?.RegisterReview(new TextureReviewEntry(
+            context.RelativeInstallPath,
+            Path.GetFileName(context.RelativeInstallPath),
+            metadata.Width,
+            metadata.Height,
+            reviewDimensions.OutputWidth,
+            reviewDimensions.OutputHeight));
+
         var textureOptions = metadata.FileFormat == TextureFileFormat.Bmp
             && metadata.BitsPerPixel == 8
             ? context.Options with { Preset = TexturePreset.ClassicHd }
             : context.Options;
-        if (!(metadata.FileFormat == TextureFileFormat.Bmp
+        if (!allowSpellEffects
+            && !(metadata.FileFormat == TextureFileFormat.Bmp
                 && metadata.BitsPerPixel == 8)
             && context.Options.Preset != TexturePreset.Faithful
             && (PfsTextureArchiveBuilder.ShouldUseConservativeColorModel(context.RelativeInstallPath)
@@ -196,6 +215,20 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder
         var classification = new TextureSemanticClassifier().Classify(Path.GetFileName(path), metadata);
         return classification.CanUseColorUpscaler
             && classification.Kind is TextureKind.Color or TextureKind.Cutout;
+    }
+
+    public static async Task<bool> IsSpellEffectCandidateAsync(
+        string path,
+        string relativePath,
+        int maximumDimension,
+        CancellationToken cancellationToken)
+    {
+        var metadata = await new TextureHeaderSniffer()
+            .ReadFileAsync(path, cancellationToken).ConfigureAwait(false);
+        return metadata is not null
+            && Math.Max(metadata.Width, metadata.Height) < maximumDimension
+            && HasSafeContainer(metadata)
+            && SpellEffectTexturePolicy.CanEnhance(relativePath, metadata);
     }
 
     private static bool HasSafeContainer(TextureMetadata metadata) =>

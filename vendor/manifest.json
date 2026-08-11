@@ -65,6 +65,24 @@
       "license": "BSD-3-Clause"
     },
     {
+      "name": "RealESRGAN x4plus Anime native model",
+      "version": "0.2.5.0",
+      "source": "https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.5.0",
+      "path": "realesrgan/models/realesrgan-x4plus-anime.bin",
+      "bytes": 8943500,
+      "sha256": "FE01C269CFD10CDEF8E018AB66EBE750CF79C7AF4D1F9C16C737E1295229BACC",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "RealESRGAN x4plus Anime native graph",
+      "version": "0.2.5.0",
+      "source": "https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.5.0",
+      "path": "realesrgan/models/realesrgan-x4plus-anime.param",
+      "bytes": 30290,
+      "sha256": "2B8FB6E0AE4D2D85704CA08C119A2F5EA40ADD4F2ECD512EB7F4CD44B6127ED4",
+      "license": "BSD-3-Clause"
+    },
+    {
       "name": "Upscayl ncnn Vulkan custom-model worker",
       "version": "20251207-174704",
       "source": "https://github.com/upscayl/upscayl-ncnn/releases/tag/20251207-174704",

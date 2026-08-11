@@ -1,5 +1,6 @@
 using System.Collections.Specialized;
 using System.Windows;
+using System.Windows.Controls;
 using SpinTexture.App.Services;
 using SpinTexture.App.ViewModels;
 
@@ -8,9 +9,12 @@ namespace SpinTexture.App;
 public partial class MainWindow : Window
 {
     private readonly MainWindowViewModel _viewModel;
-    private PreviewGalleryWindow? _previewGalleryWindow;
-    private StagedPackLibraryWindow? _packLibraryWindow;
-    private NativeGraphicsWindow? _nativeGraphicsWindow;
+    private PreviewGalleryWindow? _previewGalleryView;
+    private StagedPackLibraryWindow? _packLibraryView;
+    private PackStorageSettingsWindow? _packStorageView;
+    private NativeGraphicsWindow? _nativeGraphicsView;
+    private bool _previewReturnsToPacks;
+    private string? _viewInstallPath;
 
     public MainWindow()
     {
@@ -26,112 +30,210 @@ public partial class MainWindow : Window
         _viewModel.LogEntries.CollectionChanged += OnLogEntriesChanged;
         _viewModel.PreviewGalleryRequested += OnPreviewGalleryRequested;
         _viewModel.PackLibraryRequested += OnPackLibraryRequested;
+        _viewModel.PackStorageRequested += OnPackStorageRequested;
         _viewModel.NativeGraphicsRequested += OnNativeGraphicsRequested;
         Closed += OnWindowClosed;
     }
 
+    private void OnPackStorageRequested(string installPath)
+    {
+        EnsureViewsMatchInstall(installPath);
+        if (_packStorageView is null)
+        {
+            _packStorageView = new PackStorageSettingsWindow(installPath);
+            _packStorageView.CloseRequested += (_, _) => ShowBuildSection();
+            _packStorageView.StorageMoved += OnStorageMoved;
+        }
+
+        ShowSection(_packStorageView, "PACK STORAGE");
+    }
+
+    private async void OnStorageMoved(object? sender, EventArgs e)
+    {
+        DisposePackAndPreviewViews();
+        await _viewModel.RefreshAfterPackStorageMoveAsync().ConfigureAwait(true);
+    }
+
     private void OnNativeGraphicsRequested(string installPath)
     {
-        if (_nativeGraphicsWindow is { IsVisible: true })
+        EnsureViewsMatchInstall(installPath);
+        if (_nativeGraphicsView is null)
         {
-            if (_nativeGraphicsWindow.WindowState == WindowState.Minimized)
-            {
-                _nativeGraphicsWindow.WindowState = WindowState.Normal;
-            }
-
-            _nativeGraphicsWindow.Activate();
-            return;
+            _nativeGraphicsView = new NativeGraphicsWindow(
+                installPath,
+                new NativeGraphicsServiceAdapter());
+            _nativeGraphicsView.CloseRequested += (_, _) => ShowBuildSection();
         }
 
-        var window = new NativeGraphicsWindow(
-            installPath,
-            new NativeGraphicsServiceAdapter())
-        {
-            Owner = this
-        };
-        _nativeGraphicsWindow = window;
-        window.Closed += (_, _) =>
-        {
-            if (ReferenceEquals(_nativeGraphicsWindow, window))
-            {
-                _nativeGraphicsWindow = null;
-            }
-        };
-        _ = window.ShowDialog();
+        ShowSection(_nativeGraphicsView, "NATIVE GRAPHICS");
     }
 
-    private async void OnPackLibraryRequested(string installPath)
+    private void OnPackLibraryRequested(string installPath)
     {
-        if (_packLibraryWindow is { IsVisible: true })
+        EnsureViewsMatchInstall(installPath);
+        if (_packLibraryView is null)
         {
-            if (_packLibraryWindow.WindowState == WindowState.Minimized)
+            _packLibraryView = new StagedPackLibraryWindow(installPath);
+            _packLibraryView.CloseRequested += async (_, _) =>
             {
-                _packLibraryWindow.WindowState = WindowState.Normal;
-            }
-
-            _packLibraryWindow.Activate();
-            return;
+                ShowBuildSection();
+                await _viewModel.RefreshPackLibraryStateAsync().ConfigureAwait(true);
+            };
+            _packLibraryView.PreviewRequested += OnPackPreviewRequested;
         }
 
-        var window = new StagedPackLibraryWindow(installPath) { Owner = this };
-        _packLibraryWindow = window;
-        window.Closed += (_, _) =>
-        {
-            if (ReferenceEquals(_packLibraryWindow, window))
-            {
-                _packLibraryWindow = null;
-            }
-        };
-        // Pack switching is a restore-plus-apply workflow. Keep the owner
-        // disabled for the entire selection/repair/install session so a main
-        // window Install or Restore command cannot interleave between those
-        // two verified transactions.
-        _ = window.ShowDialog();
-        await _viewModel.RefreshPackLibraryStateAsync().ConfigureAwait(true);
+        ShowSection(_packLibraryView, "STAGED PACKS");
     }
 
-    private void OnPreviewGalleryRequested(string manifestPath)
+    private void OnPackPreviewRequested(object? sender, PackPreviewRequestedEventArgs e) =>
+        ShowPreview(e.ManifestPath, e.ApplyChoices, returnsToPacks: true);
+
+    private void OnPreviewGalleryRequested(string manifestPath) =>
+        ShowPreview(manifestPath, applyChoices: null, returnsToPacks: false);
+
+    private void ShowPreview(
+        string manifestPath,
+        Func<IReadOnlyList<SpinTexture.Core.Models.TextureOverride>, Task>? applyChoices,
+        bool returnsToPacks)
     {
         try
         {
-            if (_previewGalleryWindow is { IsVisible: true }
-                && string.Equals(
-                    _previewGalleryWindow.ManifestPath,
-                    Path.GetFullPath(manifestPath),
-                    StringComparison.OrdinalIgnoreCase))
+            var fullManifestPath = Path.GetFullPath(manifestPath);
+            if (_previewGalleryView is null
+                || !string.Equals(
+                    _previewGalleryView.ManifestPath,
+                    fullManifestPath,
+                    StringComparison.OrdinalIgnoreCase)
+                || applyChoices is not null)
             {
-                if (_previewGalleryWindow.WindowState == WindowState.Minimized)
+                if (ReferenceEquals(SectionContent.Content, _previewGalleryView))
                 {
-                    _previewGalleryWindow.WindowState = WindowState.Normal;
+                    SectionContent.Content = null;
                 }
 
-                _previewGalleryWindow.Activate();
-                return;
+                _previewGalleryView?.Dispose();
+                _previewGalleryView = new PreviewGalleryWindow(fullManifestPath, applyChoices);
+                _previewGalleryView.CloseRequested += (_, _) =>
+                {
+                    if (_previewReturnsToPacks && _packLibraryView is not null)
+                    {
+                        ShowSection(_packLibraryView, "STAGED PACKS");
+                    }
+                    else
+                    {
+                        ShowBuildSection();
+                    }
+                };
             }
 
-            _previewGalleryWindow?.Close();
-            var galleryWindow = new PreviewGalleryWindow(manifestPath)
-            {
-                Owner = this
-            };
-            _previewGalleryWindow = galleryWindow;
-            galleryWindow.Closed += (_, _) =>
-            {
-                if (ReferenceEquals(_previewGalleryWindow, galleryWindow))
-                {
-                    _previewGalleryWindow = null;
-                }
-            };
-            galleryWindow.Show();
+            _previewReturnsToPacks = returnsToPacks;
+            ShowSection(_previewGalleryView, "TEXTURE REVIEW");
         }
         catch (Exception exception)
         {
             MessageBox.Show(
                 this,
-                $"The preview gallery could not be opened.\n\n{exception.Message}",
-                "Preview gallery",
+                $"The texture review could not be opened.\n\n{exception.Message}",
+                "Texture review",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
+        }
+    }
+
+    private void ShowSection(UserControl view, string title)
+    {
+        SectionContent.Content = view;
+        SectionTitleText.Text = title;
+        SectionOverlay.Visibility = Visibility.Visible;
+    }
+
+    private void ShowBuildSection()
+    {
+        if (!CanLeaveCurrentSection())
+        {
+            return;
+        }
+
+        SectionContent.Content = null;
+        SectionOverlay.Visibility = Visibility.Collapsed;
+    }
+
+    private bool CanLeaveCurrentSection() => SectionContent.Content switch
+    {
+        StagedPackLibraryWindow packs => packs.CanNavigateAway,
+        PackStorageSettingsWindow storage => storage.CanNavigateAway,
+        NativeGraphicsWindow graphics => graphics.CanNavigateAway,
+        _ => true
+    };
+
+    private void EnsureViewsMatchInstall(string installPath)
+    {
+        var fullInstallPath = Path.GetFullPath(installPath);
+        if (_viewInstallPath is not null
+            && string.Equals(_viewInstallPath, fullInstallPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        SectionContent.Content = null;
+        DisposeAllSectionViews();
+        _viewInstallPath = fullInstallPath;
+    }
+
+    private void DisposePackAndPreviewViews()
+    {
+        if (ReferenceEquals(SectionContent.Content, _packLibraryView)
+            || ReferenceEquals(SectionContent.Content, _previewGalleryView))
+        {
+            SectionContent.Content = null;
+        }
+
+        _packLibraryView?.Dispose();
+        _packLibraryView = null;
+        _previewGalleryView?.Dispose();
+        _previewGalleryView = null;
+    }
+
+    private void DisposeAllSectionViews()
+    {
+        DisposePackAndPreviewViews();
+        _packStorageView = null;
+        _nativeGraphicsView?.Dispose();
+        _nativeGraphicsView = null;
+    }
+
+    private void BuildNav_Click(object sender, RoutedEventArgs e) => ShowBuildSection();
+    private void BackToBuild_Click(object sender, RoutedEventArgs e) => ShowBuildSection();
+
+    private void PacksNav_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel.OpenPackLibraryCommand.CanExecute(null))
+        {
+            _viewModel.OpenPackLibraryCommand.Execute(null);
+        }
+    }
+
+    private void ReviewNav_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel.OpenPreviewGalleryCommand.CanExecute(null))
+        {
+            _viewModel.OpenPreviewGalleryCommand.Execute(null);
+        }
+    }
+
+    private void GraphicsNav_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel.OpenNativeGraphicsCommand.CanExecute(null))
+        {
+            _viewModel.OpenNativeGraphicsCommand.Execute(null);
+        }
+    }
+
+    private void StorageNav_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel.OpenPackStorageCommand.CanExecute(null))
+        {
+            _viewModel.OpenPackStorageCommand.Execute(null);
         }
     }
 
@@ -151,9 +253,10 @@ public partial class MainWindow : Window
         _viewModel.LogEntries.CollectionChanged -= OnLogEntriesChanged;
         _viewModel.PreviewGalleryRequested -= OnPreviewGalleryRequested;
         _viewModel.PackLibraryRequested -= OnPackLibraryRequested;
+        _viewModel.PackStorageRequested -= OnPackStorageRequested;
         _viewModel.NativeGraphicsRequested -= OnNativeGraphicsRequested;
-        _packLibraryWindow?.Close();
-        _nativeGraphicsWindow?.Close();
+        SectionContent.Content = null;
+        DisposeAllSectionViews();
         _viewModel.Dispose();
     }
 }

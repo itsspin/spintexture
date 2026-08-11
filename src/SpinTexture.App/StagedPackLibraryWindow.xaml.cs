@@ -15,7 +15,7 @@ using SpinTexture.Core.Services;
 
 namespace SpinTexture.App;
 
-public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
+public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChanged, IDisposable
 {
     private readonly ProjectPaths paths;
     private readonly StagedPackCatalogService catalog = new();
@@ -24,10 +24,10 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
     private static readonly JsonSerializerOptions CompositionJsonOptions = CreateCompositionJsonOptions();
     private CancellationTokenSource? operationCancellation;
     private StagedPackRow? selectedPack;
-    private PreviewGalleryWindow? previewWindow;
     private bool isBusy;
     private bool closeRequested;
     private bool isInstallAcknowledged;
+    private string selectedCategoryFilter = "All packs";
     private string statusText = "Loading completed staged builds...";
     private string selectionText = "No packs selected";
     private string highlightedSelectionText = "No rows highlighted";
@@ -40,13 +40,36 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
         PacksView = CollectionViewSource.GetDefaultView(Packs);
         PacksView.GroupDescriptions.Add(
             new PropertyGroupDescription(nameof(StagedPackRow.Category)));
+        PacksView.Filter = FilterPackByCategory;
         DataContext = this;
         Loaded += async (_, _) => await RefreshAsync().ConfigureAwait(true);
-        Closing += OnClosing;
     }
 
     public ObservableCollection<StagedPackRow> Packs { get; } = [];
     public ICollectionView PacksView { get; }
+    public IReadOnlyList<string> CategoryFilters { get; } =
+    [
+        "All packs",
+        "Active install",
+        "Zones",
+        "Characters & Equipment",
+        "Spell Effects",
+        "World / Combined",
+        "Other / Compositions"
+    ];
+
+    public string SelectedCategoryFilter
+    {
+        get => selectedCategoryFilter;
+        set
+        {
+            if (SetField(ref selectedCategoryFilter, value ?? "All packs"))
+            {
+                PacksView.Refresh();
+            }
+        }
+    }
+    public string PackStorageText => $"Pack storage: {paths.StagingPath}";
 
     public StagedPackRow? SelectedPack
     {
@@ -105,6 +128,26 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
         private set => SetField(ref highlightedSelectionText, value);
     }
 
+    public string DeleteButtonText => GetHighlightedPacks().Count switch
+    {
+        0 => "Delete Focused Pack...",
+        1 => "Delete Focused Pack...",
+        var count => $"Delete {count:N0} Highlighted Packs..."
+    };
+
+    public string InstallButtonText
+    {
+        get
+        {
+            var count = Packs.Count(pack => pack.IsSelected && pack.CanSelect);
+            return count == 0
+                ? "Check Packs to Install"
+                : count == 1
+                    ? "Verify + Install 1 Checked Pack"
+                    : $"Verify + Install {count:N0} Checked Packs";
+        }
+    }
+
     public bool IsInstallAcknowledged
     {
         get => isInstallAcknowledged;
@@ -142,6 +185,9 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
     public bool CanClose => !IsBusy;
 
     public event PropertyChangedEventHandler? PropertyChanged;
+    public event EventHandler? CloseRequested;
+    public event EventHandler<PackPreviewRequestedEventArgs>? PreviewRequested;
+    public bool CanNavigateAway => !IsBusy;
 
     private async void Refresh_Click(object sender, RoutedEventArgs e)
     {
@@ -164,6 +210,22 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
         }
 
         UpdateHighlightedSelection();
+        OnPropertyChanged(nameof(DeleteButtonText));
+    }
+
+    private bool FilterPackByCategory(object item)
+    {
+        if (item is not StagedPackRow pack || SelectedCategoryFilter == "All packs")
+        {
+            return item is StagedPackRow;
+        }
+
+        if (SelectedCategoryFilter == "Active install")
+        {
+            return pack.IsActive || pack.IsActiveComponent;
+        }
+
+        return string.Equals(pack.Category, SelectedCategoryFilter, StringComparison.Ordinal);
     }
 
     private void CheckHighlighted_Click(object sender, RoutedEventArgs e)
@@ -532,7 +594,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
         }
 
         var answer = MessageBox.Show(
-            this,
+            Window.GetWindow(this),
             $"Install {selected.Length:N0} checked pack(s)?\n\n"
             + "SpinTexture verifies every selected pack. When the selection only adds packs, already-active archives stay untouched and only the new archives are backed up and installed. Selections that remove or replace archives use the verified restore-and-switch path. No AI upscaling is rerun.",
             "Install checked packs",
@@ -572,7 +634,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
             : "Salvage this legacy character pack?\n\n"
               + "Every texture already enhanced successfully will be reused byte-for-byte. Only unchanged eligible textures are retried with the current safe pipeline; newly supported classic indexed character and armor BMPs use the palette-stable Classic HD route. The completed original pack is never modified, and packs built with the current pipeline do not need this second pass.";
         var answer = MessageBox.Show(
-            this,
+            Window.GetWindow(this),
             prompt,
             pack.IsCutoutMipRepairCandidate
                 ? "Upgrade cutout compatibility"
@@ -614,7 +676,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
         }
 
         var answer = MessageBox.Show(
-            this,
+            Window.GetWindow(this),
             "Repair this pack's source mismatch?\n\n"
             + "SpinTexture detected archives that were accidentally built from a previously installed enhanced pack. It will create a new immutable replacement: complete unaffected archives are reused, while only archives with verified managed provenance are rebuilt from their original bytes. No texture inside an affected archive is reused, the existing pack is never modified, and an unknown client-version change is blocked instead of guessed.",
             "Repair source mismatch",
@@ -683,7 +745,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
 
                 StatusText = $"Bulk delete blocked safely: {blocked.Length:N0} highlighted pack(s) are active, referenced, or could not be verified.";
                 MessageBox.Show(
-                    this,
+                    Window.GetWindow(this),
                     "Nothing was deleted because every highlighted pack must pass safety preflight.\n\n" + details,
                     "Highlighted packs cannot be deleted",
                     MessageBoxButton.OK,
@@ -700,7 +762,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
             }
 
             var answer = MessageBox.Show(
-                this,
+                Window.GetWindow(this),
                 $"Permanently delete {plans.Count:N0} highlighted staged pack(s)?\n\n"
                 + titleList
                 + "\n\nEvery pack passed active-install, dependency, path, and reparse-point preflight. Only these managed staging directories will be removed. Live game files will not be changed. This cannot be undone; deleted AI output would have to be rebuilt.",
@@ -763,7 +825,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
                 ? $"Delete failed safely: {exception.Message}"
                 : $"Delete stopped after {deletedBuildIds.Count:N0} completed deletion(s): {exception.Message}";
             MessageBox.Show(
-                this,
+                Window.GetWindow(this),
                 StatusText,
                 "Delete highlighted packs",
                 MessageBoxButton.OK,
@@ -829,7 +891,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
         {
             StatusText = $"Operation failed safely: {exception.Message}";
             MessageBox.Show(
-                this,
+                Window.GetWindow(this),
                 exception.Message,
                 "Staged pack operation",
                 MessageBoxButton.OK,
@@ -848,10 +910,15 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
 
     private void Close_Click(object sender, RoutedEventArgs e)
     {
-        if (!IsBusy)
+        if (IsBusy)
         {
-            Close();
+            closeRequested = true;
+            operationCancellation?.Cancel();
+            StatusText = "Canceling safely. The Build section will return after the current file operation stops.";
+            return;
         }
+
+        CloseRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private void Preview_Click(object sender, RoutedEventArgs e)
@@ -864,32 +931,41 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
 
         try
         {
-            if (previewWindow is { IsVisible: true }
-                && string.Equals(
-                    previewWindow.ManifestPath,
-                    Path.GetFullPath(manifestPath),
-                    StringComparison.OrdinalIgnoreCase))
+            var baselinePack = SelectedPack
+                ?? throw new InvalidOperationException("The selected staged pack is no longer available.");
+            var baselineManifestPath = baselinePack.ManifestPath
+                ?? throw new InvalidOperationException("The selected staged pack no longer has a build manifest.");
+            Func<IReadOnlyList<TextureOverride>, Task>? applyChoices = null;
+            if (baselinePack.CanReviseTextures)
             {
-                previewWindow.Activate();
-                return;
+                applyChoices = async choices =>
+                {
+                    await RunOperationAsync(
+                        "Hash-verifying the pack and revising only the reviewed textures...",
+                        async (progress, token) =>
+                        {
+                            var result = await workflow.RepairStagedPackAsync(
+                                paths,
+                                baselineManifestPath,
+                                TexturePreset.Faithful,
+                                progress,
+                                token,
+                                choices).ConfigureAwait(false);
+                            return result.StagedBuild.ManifestPath;
+                        },
+                        "Texture revision complete. Unselected prior work was reused and the new immutable pack is checked.",
+                        replaceSelectedManifestPath: baselineManifestPath).ConfigureAwait(true);
+                };
             }
 
-            previewWindow?.Close();
-            var window = new PreviewGalleryWindow(manifestPath) { Owner = this };
-            previewWindow = window;
-            window.Closed += (_, _) =>
-            {
-                if (ReferenceEquals(previewWindow, window))
-                {
-                    previewWindow = null;
-                }
-            };
-            window.Show();
+            PreviewRequested?.Invoke(
+                this,
+                new PackPreviewRequestedEventArgs(manifestPath, applyChoices));
         }
         catch (Exception exception)
         {
             MessageBox.Show(
-                this,
+                Window.GetWindow(this),
                 exception.Message,
                 "Pack preview",
                 MessageBoxButton.OK,
@@ -897,24 +973,12 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
         }
     }
 
-    private void OnClosing(object? sender, CancelEventArgs e)
-    {
-        if (!IsBusy)
-        {
-            return;
-        }
-
-        e.Cancel = true;
-        closeRequested = true;
-        operationCancellation?.Cancel();
-        StatusText = "Canceling safely. This window will close after the current file operation stops.";
-    }
-
     private void ScheduleDeferredCloseIfRequested()
     {
         if (closeRequested)
         {
-            _ = Dispatcher.BeginInvoke(new Action(Close));
+            closeRequested = false;
+            _ = Dispatcher.BeginInvoke(new Action(() => CloseRequested?.Invoke(this, EventArgs.Empty)));
         }
     }
 
@@ -933,6 +997,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
             ? "INSTALL SET · No packs checked"
             : $"INSTALL SET · {selected.Length:N0} pack(s) checked · {selected.Sum(pack => pack.ArtifactCount):N0} source archives · {FormatBytes(selected.Sum(pack => pack.StagedBytes))}";
         OnPropertyChanged(nameof(CanInstall));
+        OnPropertyChanged(nameof(InstallButtonText));
         OnPropertyChanged(nameof(CanCheckHighlighted));
         OnPropertyChanged(nameof(CanUncheckHighlighted));
         OnPropertyChanged(nameof(CanAddHighlightedToCurrent));
@@ -1008,6 +1073,16 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
         return $"{value:0.##} {units[unit]}";
     }
 
+    private static string FormatPreset(TexturePreset preset) => preset switch
+    {
+        TexturePreset.Faithful => "Original Clarity",
+        TexturePreset.ClassicHd => "Texture HD",
+        TexturePreset.MaximumDetail => "Material Detail",
+        TexturePreset.Illustrated => "Illustrated / Clean Painted",
+        TexturePreset.RusticPainted => "Rustic Painted Fantasy",
+        _ => preset.ToString()
+    };
+
     private static JsonSerializerOptions CreateCompositionJsonOptions()
     {
         var options = new JsonSerializerOptions
@@ -1016,6 +1091,17 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
         };
         options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
         return options;
+    }
+
+    public void Dispose()
+    {
+        operationCancellation?.Cancel();
+        operationCancellation?.Dispose();
+        operationCancellation = null;
+        foreach (var pack in Packs)
+        {
+            pack.PropertyChanged -= OnPackSelectionChanged;
+        }
     }
 
     private bool SetField<T>(ref T field, T value, [CallerMemberName] string? name = null)
@@ -1064,6 +1150,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
             var isLegacyRepair = report?.IsIncrementalRepair == true;
             var isSourceRepair = report?.IsSourceMismatchRepair == true;
             var isCutoutMipRepair = report?.IsCutoutMipRepair == true;
+            var isManualTextureRevision = report?.IsManualTextureRevision == true;
             var scopeTitle = manifest?.Options.Scope switch
             {
                 AssetScope.SelectedZone => $"Zone \u00B7 {manifest.Options.SelectedZone ?? "Unknown"}",
@@ -1071,6 +1158,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
                 AssetScope.WorldCharactersAndEquipment => "World + Characters + Equipment",
                 AssetScope.WorldOnly => "World textures",
                 AssetScope.AllSafeTextures => "All safe textures",
+                AssetScope.SpellEffectsOnly => "Spell effects",
                 _ => info.CandidateBuildId
             };
             Category = IsComposition
@@ -1079,6 +1167,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
                 {
                     AssetScope.SelectedZone => "Zones",
                     AssetScope.CharactersAndEquipmentOnly => "Characters & Equipment",
+                    AssetScope.SpellEffectsOnly => "Spell Effects",
                     AssetScope.WorldOnly
                         or AssetScope.WorldCharactersAndEquipment
                         or AssetScope.AllSafeTextures => "World / Combined",
@@ -1089,7 +1178,8 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
                 "Installed Combination" => 0,
                 "Zones" => 1,
                 "Characters & Equipment" => 2,
-                "World / Combined" => 3,
+                "Spell Effects" => 3,
+                "World / Combined" => 4,
                 _ => 4
             };
             CreatedUtc = manifest?.CreatedUtc ?? DateTimeOffset.MinValue;
@@ -1099,6 +1189,8 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
                     ? $"Source repaired \u00B7 {scopeTitle}"
                     : isCutoutMipRepair
                     ? $"Cutout upgraded \u00B7 {scopeTitle}"
+                    : isManualTextureRevision
+                    ? $"Texture revised \u00B7 {scopeTitle}"
                     : isLegacyRepair
                     ? $"Repaired \u00B7 {scopeTitle}"
                     : scopeTitle;
@@ -1114,6 +1206,8 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
                                 ? "SOURCE REPAIRED"
                                 : isCutoutMipRepair
                                 ? "CUTOUT UPGRADED"
+                                : isManualTextureRevision
+                                ? "TEXTURE REVISED"
                                 : isLegacyRepair
                                 ? "REPAIRED"
                                 : "STAGED";
@@ -1124,6 +1218,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
                 "COMPOSITION" => ("#27253A", "#CEC7FF", "#4E4A73"),
                 "SOURCE REPAIRED" => ("#382B18", "#F5C76B", "#785C2F"),
                 "CUTOUT UPGRADED" => ("#18343A", "#8CE1E8", "#34717B"),
+                "TEXTURE REVISED" => ("#32243A", "#D9B6F5", "#674A78"),
                 "REPAIRED" => ("#233345", "#BFD9F5", "#405E7D"),
                 _ => ("#17352B", "#65D6A6", "#292E36")
             };
@@ -1148,7 +1243,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
                           + $"{report.Statistics.EnhancedTextures:N0} newly enhanced \u00B7 "
                           + $"{ArtifactCount:N0} archives \u00B7 {FormatBytes(StagedBytes)} \u00B7 "
                           + manifest.CreatedUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture)
-                        : $"{manifest.Options.Preset} \u00B7 {manifest.Options.MaximumDimension:N0}px \u00B7 "
+                        : $"{FormatPreset(manifest.Options.Preset)} \u00B7 {manifest.Options.MaximumDimension:N0}px \u00B7 "
                           + (report is null
                               ? string.Empty
                               : $"{report.Statistics.EnhancedTextures:N0} enhanced \u00B7 {report.Statistics.PreservedTextures:N0} protected/missing \u00B7 ")
@@ -1216,6 +1311,11 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
             PreviewManifestPath = File.Exists(previewPath)
                 ? Path.GetFullPath(previewPath)
                 : null;
+            CanReviseTextures = !IsComposition
+                && manifest is not null
+                && !RequiresPipelineRepair(report, manifest.Options.Scope)
+                && manifest.Options.Scope is not (AssetScope.AllSafeTextures or AssetScope.SpellEffectsOnly)
+                && ArtifactPaths.All(path => EverQuestInstall.IsPfsArchiveExtension(Path.GetExtension(path)));
         }
 
         public string ManifestPath { get; }
@@ -1224,6 +1324,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
         public bool IsComposition { get; }
         public bool CanSelect { get; }
         public bool CanRepair { get; }
+        public bool CanReviseTextures { get; }
         public bool IsCutoutMipRepairCandidate { get; }
         public bool CanRepairSourceMismatch { get; }
         public string? PreviewManifestPath { get; }
@@ -1307,4 +1408,12 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
             }
         }
     }
+}
+
+public sealed class PackPreviewRequestedEventArgs(
+    string manifestPath,
+    Func<IReadOnlyList<TextureOverride>, Task>? applyChoices) : EventArgs
+{
+    public string ManifestPath { get; } = manifestPath;
+    public Func<IReadOnlyList<TextureOverride>, Task>? ApplyChoices { get; } = applyChoices;
 }

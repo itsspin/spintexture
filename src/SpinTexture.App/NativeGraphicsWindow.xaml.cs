@@ -1,11 +1,12 @@
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Controls;
 using SpinTexture.App.Services;
 using SpinTexture.App.ViewModels;
 
 namespace SpinTexture.App;
 
-public partial class NativeGraphicsWindow : Window
+public partial class NativeGraphicsWindow : UserControl, IDisposable
 {
     private readonly NativeGraphicsWindowViewModel viewModel;
     private bool closeRequested;
@@ -16,8 +17,7 @@ public partial class NativeGraphicsWindow : Window
         viewModel = new NativeGraphicsWindowViewModel(installPath, service);
         DataContext = viewModel;
         Loaded += OnLoaded;
-        Closing += OnClosing;
-        Closed += OnClosed;
+        Unloaded += OnUnloaded;
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
     }
 
@@ -29,18 +29,19 @@ public partial class NativeGraphicsWindow : Window
         }
     }
 
-    private void Close_Click(object sender, RoutedEventArgs e) => Close();
+    public bool CanNavigateAway => !viewModel.IsBusy;
+    public event EventHandler? CloseRequested;
 
-    private void OnClosing(object? sender, CancelEventArgs e)
+    private void Close_Click(object sender, RoutedEventArgs e)
     {
-        if (!viewModel.IsBusy)
+        if (viewModel.IsBusy)
         {
+            closeRequested = true;
+            viewModel.CancelCommand.Execute(null);
             return;
         }
 
-        e.Cancel = true;
-        closeRequested = true;
-        viewModel.CancelCommand.Execute(null);
+        CloseRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -49,15 +50,20 @@ public partial class NativeGraphicsWindow : Window
             && e.PropertyName == nameof(NativeGraphicsWindowViewModel.IsBusy)
             && !viewModel.IsBusy)
         {
-            _ = Dispatcher.BeginInvoke(new Action(Close));
+            closeRequested = false;
+            _ = Dispatcher.BeginInvoke(new Action(() => CloseRequested?.Invoke(this, EventArgs.Empty)));
         }
     }
 
-    private void OnClosed(object? sender, EventArgs e)
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        closeRequested = false;
+    }
+
+    public void Dispose()
     {
         Loaded -= OnLoaded;
-        Closing -= OnClosing;
-        Closed -= OnClosed;
+        Unloaded -= OnUnloaded;
         viewModel.PropertyChanged -= OnViewModelPropertyChanged;
         viewModel.Dispose();
     }

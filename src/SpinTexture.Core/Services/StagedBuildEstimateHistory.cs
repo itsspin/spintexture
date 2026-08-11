@@ -134,7 +134,9 @@ public static class StagedBuildEstimateHistory
                 || !DirectoryNameMatchesBuildId(buildDirectory, manifest.BuildId)
                 || !SamePath(manifest.InstallPath, paths.InstallPath)
                 || !SamePath(report.InstallPath, paths.InstallPath)
-                || !SamePath(report.StagingPath, buildDirectory)
+                || (!SamePath(report.StagingPath, buildDirectory)
+                    && !Path.GetFileName(Path.TrimEndingDirectorySeparator(report.StagingPath))
+                        .Equals(manifest.BuildId, StringComparison.Ordinal))
                 || !OptionsMatch(manifest.Options, requestedOptions)
                 || report.IsIncrementalRepair
                 || report.IsSourceMismatchRepair

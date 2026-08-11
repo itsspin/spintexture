@@ -338,6 +338,7 @@ public sealed class StagedPackComposer
         ArgumentNullException.ThrowIfNull(paths);
         paths.EnsureWorkspaceDirectories();
         using var transactionLock = TransactionLock.Acquire(paths.WorkspacePath);
+        using var stagingLock = StagingLibraryLock.Acquire(paths.WorkspacePath);
         var plan = await PlanAsync(
                 paths,
                 manifestPaths,
