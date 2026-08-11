@@ -4,13 +4,15 @@ namespace SpinTexture.Core.Services;
 
 /// <summary>
 /// Identifies the texture-processing behavior used by a build independently
-/// of the JSON report schema. Revision 2 adds the bounded cutout mip policy;
-/// packs produced by an older revision can be upgraded without rerunning their
-/// successfully enhanced opaque textures.
+/// of the JSON report schema. Revision 2 bounded alpha-tested mip chains at
+/// 4x4. Revision 3 retains only the enhanced top level for alpha-tested
+/// cutouts because the legacy renderer can discard those generated soft-alpha
+/// levels based on view angle. Older packs can be upgraded without rerunning
+/// their successfully enhanced opaque textures.
 /// </summary>
 public static class TextureProcessingPipeline
 {
-    public const int CurrentRevision = 2;
+    public const int CurrentRevision = 3;
 
     public static bool RequiresRepair(
         TextureBuildReport? report,
@@ -29,7 +31,7 @@ public static class TextureProcessingPipeline
     }
 
     /// <summary>
-    /// Distinguishes the narrow revision-2 cutout upgrade from the original
+    /// Distinguishes the narrow cutout-policy upgrade from the original
     /// character/equipment coverage repair. World-bearing PFS packs always use
     /// the narrow path when stale. Character-bearing packs use it after revision
     /// 1, or after a recorded incremental coverage repair. Fresh revision-0 or

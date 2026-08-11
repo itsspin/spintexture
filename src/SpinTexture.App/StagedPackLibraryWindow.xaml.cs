@@ -1191,7 +1191,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
                 && canRepairSourceMismatch
                 && !isSourceRepair;
             RepairStatusText = IsCutoutMipRepairCandidate
-                ? "One-time pipeline upgrade available: verify the full baseline, reuse opaque successes, and regenerate only previously enhanced alpha-tested foliage, armor, and model textures with bounded 4\u00D74 terminal mips."
+                ? "One-time cutout compatibility upgrade available: verify the full baseline, reuse opaque successes, and regenerate only previously enhanced alpha-tested foliage, armor, and model textures without angle-sensitive generated mip levels."
                 : isCharacterScope
                 ? CanRepair
                     ? "Legacy pack: reuse prior output and add the current race, armor, and protected control-texture coverage."
@@ -1202,7 +1202,7 @@ public partial class StagedPackLibraryWindow : Window, INotifyPropertyChanged
                 ? "Managed source mismatch detected: reuse unaffected complete archives and rebuild only the affected archives from verified originals."
                 : string.Empty;
             RepairButtonText = IsCutoutMipRepairCandidate
-                ? "Upgrade Cutout Mips"
+                ? "Upgrade Cutout Compatibility"
                 : "Repair Legacy Pack";
             SelectionHint = IsComposition
                 ? "Generated combinations are not selectable. Check their source packs instead."

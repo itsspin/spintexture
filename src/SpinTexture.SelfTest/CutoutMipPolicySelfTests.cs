@@ -241,7 +241,7 @@ internal static class CutoutMipPolicySelfTests
                 cancellationToken).ConfigureAwait(false);
             var sniffer = new TextureHeaderSniffer();
             Assert(sniffer.TryRead(cutoutPayload, out var cutoutMetadata), "rebuilt cutout DDS header");
-            AssertEqual(5, cutoutMetadata!.MipCount, "64-square cutout should terminate at 4x4");
+            AssertEqual(1, cutoutMetadata!.MipCount, "64-square cutout should retain only its top level");
             AssertSequenceEqual(enhancedOpaque, opaquePayload, "changed opaque enhancement should be carried forward");
             AssertSequenceEqual(sourceIdentical, groundPayload, "source-identical opaque entry should remain original");
             AssertSequenceEqual(
@@ -352,7 +352,7 @@ internal static class CutoutMipPolicySelfTests
             var output = await new TextureHeaderSniffer()
                 .ReadFileAsync(destinationPath, cancellationToken).ConfigureAwait(false);
             Assert(output is not null, "loose cutout output should remain a readable DDS");
-            AssertEqual(9, output!.MipCount, "loose 1024-square detected cutout mip count");
+            AssertEqual(1, output!.MipCount, "loose 1024-square detected cutout mip count");
             AssertEqual(1, counter.Snapshot().EnhancedTextures, "loose cutout should pass exact result validation");
         }
         finally
