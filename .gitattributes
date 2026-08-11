@@ -11,6 +11,7 @@
 *.yaml text
 
 *.bin binary
+*.param binary
 *.dll binary
 *.exe binary
 *.gif binary
