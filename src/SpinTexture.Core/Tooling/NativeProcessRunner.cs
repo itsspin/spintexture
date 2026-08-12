@@ -54,6 +54,7 @@ public sealed class NativeProcessRunner : INativeProcessRunner
 
         using var process = new Process { StartInfo = startInfo };
         var stopwatch = Stopwatch.StartNew();
+        long lastActivityTimestamp = Stopwatch.GetTimestamp();
 
         cancellationToken.ThrowIfCancellationRequested();
         if (!process.Start())
@@ -64,15 +65,26 @@ public sealed class NativeProcessRunner : INativeProcessRunner
         var standardOutput = DrainAsync(
             process.StandardOutput,
             NativeOutputStream.StandardOutput,
-            progress);
+            progress,
+            () => Interlocked.Exchange(ref lastActivityTimestamp, Stopwatch.GetTimestamp()));
         var standardError = DrainAsync(
             process.StandardError,
             NativeOutputStream.StandardError,
-            progress);
+            progress,
+            () => Interlocked.Exchange(ref lastActivityTimestamp, Stopwatch.GetTimestamp()));
 
         try
         {
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            await WaitForExitWithInactivityGuardAsync(
+                process,
+                command,
+                () => Interlocked.Read(ref lastActivityTimestamp),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (NativeProcessInactivityException)
+        {
+            await Task.WhenAll(standardOutput, standardError).ConfigureAwait(false);
+            throw;
         }
         catch (OperationCanceledException)
         {
@@ -92,17 +104,74 @@ public sealed class NativeProcessRunner : INativeProcessRunner
     private static async Task<string> DrainAsync(
         StreamReader reader,
         NativeOutputStream outputStream,
-        IProgress<NativeOutputLine>? progress)
+        IProgress<NativeOutputLine>? progress,
+        Action markActivity)
     {
         var retainedTail = new BoundedTextTail(MaximumRetainedOutputCharacters);
 
         while (await reader.ReadLineAsync().ConfigureAwait(false) is { } line)
         {
+            markActivity();
             progress?.Report(new NativeOutputLine(outputStream, line));
             retainedTail.AppendLine(line);
         }
 
         return retainedTail.ToString();
+    }
+
+    private static async Task WaitForExitWithInactivityGuardAsync(
+        Process process,
+        NativeProcessCommand command,
+        Func<long> readLastActivityTimestamp,
+        CancellationToken cancellationToken)
+    {
+        if (command.InactivityTimeout is null)
+        {
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var inactivityTimeout = command.InactivityTimeout.Value;
+        if (inactivityTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(command),
+                "A native-process inactivity timeout must be positive.");
+        }
+
+        var pollInterval = TimeSpan.FromSeconds(Math.Clamp(
+            inactivityTimeout.TotalSeconds / 12,
+            1,
+            15));
+        var exitTask = process.WaitForExitAsync(cancellationToken);
+        while (!exitTask.IsCompleted)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var lastActivity = readLastActivityTimestamp();
+            var quietFor = Stopwatch.GetElapsedTime(lastActivity);
+            if (quietFor >= inactivityTimeout)
+            {
+                TryKill(process);
+                await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+                throw new NativeProcessInactivityException(
+                    $"{command.DisplayName ?? command.ExecutablePath} stopped responding for "
+                    + $"{inactivityTimeout.TotalMinutes:0} minutes. The worker was stopped so this batch can be retried safely.",
+                    command,
+                    quietFor);
+            }
+
+            var remaining = inactivityTimeout - quietFor;
+            var delayTask = Task.Delay(
+                remaining < pollInterval ? remaining : pollInterval,
+                cancellationToken);
+            if (await Task.WhenAny(exitTask, delayTask).ConfigureAwait(false) == exitTask)
+            {
+                await exitTask.ConfigureAwait(false);
+                return;
+            }
+        }
+
+        await exitTask.ConfigureAwait(false);
     }
 
     private static string ResolveWorkingDirectory(string? requested, string executablePath)
@@ -133,6 +202,22 @@ public sealed class NativeProcessRunner : INativeProcessRunner
             // The process exited between the state check and Kill.
         }
     }
+}
+
+public sealed class NativeProcessInactivityException : Exception
+{
+    public NativeProcessInactivityException(
+        string message,
+        NativeProcessCommand command,
+        TimeSpan inactiveDuration)
+        : base(message)
+    {
+        Command = command;
+        InactiveDuration = inactiveDuration;
+    }
+
+    public NativeProcessCommand Command { get; }
+    public TimeSpan InactiveDuration { get; }
 }
 
 internal sealed class BoundedTextTail

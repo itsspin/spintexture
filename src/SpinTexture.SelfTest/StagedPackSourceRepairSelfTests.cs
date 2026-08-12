@@ -14,6 +14,203 @@ internal static class StagedPackSourceRepairSelfTests
             .ConfigureAwait(false);
         await TestImmutableWorldSourceRepairAsync(cancellationToken)
             .ConfigureAwait(false);
+        await TestCombinedSourceMismatchAndSafetyRepairAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task TestCombinedSourceMismatchAndSafetyRepairAsync(
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-source-safety-repair-{Guid.NewGuid():N}");
+        var installPath = Path.Combine(root, "EverQuest");
+        var workspacePath = Path.Combine(root, "Workspace");
+        Directory.CreateDirectory(installPath);
+        try
+        {
+            var paths = new ProjectPaths(installPath, workspacePath);
+            await File.WriteAllBytesAsync(
+                Path.Combine(installPath, "eqgame.exe"),
+                "synthetic-eqgame"u8.ToArray(),
+                cancellationToken).ConfigureAwait(false);
+            string[] relativePaths = ["sky.s3d", "clean.s3d", "dirty.s3d"];
+            var originals = relativePaths.ToDictionary(
+                path => path,
+                path => System.Text.Encoding.UTF8.GetBytes($"original::{path}"),
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var path in relativePaths)
+            {
+                await File.WriteAllBytesAsync(
+                    Path.Combine(installPath, path),
+                    originals[path],
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            var priorDirtySource = "managed-enhanced::dirty.s3d"u8.ToArray();
+            var baselineOutputs = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["sky.s3d"] = "bad-enhanced::sky.s3d"u8.ToArray(),
+                ["clean.s3d"] = "good-enhanced::clean.s3d"u8.ToArray(),
+                ["dirty.s3d"] = "double-enhanced::dirty.s3d"u8.ToArray()
+            };
+            var buildId = "build-source-and-safety";
+            var buildDirectory = Path.Combine(paths.StagingPath, buildId);
+            var payloadDirectory = Path.Combine(buildDirectory, "payload");
+            Directory.CreateDirectory(payloadDirectory);
+            var entries = new List<BuildManifestEntry>();
+            foreach (var path in relativePaths)
+            {
+                var source = path == "dirty.s3d" ? priorDirtySource : originals[path];
+                await File.WriteAllBytesAsync(
+                    Path.Combine(payloadDirectory, path),
+                    baselineOutputs[path],
+                    cancellationToken).ConfigureAwait(false);
+                var sourceFingerprint = Fingerprint(source);
+                var outputFingerprint = Fingerprint(baselineOutputs[path]);
+                entries.Add(new BuildManifestEntry(
+                    path,
+                    sourceFingerprint.Length,
+                    sourceFingerprint.Sha256,
+                    outputFingerprint.Length,
+                    outputFingerprint.Sha256));
+            }
+
+            var options = new UpscaleOptions(
+                TexturePreset.Faithful,
+                AssetScope.WorldOnly,
+                2048,
+                GenerateMipMaps: true,
+                InstallAfterBuild: false);
+            var manifestPath = Path.Combine(buildDirectory, "manifest.json");
+            await new ManifestStore().WriteBuildManifestAsync(
+                manifestPath,
+                new BuildManifest(
+                    BuildManifest.CurrentSchemaVersion,
+                    buildId,
+                    DateTimeOffset.UtcNow,
+                    installPath,
+                    options,
+                    entries),
+                cancellationToken).ConfigureAwait(false);
+            await using (var reportStream = new FileStream(
+                Path.Combine(buildDirectory, "texture-report.json"),
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None))
+            {
+                await JsonSerializer.SerializeAsync(
+                    reportStream,
+                    new TextureBuildReport(
+                    TextureBuildReport.CurrentSchemaVersion,
+                    buildId,
+                    DateTimeOffset.UtcNow,
+                    installPath,
+                    buildDirectory,
+                    3,
+                    new TextureBuildStatistics(
+                        3,
+                        3,
+                        0,
+                        3,
+                        3,
+                        new Dictionary<string, int>(),
+                        []))
+                    {
+                        TexturePipelineRevision = 3
+                    },
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+            }
+
+            var transactionDirectory = Path.Combine(paths.BackupPath, "prior-dirty");
+            var backupRelativePath = Path.Combine("payload", "dirty.s3d");
+            Directory.CreateDirectory(Path.Combine(transactionDirectory, "payload"));
+            await File.WriteAllBytesAsync(
+                Path.Combine(transactionDirectory, backupRelativePath),
+                originals["dirty.s3d"],
+                cancellationToken).ConfigureAwait(false);
+            var originalFingerprint = Fingerprint(originals["dirty.s3d"]);
+            var installedFingerprint = Fingerprint(priorDirtySource);
+            await new ManifestStore().WriteInstallManifestAsync(
+                Path.Combine(transactionDirectory, "install-manifest.json"),
+                new InstallManifest(
+                    InstallManifest.CurrentSchemaVersion,
+                    "prior-dirty",
+                    DateTimeOffset.UtcNow,
+                    installPath,
+                    "prior",
+                    Path.Combine(paths.StagingPath, "prior", "manifest.json"),
+                    InstallTransactionState.Restored,
+                    [
+                        new InstalledArtifact(
+                            "dirty.s3d",
+                            true,
+                            originalFingerprint.Length,
+                            originalFingerprint.Sha256,
+                            backupRelativePath,
+                            installedFingerprint.Length,
+                            installedFingerprint.Sha256)
+                    ]),
+                cancellationToken).ConfigureAwait(false);
+
+            var rebuild = new DelegateStagedArtifactBuilder(async (context, token) =>
+            {
+                var source = await File.ReadAllBytesAsync(context.SourcePath, token)
+                    .ConfigureAwait(false);
+                await File.WriteAllBytesAsync(
+                    context.DestinationPath,
+                    source.Concat("::fresh"u8.ToArray()).ToArray(),
+                    token).ConfigureAwait(false);
+            });
+            var targeted = new DelegateStagedArtifactBuilder(async (context, token) =>
+            {
+                var output = context.RelativeInstallPath.Equals(
+                    "sky.s3d",
+                    StringComparison.OrdinalIgnoreCase)
+                    ? await File.ReadAllBytesAsync(context.SourcePath, token).ConfigureAwait(false)
+                    : baselineOutputs[context.RelativeInstallPath];
+                await File.WriteAllBytesAsync(context.DestinationPath, output, token)
+                    .ConfigureAwait(false);
+            });
+            var workflow = new TexturePackWorkflow(
+                clientClosedGuard: () => { },
+                manifestStore: new ManifestStore(),
+                stagedPackCatalogService: new StagedPackCatalogService());
+            var repaired = await workflow.RepairStagedPackSourceMismatchAndSafetyAsync(
+                paths,
+                manifestPath,
+                rebuild,
+                targeted,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            Assert(
+                repaired.StagedBuild.Manifest.Entries.All(entry =>
+                    !entry.RelativeInstallPath.Equals("sky.s3d", StringComparison.OrdinalIgnoreCase)),
+                "combined repair must omit source-restored sky.s3d");
+            AssertEqual(2, repaired.StagedBuild.Manifest.Entries.Count, "combined replacement count");
+            Assert(repaired.Report.IsSourceMismatchRepair, "combined source-repair flag");
+            Assert(repaired.Report.IsSafetyRepair, "combined safety-repair flag");
+            AssertEqual(
+                TextureProcessingPipeline.CurrentRevision,
+                repaired.Report.TexturePipelineRevision,
+                "combined pipeline revision");
+            AssertSequenceEqual(
+                baselineOutputs["clean.s3d"],
+                await File.ReadAllBytesAsync(
+                    Path.Combine(repaired.StagedBuild.BuildDirectory, "payload", "clean.s3d"),
+                    cancellationToken).ConfigureAwait(false),
+                "combined repair reuses clean output exactly");
+            AssertSequenceEqual(
+                originals["dirty.s3d"].Concat("::fresh"u8.ToArray()).ToArray(),
+                await File.ReadAllBytesAsync(
+                    Path.Combine(repaired.StagedBuild.BuildDirectory, "payload", "dirty.s3d"),
+                    cancellationToken).ConfigureAwait(false),
+                "combined repair rebuilds contaminated output from original");
+        }
+        finally
+        {
+            DeleteTree(root);
+        }
     }
 
     private static async Task TestActiveBuildSourcesUseManagedOriginalsAsync(

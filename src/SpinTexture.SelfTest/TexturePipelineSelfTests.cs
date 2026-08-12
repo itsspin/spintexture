@@ -24,6 +24,11 @@ public static class TexturePipelineSelfTests
             .ConfigureAwait(false);
         TestHeaderSniffingAndClassification();
         TestArtDirectionAndEffectPolicies();
+        CelestialTextureSafetyPolicySelfTests.Run();
+        await LooseTextureSafetyRepairSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
+        await CelestialPackRepairSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
+        await StagedBuildOmissionSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
+        await StagedBuildCheckpointSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
         TestTextureProcessingPipelineRevision();
         await output.WriteLineAsync("Texture metadata tests passed.").ConfigureAwait(false);
         await ControlTextureAndIndexedBmpSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
@@ -42,6 +47,7 @@ public static class TexturePipelineSelfTests
         TestCapMathAndCommands();
         await output.WriteLineAsync("Tool command tests passed.").ConfigureAwait(false);
         TestBoundedNativeOutputRetention();
+        await TestNativeProcessInactivityGuardAsync(cancellationToken).ConfigureAwait(false);
         TestRestoreSafetyCleanupGuard();
         await output.WriteLineAsync("Bounded diagnostics and restore cleanup-guard tests passed.")
             .ConfigureAwait(false);
@@ -161,6 +167,16 @@ public static class TexturePipelineSelfTests
                 AssetScope.CharactersAndEquipmentOnly),
             "a revision-1 character pack should receive the cutout compatibility upgrade");
         Assert(
+            TextureProcessingPipeline.RequiresRepair(
+                Report(revision: 2),
+                AssetScope.CharactersAndEquipmentOnly),
+            "a revision-2 character pack should still receive the cutout compatibility upgrade");
+        Assert(
+            !TextureProcessingPipeline.RequiresRepair(
+                Report(revision: 3),
+                AssetScope.CharactersAndEquipmentOnly),
+            "a revision-3 character-only pack has no environmental celestial work and must not receive a pointless revision-4 repair");
+        Assert(
             TextureProcessingPipeline.RequiresCutoutMipUpgrade(
                 Report(revision: 0, isRepair: true),
                 AssetScope.CharactersAndEquipmentOnly),
@@ -196,13 +212,26 @@ public static class TexturePipelineSelfTests
             "a selected-zone pack from before the cutout mip revision should be upgradeable");
         Assert(
             !TextureProcessingPipeline.RequiresRepair(
+                Report(revision: 3),
+                AssetScope.SelectedZone,
+                ["forest.s3d", "forest_obj.s3d"]),
+            "a revision-3 selected-zone pack without sky.s3d should not receive a celestial repair");
+        Assert(
+            TextureProcessingPipeline.RequiresRepair(
+                Report(revision: 3),
+                AssetScope.SelectedZone,
+                ["forest.s3d", "sky.s3d"]),
+            "a revision-3 selected-zone pack containing exact top-level sky.s3d should receive celestial repair");
+        Assert(
+            !TextureProcessingPipeline.RequiresRepair(
                 Report(TextureProcessingPipeline.CurrentRevision),
                 AssetScope.WorldOnly),
             "a current World-only pack should not offer another cutout upgrade");
         Assert(
             !TextureProcessingPipeline.RequiresRepair(
                 Report(revision: 0),
-                AssetScope.AllSafeTextures),
+                AssetScope.AllSafeTextures,
+                Array.Empty<string>()),
             "loose/all-safe packs remain outside PFS revision repair");
     }
 
@@ -1051,6 +1080,94 @@ public static class TexturePipelineSelfTests
         }
     }
 
+    private static async Task TestNativeProcessInactivityGuardAsync(
+        CancellationToken cancellationToken)
+    {
+        var runner = new NativeProcessRunner();
+        var ping = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "ping.exe");
+        Assert(File.Exists(ping), "Windows ping helper should exist for native inactivity tests");
+
+        var silentCommand = new NativeProcessCommand(
+            ping,
+            ["-n", "6", "127.0.0.1"],
+            DisplayName: "silent self-test worker",
+            InactivityTimeout: TimeSpan.FromMilliseconds(150));
+        try
+        {
+            await runner.RunAsync(silentCommand, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            throw new InvalidOperationException(
+                "Self-test failed: a silent native worker should hit its inactivity guard.");
+        }
+        catch (NativeProcessInactivityException exception)
+        {
+            AssertEqual(
+                "silent self-test worker",
+                exception.Command.DisplayName!,
+                "inactivity exception command");
+            Assert(
+                exception.InactiveDuration >= TimeSpan.FromMilliseconds(100),
+                "inactivity exception should report the quiet interval");
+        }
+
+        var activityLines = new List<string>();
+        var powershell = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
+        Assert(File.Exists(powershell), "Windows PowerShell should exist for native activity tests");
+        var activeCommand = new NativeProcessCommand(
+            powershell,
+            [
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Console]::Out.WriteLine('one'); [Console]::Out.Flush(); Start-Sleep -Milliseconds 2500; [Console]::Out.WriteLine('two'); [Console]::Out.Flush(); Start-Sleep -Milliseconds 2500; [Console]::Out.WriteLine('three'); [Console]::Out.Flush()"
+            ],
+            DisplayName: "active self-test worker",
+            InactivityTimeout: TimeSpan.FromSeconds(4));
+        var activeResult = await runner.RunAsync(
+                activeCommand,
+                new InlineProgress<NativeOutputLine>(line => activityLines.Add(line.Text)),
+                cancellationToken)
+            .ConfigureAwait(false);
+        Assert(activeResult.Succeeded, "periodically active native process should complete");
+        AssertEqual(3, activityLines.Count, "periodic native output should reset inactivity and be forwarded");
+
+        var noTimeoutResult = await runner.RunAsync(
+                new NativeProcessCommand(
+                    ping,
+                    ["-n", "1", "127.0.0.1"],
+                    DisplayName: "default no-timeout self-test worker"),
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        Assert(noTimeoutResult.Succeeded, "default native command should retain no fixed timeout");
+
+        using var cancel = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cancel.CancelAfter(TimeSpan.FromMilliseconds(100));
+        try
+        {
+            await runner.RunAsync(
+                    new NativeProcessCommand(
+                        ping,
+                        ["-n", "6", "127.0.0.1"],
+                        DisplayName: "cancel self-test worker",
+                        InactivityTimeout: TimeSpan.FromMinutes(1)),
+                    cancellationToken: cancel.Token)
+                .ConfigureAwait(false);
+            throw new InvalidOperationException(
+                "Self-test failed: cancellation should stop a native worker.");
+        }
+        catch (OperationCanceledException) when (cancel.IsCancellationRequested)
+        {
+            // Cancellation remains distinct from driver-hang recovery.
+        }
+    }
+
     private static void TestTextureModelSelection()
     {
         var root = Path.Combine(Path.GetTempPath(), $"spintexture-models-{Guid.NewGuid():N}");
@@ -1124,6 +1241,10 @@ public static class TexturePipelineSelfTests
             Assert(command.Arguments.Contains("-j"), "Upscayl command should configure its processing queues");
             Assert(command.Arguments.Contains("1:2:2"), "Upscayl command should use the validated queue split");
             Assert(command.Arguments.Contains("4"), "Upscayl command should keep fixed SPAN models at native 4x");
+            AssertEqual(
+                TimeSpan.FromMinutes(45),
+                command.InactivityTimeout!.Value,
+                "Texture HD worker inactivity guard");
 
             var acceleratedCommand = textureBuilder.CreateUpscale(
                 Path.Combine(root, "upscayl-bin.exe"),
@@ -1149,6 +1270,22 @@ public static class TexturePipelineSelfTests
                 "1:3:3",
                 GetCommandArgument(faithfulCommand.Arguments, "-j")!,
                 "Real-ESRNet should accept the validated accelerated small-texture queue");
+            AssertEqual(
+                TimeSpan.FromMinutes(45),
+                faithfulCommand.InactivityTimeout!.Value,
+                "standard Real-ESRGAN worker inactivity guard");
+
+            var materialCommand = legacyBuilder.CreateUpscale(
+                Path.Combine(root, "realesrgan-ncnn-vulkan.exe"),
+                legacyModels,
+                Path.Combine(root, "material-input-directory"),
+                Path.Combine(root, "material-output-directory"),
+                TexturePreset.MaximumDetail);
+            Assert(materialCommand.Arguments.Contains("-x"), "Material Detail should retain TTA");
+            AssertEqual(
+                TimeSpan.FromMinutes(90),
+                materialCommand.InactivityTimeout!.Value,
+                "Material Detail TTA inactivity guard");
 
             var faithful = legacyBuilder.ResolveModel(legacyModels, TexturePreset.Faithful);
             AssertEqual(
@@ -2319,6 +2456,11 @@ public static class TexturePipelineSelfTests
                 return commands.ToArray();
             }
         }
+    }
+
+    private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
+    {
+        public void Report(T value) => report(value);
     }
 
     private sealed class FidelityFallbackNativeProcessRunner : INativeProcessRunner

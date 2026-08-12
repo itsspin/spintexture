@@ -293,23 +293,13 @@
                                                 <TextBlock Text="{Binding StateText}" Foreground="{StaticResource Safe}"
                                                            FontSize="12" TextWrapping="Wrap" LineHeight="18" />
                                             </Border>
-                                            <Border Background="#382B18" BorderBrush="#785C2F" BorderThickness="1"
+                                            <Border Background="{Binding RepairPanelBackground}" BorderBrush="{Binding RepairPanelBorderBrush}" BorderThickness="1"
                                                     CornerRadius="5" Padding="9,8" Margin="0,8,0,0"
-                                                    Visibility="{Binding CanRepair, Converter={StaticResource BoolToVisibility}}">
+                                                    Visibility="{Binding CanRepairAny, Converter={StaticResource BoolToVisibility}}">
                                                 <StackPanel>
-                                                    <TextBlock Text="{Binding RepairButtonText, StringFormat={}{0} AVAILABLE}"
-                                                               Foreground="{StaticResource Warning}" FontSize="11" FontWeight="Bold" />
-                                                    <TextBlock Text="{Binding RepairStatusText}" Foreground="#F5DEAB"
-                                                               FontSize="12" TextWrapping="Wrap" LineHeight="18" Margin="0,3,0,0" />
-                                                </StackPanel>
-                                            </Border>
-                                            <Border Background="#451F22" BorderBrush="#8A4149" BorderThickness="1"
-                                                    CornerRadius="5" Padding="9,8" Margin="0,8,0,0"
-                                                    Visibility="{Binding CanRepairSourceMismatch, Converter={StaticResource BoolToVisibility}}">
-                                                <StackPanel>
-                                                    <TextBlock Text="SOURCE MISMATCH - REPAIR BEFORE INSTALL"
-                                                               Foreground="#FFB9BE" FontSize="11" FontWeight="Bold" />
-                                                    <TextBlock Text="{Binding SourceRepairStatusText}" Foreground="#FFD5D8"
+                                                    <TextBlock Text="{Binding RepairBadgeText}"
+                                                               Foreground="{Binding RepairStatusForeground}" FontSize="11" FontWeight="Bold" />
+                                                    <TextBlock Text="{Binding RepairStatusText}" Foreground="{Binding RepairStatusForeground}"
                                                                FontSize="12" TextWrapping="Wrap" LineHeight="18" Margin="0,3,0,0" />
                                                 </StackPanel>
                                             </Border>
@@ -353,17 +343,19 @@
                         <WrapPanel>
                             <Button Content="Open This Pack’s Preview" Click="Preview_Click" IsEnabled="{Binding CanPreview}"
                                     Background="#193027" BorderBrush="#356A57" />
-                            <Button Content="{Binding SelectedPack.RepairButtonText, TargetNullValue=Repair Focused Pack}"
-                                    Click="Repair_Click" IsEnabled="{Binding CanRepair}" ToolTip="Creates a new corrected pack while preserving this completed pack."
+                            <Button Content="Repair Checked Packs"
+                                    Click="RepairCheckedPacks_Click" IsEnabled="{Binding CanRepairCheckedPacks}"
+                                    Background="#382B18" BorderBrush="#785C2F"
+                                    ToolTip="Repairs every checked source pack that needs an update. Source mismatches run first; completed replacements stay checked if a later pack fails." />
+                            <Button Content="Repair Pack"
+                                    Click="Repair_Click" IsEnabled="{Binding CanRepairAny}"
+                                    ToolTip="Repairs the focused pack named above. Checkmarks do not control this button. The completed original remains unchanged."
                                     Background="#26324A" BorderBrush="#526D9E" />
-                            <Button Content="Fix This Pack’s Source Mismatch" Click="RepairSourceMismatch_Click"
-                                    IsEnabled="{Binding CanRepairSourceMismatch}"
-                                    Background="#382B18" BorderBrush="#785C2F" />
                             <Button Content="{Binding DeleteButtonText}" Click="Delete_Click" IsEnabled="{Binding CanDelete}"
                                     Background="#3A1D20" BorderBrush="#8C4A53" Foreground="#FFDADD"
                                     ToolTip="Preflight and permanently delete every highlighted pack. Active or referenced packs block the whole operation." />
                         </WrapPanel>
-                        <TextBlock Text="Preview and repair affect only the pack named above. Delete affects every orange-outlined row and never deletes live game files or original backups."
+                        <TextBlock Text="Repair Checked Packs is the simplest fix for an installed combination: affected checked source packs are replaced safely. Preview and Repair Pack affect only the focused pack named above. Delete affects every orange-outlined row. None of these actions deletes live game files or original backups."
                                    Style="{StaticResource Caption}" FontSize="11" Margin="0,0,0,9" />
                     </StackPanel>
 

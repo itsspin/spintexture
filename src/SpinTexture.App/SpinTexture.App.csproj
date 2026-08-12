@@ -31,7 +31,5 @@
     <Content Include="..\..\vendor\upscayl\models\*.param" Link="Tools\upscayl\models\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <Content Include="..\..\vendor\licenses\*" Link="ThirdPartyLicenses\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <Content Include="..\..\vendor\manifest.json" Link="Tools\manifest.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
-    <Resource Include="..\..\docs\media\comparisons\characters-original.png" Link="Assets\Examples\characters-original.png" />
-    <Resource Include="..\..\docs\media\comparisons\characters-enhanced.png" Link="Assets\Examples\characters-enhanced.png" />
   </ItemGroup>
 </Project>

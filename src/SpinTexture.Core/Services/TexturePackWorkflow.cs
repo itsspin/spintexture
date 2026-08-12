@@ -18,6 +18,9 @@ public sealed record TexturePackBuildResult(
 
 public sealed class TexturePackWorkflow
 {
+    public static string FreshBuildResumeOperationKey =>
+        $"fresh-texture-pack-pipeline-{TextureProcessingPipeline.CurrentRevision}";
+
     private static readonly JsonSerializerOptions CompositionJsonOptions =
         CreateCompositionJsonOptions();
 
@@ -169,55 +172,77 @@ public sealed class TexturePackWorkflow
                 "No safe textures below the selected resolution cap were found in this scope.");
         }
 
-        var staged = await stagedBuildService.BuildAsync(
-            new StagedBuildRequest(paths, options, items),
-            progress,
-            cancellationToken).ConfigureAwait(false);
-        var statistics = counter.Snapshot();
-        if (statistics.EnhancedTextures == 0)
-        {
-            throw new InvalidOperationException(
-                "The build completed without an eligible texture. No client files were installed.");
-        }
-
-        var buildCompletedUtc = DateTimeOffset.UtcNow;
-        var report = new TextureBuildReport(
-            TextureBuildReport.CurrentSchemaVersion,
-            staged.BuildId,
-            buildCompletedUtc,
-            paths.InstallPath,
-            staged.BuildDirectory,
-            selectedArchives.Count,
-            statistics)
-        {
-            StartedUtc = buildStartedUtc,
-            DurationSeconds = (buildCompletedUtc - buildStartedUtc).TotalSeconds,
-            TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision
-        };
-        var reportPath = Path.Combine(staged.BuildDirectory, "texture-report.json");
-        await WriteReportAsync(reportPath, report, cancellationToken).ConfigureAwait(false);
-
+        TextureBuildReport? report = null;
+        string? reportPath = null;
         string? previewManifestPath = null;
-        var previewEntries = previewCollector.Snapshot();
-        var reviewEntries = previewCollector.ReviewSnapshot();
-        if (previewEntries.Count > 0 || reviewEntries.Count > 0)
-        {
-            var previewManifest = new TexturePreviewManifest(
-                TexturePreviewManifest.CurrentSchemaVersion,
-                staged.BuildId,
-                DateTimeOffset.UtcNow,
-                previewEntries)
+        var staged = await stagedBuildService.BuildAsync(
+            new StagedBuildRequest(
+                paths,
+                options,
+                items,
+                ResumeOperationKey: FreshBuildResumeOperationKey),
+            progress,
+            cancellationToken,
+            async (finalizing, metadataCancellationToken) =>
             {
-                ReviewEntries = reviewEntries
-            };
-            previewManifestPath = Path.Combine(
-                staged.BuildDirectory,
-                "previews",
-                "preview-manifest.json");
-            await WritePreviewManifestAsync(
-                previewManifestPath,
-                previewManifest,
-                cancellationToken).ConfigureAwait(false);
+                var statistics = counter.Snapshot();
+                if (statistics.EnhancedTextures == 0)
+                {
+                    throw new InvalidOperationException(
+                        "The build completed without an eligible texture. No client files were installed.");
+                }
+
+                var buildCompletedUtc = DateTimeOffset.UtcNow;
+                report = new TextureBuildReport(
+                    TextureBuildReport.CurrentSchemaVersion,
+                    finalizing.BuildId,
+                    buildCompletedUtc,
+                    paths.InstallPath,
+                    finalizing.BuildDirectory,
+                    selectedArchives.Count,
+                    statistics)
+                {
+                    StartedUtc = finalizing.CheckpointCreatedUtc == default
+                        ? buildStartedUtc
+                        : finalizing.CheckpointCreatedUtc,
+                    DurationSeconds = finalizing.ActiveDurationSeconds,
+                    WasResumed = finalizing.ResumedArtifactCount > 0,
+                    ResumedArtifacts = finalizing.ResumedArtifactCount,
+                    TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
+                    AppliedRepairRuleIds = TextureProcessingPipeline
+                        .GetCurrentRepairRuleIds(
+                            options.Scope,
+                            finalizing.Manifest.Entries.Select(entry => entry.RelativeInstallPath))
+                };
+                reportPath = Path.Combine(finalizing.BuildDirectory, "texture-report.json");
+                await WriteReportAsync(reportPath, report, metadataCancellationToken).ConfigureAwait(false);
+
+                var previewEntries = previewCollector.Snapshot();
+                var reviewEntries = previewCollector.ReviewSnapshot();
+                if (previewEntries.Count > 0 || reviewEntries.Count > 0)
+                {
+                    var previewManifest = new TexturePreviewManifest(
+                        TexturePreviewManifest.CurrentSchemaVersion,
+                        finalizing.BuildId,
+                        DateTimeOffset.UtcNow,
+                        previewEntries)
+                    {
+                        ReviewEntries = reviewEntries
+                    };
+                    previewManifestPath = Path.Combine(
+                        finalizing.BuildDirectory,
+                        "previews",
+                        "preview-manifest.json");
+                    await WritePreviewManifestAsync(
+                        previewManifestPath,
+                        previewManifest,
+                        metadataCancellationToken).ConfigureAwait(false);
+                }
+            }).ConfigureAwait(false);
+
+        if (report is null || reportPath is null)
+        {
+            throw new InvalidDataException("The staged build metadata finalizer did not complete.");
         }
 
         ApplyResult? applyResult = null;
@@ -395,31 +420,43 @@ public sealed class TexturePackWorkflow
                 baselineInfo.BuildDirectory,
                 cancellationToken)
             .ConfigureAwait(false);
+        var baselineArtifactPaths = baselineInfo.Artifacts
+            .Select(artifact => artifact.CanonicalRelativeInstallPath)
+            .ToArray();
         var isPipelineRepairScope = baseline.Options.Scope is
             AssetScope.CharactersAndEquipmentOnly
             or AssetScope.WorldOnly
             or AssetScope.WorldCharactersAndEquipment
-            or AssetScope.SelectedZone;
+            or AssetScope.SelectedZone
+            or AssetScope.SpellEffectsOnly;
         var requiresPipelineRepair = TextureProcessingPipeline.RequiresRepair(
             baselineReport,
-            baseline.Options.Scope);
+            baseline.Options.Scope,
+            baselineArtifactPaths);
         if (isManualTextureRevision && requiresPipelineRepair)
         {
             throw new InvalidOperationException(
                 "Upgrade this staged pack to the current texture pipeline before applying individual texture choices. The baseline was left unchanged.");
         }
-        var isCutoutMipRepair = !isManualTextureRevision
-            && TextureProcessingPipeline.RequiresCutoutMipUpgrade(
+        var isTargetedSafetyRepair = !isManualTextureRevision
+            && TextureProcessingPipeline.RequiresTargetedSafetyRepair(
                 baselineReport,
-                baseline.Options.Scope);
+                baseline.Options.Scope,
+                baselineArtifactPaths);
         if (!isManualTextureRevision && isPipelineRepairScope && !requiresPipelineRepair)
         {
             throw new InvalidOperationException(
                 "This staged pack already uses the current texture pipeline. The completed pack was left unchanged.");
         }
 
-        if (baseline.Options.Scope == AssetScope.AllSafeTextures
-            || baseline.Entries.Any(entry =>
+        if (baseline.Options.Scope == AssetScope.AllSafeTextures)
+        {
+            throw new InvalidOperationException(
+                "Legacy All Safe packs can mix PFS and loose files and may have been built from managed enhanced sources. Their source provenance must be repaired before a safe mixed-artifact upgrade can be offered; the selected pack was left unchanged.");
+        }
+
+        if (baseline.Options.Scope != AssetScope.SpellEffectsOnly
+            && baseline.Entries.Any(entry =>
                 !EverQuestInstall.IsPfsArchiveExtension(
                     Path.GetExtension(entry.RelativeInstallPath))))
         {
@@ -487,12 +524,35 @@ public sealed class TexturePackWorkflow
             activeInstallDirectory = Path.GetDirectoryName(activeInstallPath)!;
         }
 
+        var missingRepairRules = TextureProcessingPipeline.GetMissingRepairRuleIds(
+            baselineReport,
+            baseline.Options.Scope,
+            baselineArtifactPaths);
+        if (!isManualTextureRevision
+            && isTargetedSafetyRepair
+            && missingRepairRules.Count == 1
+            && missingRepairRules[0].Equals(
+                TextureProcessingPipeline.CelestialSkySafetyRuleId,
+                StringComparison.Ordinal))
+        {
+            return await RepairCelestialSafetyPackAsync(
+                    paths,
+                    baselineInfo,
+                    baselineReport,
+                    activeInstall,
+                    activeInstallDirectory,
+                    repairStartedUtc,
+                    progress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         var repairOptions = baseline.Options with
         {
             // A revision upgrade must preserve the original pack's visual
             // profile. The explicit retry preset remains available to the
             // legacy character/equipment missing-texture repair.
-            Preset = isCutoutMipRepair || isManualTextureRevision
+            Preset = isTargetedSafetyRepair || isManualTextureRevision
                 ? baseline.Options.Preset
                 : retryPreset,
             InstallAfterBuild = false,
@@ -516,7 +576,7 @@ public sealed class TexturePackWorkflow
                 $"Repair coverage no longer includes {uncoveredBaselineArtifacts.Length:N0} archive(s) from the original pack ({examples}). The original staged pack remains intact; rebuild instead of creating an incomplete replacement.");
         }
 
-        var repairArchives = (isCutoutMipRepair || isManualTextureRevision)
+        var repairArchives = (isTargetedSafetyRepair || isManualTextureRevision)
             ? selectedArchives
                 .Where(path => baselineEntries.ContainsKey(
                     Path.GetRelativePath(paths.InstallPath, path)))
@@ -537,8 +597,8 @@ public sealed class TexturePackWorkflow
                     or AssetScope.WorldCharactersAndEquipment,
             reuseArchivePaths: reuseArchivePaths,
             reuseArchiveFingerprints: reuseArchiveFingerprints,
-            rebuildFromReuseArchive: isCutoutMipRepair || isManualTextureRevision,
-            retryUnchangedEntries: !(isCutoutMipRepair || isManualTextureRevision));
+            rebuildFromReuseArchive: isTargetedSafetyRepair || isManualTextureRevision,
+            retryUnchangedEntries: !(isTargetedSafetyRepair || isManualTextureRevision));
 
         var items = new List<StagedBuildItem>();
         for (var index = 0; index < repairArchives.Count; index++)
@@ -550,8 +610,8 @@ public sealed class TexturePackWorkflow
                 "Repair plan",
                 isManualTextureRevision
                     ? "Verifying prior output and locating only user-selected texture changes."
-                    : isCutoutMipRepair
-                    ? "Verifying prior output and locating only enhanced cutouts built with the retired mip chain."
+                    : isTargetedSafetyRepair
+                    ? "Verifying prior output and locating only textures affected by newer safety rules."
                     : "Verifying prior successes and locating only missing texture work.",
                 index,
                 repairArchives.Count,
@@ -590,7 +650,9 @@ public sealed class TexturePackWorkflow
                         archiveBuilder,
                         PathGuard.SamePath(sourcePath, liveArchivePath) ? null : sourcePath,
                         baselineEntry?.SourceLength,
-                        baselineEntry?.SourceSha256));
+                        baselineEntry?.SourceSha256,
+                        AllowSourceIdenticalOmission: isTargetedSafetyRepair
+                            && CanOmitSourceIdenticalSafetyArtifact(relativePath)));
                 }
             }
             catch (Exception exception) when (exception is IOException or InvalidDataException)
@@ -613,11 +675,11 @@ public sealed class TexturePackWorkflow
         }
 
 
-        if ((isCutoutMipRepair || isManualTextureRevision)
+        if ((isTargetedSafetyRepair || isManualTextureRevision)
             && items.Count != baselineEntries.Count)
         {
             throw new InvalidOperationException(
-                "The World/zone revision repair could not account for every archive in the verified baseline. The original staged pack remains intact; no incomplete replacement was created.");
+                "The targeted safety repair could not account for every archive in the verified baseline. The original staged pack remains intact; no incomplete replacement was created.");
         }
 
         var staged = await stagedBuildService.BuildAsync(
@@ -625,14 +687,14 @@ public sealed class TexturePackWorkflow
                 paths,
                 repairOptions,
                 items,
-                RequireAllItems: isCutoutMipRepair || isManualTextureRevision),
+                RequireAllItems: isTargetedSafetyRepair || isManualTextureRevision),
             progress,
             cancellationToken).ConfigureAwait(false);
         var preliminaryStatistics = counter.Snapshot();
         counter.Warn(isManualTextureRevision
             ? $"Texture revision reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and changed only explicitly reviewed entries."
-            : isCutoutMipRepair
-                ? $"Cutout mip repair reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and reprocessed only changed alpha-tested outputs that failed the current mip policy; source-identical entries were not retried."
+            : isTargetedSafetyRepair
+                ? $"Safety repair reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and changed only outputs affected by newer safety rules; source-identical entries were not retried."
                 : $"Repair reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and retried only unchanged eligible entries.");
         var statistics = counter.Snapshot();
         if (statistics.EnhancedTextures == 0 && statistics.ReusedTextures == 0)
@@ -654,11 +716,19 @@ public sealed class TexturePackWorkflow
             StartedUtc = repairStartedUtc,
             DurationSeconds = (repairCompletedUtc - repairStartedUtc).TotalSeconds,
             IsIncrementalRepair = true,
-            IsCutoutMipRepair = isCutoutMipRepair,
+            IsSafetyRepair = isTargetedSafetyRepair,
+            // Compatibility flag: true only when the baseline predates the
+            // cutout rule, even though the targeted route may apply newer rules.
+            IsCutoutMipRepair = isTargetedSafetyRepair
+                && (baselineReport?.TexturePipelineRevision ?? 0) < 3,
             IsManualTextureRevision = isManualTextureRevision,
             BaselineBuildId = baseline.BuildId,
             BaselineTexturePipelineRevision = baselineReport?.TexturePipelineRevision ?? 0,
-            TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision
+            TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
+            AppliedRepairRuleIds = TextureProcessingPipeline
+                .GetCurrentRepairRuleIds(
+                    baseline.Options.Scope,
+                    baselineArtifactPaths)
         };
         var reportPath = Path.Combine(staged.BuildDirectory, "texture-report.json");
         await WriteReportAsync(reportPath, report, cancellationToken).ConfigureAwait(false);
@@ -751,6 +821,158 @@ public sealed class TexturePackWorkflow
     }
 
     /// <summary>
+    /// Advances a verified completed pack through a celestial-only safety
+    /// revision without invoking the AI pipeline or recompressing unaffected
+    /// PFS archives. Every ordinary payload is exact-reused; protected sky and
+    /// loose celestial artifacts are restored from verified original bytes and
+    /// deliberately omitted from the replacement manifest.
+    /// </summary>
+    private async Task<TexturePackBuildResult> RepairCelestialSafetyPackAsync(
+        ProjectPaths paths,
+        StagedPackInfo baselineInfo,
+        TextureBuildReport? baselineReport,
+        InstallManifest? activeInstall,
+        string? activeInstallDirectory,
+        DateTimeOffset repairStartedUtc,
+        IProgress<ProgressUpdate>? progress,
+        CancellationToken cancellationToken)
+    {
+        var baseline = baselineInfo.Manifest
+            ?? throw new InvalidDataException("The verified safety-repair baseline has no manifest.");
+        var provenance = await LoadManagedInstallProvenanceAsync(paths, cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var artifact in baselineInfo.Artifacts)
+        {
+            var entry = artifact.Entry;
+            if (provenance.TryGetValue(
+                    CreateManagedInstalledKey(
+                        artifact.CanonicalRelativeInstallPath,
+                        entry.SourceLength,
+                        entry.SourceSha256),
+                    out var knownSources)
+                && knownSources.Any(source =>
+                    source.OriginalLength != entry.SourceLength
+                    || !source.OriginalSha256.Equals(
+                        entry.SourceSha256,
+                        StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new InvalidOperationException(
+                    $"{artifact.CanonicalRelativeInstallPath} was built from bytes installed by an older managed pack. Run Repair Pack's source-and-safety repair so this artifact is rebuilt from its verified original; the staged baseline was left unchanged.");
+            }
+        }
+
+        var counter = new TextureBuildCounter();
+        var items = new List<StagedBuildItem>(baselineInfo.Artifacts.Count);
+        for (var index = 0; index < baselineInfo.Artifacts.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var artifact = baselineInfo.Artifacts[index];
+            var entry = artifact.Entry;
+            var relativePath = artifact.CanonicalRelativeInstallPath;
+            var livePath = PathGuard.ResolveUnderRoot(paths.InstallPath, relativePath);
+            var sourcePath = await ResolveRepairSourceAsync(
+                    paths,
+                    livePath,
+                    entry with { RelativeInstallPath = relativePath },
+                    activeInstall,
+                    activeInstallDirectory,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var restoredToOriginal = CanOmitSourceIdenticalSafetyArtifact(relativePath);
+            var builder = new LooseTextureSafetyRepairBuilder(
+                artifact.PayloadPath,
+                entry.StagedLength,
+                entry.StagedSha256,
+                counter);
+            items.Add(new StagedBuildItem(
+                relativePath,
+                builder,
+                PathGuard.SamePath(sourcePath, livePath) ? null : sourcePath,
+                entry.SourceLength,
+                entry.SourceSha256,
+                ExpectedStagedLength: restoredToOriginal ? null : entry.StagedLength,
+                ExpectedStagedSha256: restoredToOriginal ? null : entry.StagedSha256,
+                AllowSourceIdenticalOmission: restoredToOriginal));
+            progress?.Report(new ProgressUpdate(
+                "Safety repair plan",
+                restoredToOriginal
+                    ? "Restoring protected sky/celestial bytes from the verified original."
+                    : "Exact-reusing an unaffected completed artifact.",
+                index + 1,
+                baselineInfo.Artifacts.Count,
+                relativePath));
+        }
+
+        var repairOptions = baseline.Options with
+        {
+            InstallAfterBuild = false,
+            TextureOverrides = null
+        };
+        StagedBuildResult staged;
+        try
+        {
+            staged = await stagedBuildService.BuildAsync(
+                    new StagedBuildRequest(
+                        paths,
+                        repairOptions,
+                        items,
+                        RequireAllItems: true),
+                    progress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (InvalidOperationException exception) when (
+            exception.Message.Contains(
+                "no changed install artifacts",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "Every artifact in this legacy pack is now protected original content, so there is no enhanced payload left to stage. Restore or delete the old pack instead; no incomplete replacement was created.",
+                exception);
+        }
+
+        var statistics = counter.Snapshot();
+        counter.Warn(
+            $"Celestial safety repair exact-reused {statistics.ReusedTextures:N0} unaffected artifact(s) and restored protected sky/celestial artifacts from verified originals without AI processing or recompression.");
+        statistics = counter.Snapshot();
+        var completedUtc = DateTimeOffset.UtcNow;
+        var artifactPaths = baselineInfo.Artifacts
+            .Select(artifact => artifact.CanonicalRelativeInstallPath)
+            .ToArray();
+        var report = new TextureBuildReport(
+            TextureBuildReport.CurrentSchemaVersion,
+            staged.BuildId,
+            completedUtc,
+            paths.InstallPath,
+            staged.BuildDirectory,
+            baselineInfo.Artifacts.Count,
+            statistics)
+        {
+            StartedUtc = repairStartedUtc,
+            DurationSeconds = (completedUtc - repairStartedUtc).TotalSeconds,
+            IsIncrementalRepair = true,
+            IsSafetyRepair = true,
+            IsCutoutMipRepair = false,
+            BaselineBuildId = baseline.BuildId,
+            BaselineTexturePipelineRevision = baselineReport?.TexturePipelineRevision ?? 0,
+            ReusedArtifacts = statistics.ReusedTextures,
+            SafetyUpgradedArtifacts = baselineInfo.Artifacts.Count - statistics.ReusedTextures,
+            TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
+            AppliedRepairRuleIds = TextureProcessingPipeline.GetCurrentRepairRuleIds(
+                baseline.Options.Scope,
+                artifactPaths)
+        };
+        var reportPath = Path.Combine(staged.BuildDirectory, "texture-report.json");
+        await WriteReportAsync(reportPath, report, cancellationToken).ConfigureAwait(false);
+        return new TexturePackBuildResult(
+            staged,
+            report,
+            reportPath,
+            ApplyResult: null,
+            PreviewManifestPath: null);
+    }
+
+    /// <summary>
     /// Creates a new immutable replacement for a source-contaminated PFS world
     /// pack. Whole staged artifacts are reused only when the currently verified
     /// original still matches the baseline source. Artifacts built from a known
@@ -766,6 +988,8 @@ public sealed class TexturePackWorkflow
             paths,
             baselineManifestPath,
             rebuildBuilderOverride: null,
+            targetedSafetyBuilderOverride: null,
+            forceTargetedSafetyRepair: null,
             progress,
             cancellationToken);
 
@@ -779,6 +1003,25 @@ public sealed class TexturePackWorkflow
             paths,
             baselineManifestPath,
             rebuildBuilder ?? throw new ArgumentNullException(nameof(rebuildBuilder)),
+            targetedSafetyBuilderOverride: null,
+            forceTargetedSafetyRepair: false,
+            progress,
+            cancellationToken);
+
+    internal Task<TexturePackBuildResult> RepairStagedPackSourceMismatchAndSafetyAsync(
+        ProjectPaths paths,
+        string baselineManifestPath,
+        IStagedArtifactBuilder rebuildBuilder,
+        IStagedArtifactBuilder targetedSafetyBuilder,
+        IProgress<ProgressUpdate>? progress = null,
+        CancellationToken cancellationToken = default) =>
+        RepairStagedPackSourceMismatchCoreAsync(
+            paths,
+            baselineManifestPath,
+            rebuildBuilder ?? throw new ArgumentNullException(nameof(rebuildBuilder)),
+            targetedSafetyBuilder
+                ?? throw new ArgumentNullException(nameof(targetedSafetyBuilder)),
+            forceTargetedSafetyRepair: true,
             progress,
             cancellationToken);
 
@@ -786,6 +1029,8 @@ public sealed class TexturePackWorkflow
         ProjectPaths paths,
         string baselineManifestPath,
         IStagedArtifactBuilder? rebuildBuilderOverride,
+        IStagedArtifactBuilder? targetedSafetyBuilderOverride,
+        bool? forceTargetedSafetyRepair,
         IProgress<ProgressUpdate>? progress,
         CancellationToken cancellationToken)
     {
@@ -799,7 +1044,9 @@ public sealed class TexturePackWorkflow
         }
 
         ExternalToolPaths? tools = null;
-        if (rebuildBuilderOverride is null)
+        if (rebuildBuilderOverride is null
+            || (forceTargetedSafetyRepair == true
+                && targetedSafetyBuilderOverride is null))
         {
             tools = toolchainDiscovery.Discover(paths);
             if (!tools.IsReady)
@@ -831,6 +1078,17 @@ public sealed class TexturePackWorkflow
                 baselineInfo.BuildDirectory,
                 cancellationToken)
             .ConfigureAwait(false);
+        // Production source repair can advance a stale, provenance-capable pack
+        // through the current targeted safety rules in the same immutable
+        // replacement. Tests may inject a non-PFS rebuild builder, so that seam
+        // deliberately retains the original whole-artifact behavior.
+        var applyTargetedSafetyRepair = forceTargetedSafetyRepair
+            ?? (rebuildBuilderOverride is null
+                && TextureProcessingPipeline.RequiresTargetedSafetyRepair(
+                    baselineReport,
+                    baseline.Options.Scope,
+                    baselineInfo.Artifacts.Select(artifact =>
+                        artifact.CanonicalRelativeInstallPath)));
         var originalSources = await PrepareBuildOriginalSourcesAsync(paths, cancellationToken)
             .ConfigureAwait(false);
         var provenance = await LoadManagedInstallProvenanceAsync(paths, cancellationToken)
@@ -848,6 +1106,31 @@ public sealed class TexturePackWorkflow
             filterCharacterEquipmentEntries:
                 baseline.Options.Scope is AssetScope.CharactersAndEquipmentOnly
                     or AssetScope.WorldCharactersAndEquipment);
+        var reuseArchivePaths = baselineInfo.Artifacts.ToDictionary(
+            artifact => artifact.CanonicalRelativeInstallPath,
+            artifact => artifact.PayloadPath,
+            StringComparer.OrdinalIgnoreCase);
+        var reuseArchiveFingerprints = baselineInfo.Artifacts.ToDictionary(
+            artifact => artifact.CanonicalRelativeInstallPath,
+            artifact => new StagedPackFileFingerprint(
+                artifact.Entry.StagedLength,
+                artifact.Entry.StagedSha256),
+            StringComparer.OrdinalIgnoreCase);
+        var targetedSafetyBuilder = applyTargetedSafetyRepair
+            ? targetedSafetyBuilderOverride ?? new PfsTextureArchiveBuilder(
+                processor!,
+                counter,
+                progress,
+                previewCollector,
+                clampArchivePaths: archiveScopes.CharacterAndEquipmentArchives,
+                filterCharacterEquipmentEntries:
+                    baseline.Options.Scope is AssetScope.CharactersAndEquipmentOnly
+                        or AssetScope.WorldCharactersAndEquipment,
+                retryUnchangedEntries: false,
+                rebuildFromReuseArchive: true,
+                reuseArchivePaths: reuseArchivePaths,
+                reuseArchiveFingerprints: reuseArchiveFingerprints)
+            : null;
         var reusableArtifacts = baselineInfo.Artifacts.ToDictionary(
             artifact => artifact.CanonicalRelativeInstallPath,
             artifact => new ReusableStagedArtifact(
@@ -859,6 +1142,7 @@ public sealed class TexturePackWorkflow
         var items = new List<StagedBuildItem>(baselineInfo.Artifacts.Count);
         var reusedCount = 0;
         var rebuiltCount = 0;
+        var safetyUpgradedCount = 0;
 
         for (var index = 0; index < baselineInfo.Artifacts.Count; index++)
         {
@@ -886,15 +1170,34 @@ public sealed class TexturePackWorkflow
                     entry.SourceSha256,
                     StringComparison.OrdinalIgnoreCase))
             {
+                var safetyBuilder = (IStagedArtifactBuilder?)targetedSafetyBuilder;
                 items.Add(new StagedBuildItem(
                     relativePath,
-                    reuseBuilder,
+                    safetyBuilder ?? reuseBuilder,
                     PathGuard.SamePath(sourcePath, livePath) ? null : sourcePath,
                     currentSource.Length,
                     currentSource.Sha256,
-                    entry.StagedLength,
-                    entry.StagedSha256));
-                reusedCount++;
+                    // Whole-artifact reuse must reproduce the exact completed
+                    // payload. A targeted safety builder intentionally changes
+                    // stale output, so comparing it to the old staged hash
+                    // would reject the repair before omission can be applied.
+                    ExpectedStagedLength: safetyBuilder is null
+                        ? entry.StagedLength
+                        : null,
+                    ExpectedStagedSha256: safetyBuilder is null
+                        ? entry.StagedSha256
+                        : null,
+                    AllowSourceIdenticalOmission: safetyBuilder is not null
+                        && CanOmitSourceIdenticalSafetyArtifact(relativePath)));
+                if (targetedSafetyBuilder is null)
+                {
+                    reusedCount++;
+                }
+                else
+                {
+                    safetyUpgradedCount++;
+                }
+
                 continue;
             }
 
@@ -959,7 +1262,9 @@ public sealed class TexturePackWorkflow
                 rebuildBuilder,
                 PathGuard.SamePath(sourcePath, livePath) ? null : sourcePath,
                 currentSource.Length,
-                currentSource.Sha256));
+                currentSource.Sha256,
+                AllowSourceIdenticalOmission: applyTargetedSafetyRepair
+                    && CanOmitSourceIdenticalSafetyArtifact(relativePath)));
             rebuiltCount++;
         }
 
@@ -979,8 +1284,9 @@ public sealed class TexturePackWorkflow
                 progress,
                 cancellationToken)
             .ConfigureAwait(false);
-        counter.Warn(
-            $"Source repair reused {reusedCount:N0} complete staged archive(s) and rebuilt {rebuiltCount:N0} contaminated archive(s) from verified originals.");
+        counter.Warn(applyTargetedSafetyRepair
+            ? $"Source and safety repair upgraded {safetyUpgradedCount:N0} clean archive(s) from their exact staged baselines and rebuilt {rebuiltCount:N0} contaminated archive(s) from verified originals."
+            : $"Source repair reused {reusedCount:N0} complete staged archive(s) and rebuilt {rebuiltCount:N0} contaminated archive(s) from verified originals.");
         var statistics = counter.Snapshot();
         var repairCompletedUtc = DateTimeOffset.UtcNow;
         var report = new TextureBuildReport(
@@ -994,12 +1300,27 @@ public sealed class TexturePackWorkflow
         {
             StartedUtc = repairStartedUtc,
             DurationSeconds = (repairCompletedUtc - repairStartedUtc).TotalSeconds,
+            IsIncrementalRepair = applyTargetedSafetyRepair,
             IsSourceMismatchRepair = true,
+            IsSafetyRepair = applyTargetedSafetyRepair,
+            IsCutoutMipRepair = applyTargetedSafetyRepair
+                && (baselineReport?.TexturePipelineRevision ?? 0) < 3,
             BaselineBuildId = baseline.BuildId,
             BaselineTexturePipelineRevision = baselineReport?.TexturePipelineRevision ?? 0,
             ReusedArtifacts = reusedCount,
             RebuiltArtifacts = rebuiltCount,
-            TexturePipelineRevision = baselineReport?.TexturePipelineRevision ?? 0
+            SafetyUpgradedArtifacts = safetyUpgradedCount,
+            TexturePipelineRevision = applyTargetedSafetyRepair
+                ? TextureProcessingPipeline.CurrentRevision
+                : baselineReport?.TexturePipelineRevision ?? 0,
+            AppliedRepairRuleIds = applyTargetedSafetyRepair
+                ? TextureProcessingPipeline.GetCurrentRepairRuleIds(
+                    baseline.Options.Scope,
+                    baselineInfo.Artifacts.Select(
+                        artifact => artifact.CanonicalRelativeInstallPath))
+                : TextureProcessingPipeline.GetRecordedRepairRuleIds(
+                    baselineReport,
+                    baseline.Options.Scope)
         };
         var reportPath = Path.Combine(staged.BuildDirectory, "texture-report.json");
         await WriteReportAsync(reportPath, report, cancellationToken).ConfigureAwait(false);
@@ -1046,6 +1367,11 @@ public sealed class TexturePackWorkflow
         && info.Artifacts.All(artifact =>
             EverQuestInstall.IsPfsArchiveExtension(
                 Path.GetExtension(artifact.CanonicalRelativeInstallPath)));
+
+    private static bool CanOmitSourceIdenticalSafetyArtifact(string relativePath) =>
+        CelestialTextureSafetyPolicy.GetPreservedReason(
+            relativePath,
+            Path.GetFileName(relativePath)) is not null;
 
     private static async Task<TextureBuildReport?> TryReadTextureBuildReportAsync(
         string buildDirectory,
@@ -1243,40 +1569,138 @@ public sealed class TexturePackWorkflow
             return livePath;
         }
 
-        var installedArtifact = activeInstall?.Entries.FirstOrDefault(entry =>
-            entry.RelativeInstallPath.Equals(
-                baselineEntry.RelativeInstallPath,
-                StringComparison.OrdinalIgnoreCase));
-        if (installedArtifact is null
-            || !installedArtifact.OriginalExisted
-            || installedArtifact.BackupRelativePath is null
-            || installedArtifact.OriginalLength != baselineEntry.SourceLength
-            || !string.Equals(
-                installedArtifact.OriginalSha256,
-                baselineEntry.SourceSha256,
-                StringComparison.OrdinalIgnoreCase)
-            || activeInstallDirectory is null)
+        var candidates = new List<string>();
+        static void AddMatchingCandidate(
+            ICollection<string> destinations,
+            ProjectPaths candidatePaths,
+            InstallManifest manifest,
+            string manifestDirectory,
+            BuildManifestEntry baseline)
+        {
+            if (!PathGuard.SamePath(manifest.InstallPath, candidatePaths.InstallPath)
+                || manifest.State is not (InstallTransactionState.Applied
+                    or InstallTransactionState.Restored))
+            {
+                return;
+            }
+
+            var installed = manifest.Entries.FirstOrDefault(entry =>
+                entry.RelativeInstallPath.Equals(
+                    baseline.RelativeInstallPath,
+                    StringComparison.OrdinalIgnoreCase));
+            if (installed is null
+                || !installed.OriginalExisted
+                || string.IsNullOrWhiteSpace(installed.BackupRelativePath)
+                || installed.OriginalLength != baseline.SourceLength
+                || !string.Equals(
+                    installed.OriginalSha256,
+                    baseline.SourceSha256,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            var candidate = PathGuard.ResolveUnderRoot(
+                manifestDirectory,
+                installed.BackupRelativePath);
+            if (!PathGuard.IsPathUnderRoot(candidatePaths.BackupPath, candidate))
+            {
+                throw new InvalidDataException("A managed repair source escaped the backup root.");
+            }
+
+            destinations.Add(candidate);
+        }
+
+        if (activeInstall is not null && activeInstallDirectory is not null)
+        {
+            AddMatchingCandidate(
+                candidates,
+                paths,
+                activeInstall,
+                activeInstallDirectory,
+                baselineEntry);
+        }
+
+        if (Directory.Exists(paths.BackupPath))
+        {
+            foreach (var manifestPath in Directory.EnumerateFiles(
+                         paths.BackupPath,
+                         "install-manifest.json",
+                         SearchOption.AllDirectories))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var safeManifestPath = PathGuard.EnsurePathUnderRoot(
+                    paths.BackupPath,
+                    manifestPath);
+                if (activeInstallDirectory is not null
+                    && PathGuard.SamePath(
+                        Path.GetDirectoryName(safeManifestPath)!,
+                        activeInstallDirectory))
+                {
+                    continue;
+                }
+
+                InstallManifest historical;
+                try
+                {
+                    historical = await new ManifestStore()
+                        .ReadInstallManifestAsync(safeManifestPath, cancellationToken)
+                        .ConfigureAwait(false);
+                    AddMatchingCandidate(
+                        candidates,
+                        paths,
+                        historical,
+                        Path.GetDirectoryName(safeManifestPath)!,
+                        baselineEntry);
+                }
+                catch (Exception exception) when (exception is
+                                                   IOException or
+                                                   UnauthorizedAccessException or
+                                                   JsonException or
+                                                   InvalidDataException or
+                                                   ArgumentException or
+                                                   NotSupportedException)
+                {
+                    // A malformed unrelated historical transaction cannot be
+                    // trusted, but must not hide another exact managed backup.
+                }
+            }
+        }
+
+        var exactCandidates = new List<string>();
+        foreach (var candidate in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                await FileIntegrity.EnsureMatchesAsync(
+                        candidate,
+                        baselineEntry.SourceLength,
+                        baselineEntry.SourceSha256,
+                        "Managed original used for repair",
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                exactCandidates.Add(candidate);
+            }
+            catch (Exception exception) when (exception is IOException or InvalidDataException)
+            {
+                // Continue across historical transactions. Every returned
+                // candidate is exact-reverified immediately before use.
+            }
+        }
+
+        if (exactCandidates.Count == 0)
         {
             throw new InvalidOperationException(
-                $"The original source for {baselineEntry.RelativeInstallPath} is not available. "
+                $"The original source for {baselineEntry.RelativeInstallPath} is not available in the live client or any exact managed backup. "
                 + "Finish any LaunchPad update and rebuild this pack against the current client.");
         }
 
-        var backupPath = PathGuard.ResolveUnderRoot(
-            activeInstallDirectory,
-            installedArtifact.BackupRelativePath);
-        await FileIntegrity.EnsureMatchesAsync(
-            backupPath,
-            baselineEntry.SourceLength,
-            baselineEntry.SourceSha256,
-            "Managed original used for repair",
-            cancellationToken).ConfigureAwait(false);
-        if (!PathGuard.IsPathUnderRoot(paths.BackupPath, backupPath))
-        {
-            throw new InvalidDataException("The managed repair source escaped the backup root.");
-        }
-
-        return backupPath;
+        // Multiple byte-identical candidates are not semantically ambiguous:
+        // they prove the same length/SHA source. Deterministic ordering keeps
+        // repair results stable while corruption is rejected above.
+        return exactCandidates
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .First();
     }
 
     public Task<InstallHealthReport> AuditInstallHealthAsync(
@@ -2218,6 +2642,7 @@ public sealed class TexturePackWorkflow
                         cancellationToken).ConfigureAwait(false)
                     : await LooseTextureArtifactBuilder.IsCandidateAsync(
                         sourcePath,
+                        relativePath,
                         options.MaximumDimension,
                         cancellationToken).ConfigureAwait(false);
                 if (isCandidate)
@@ -2274,16 +2699,31 @@ public sealed class TexturePackWorkflow
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase
         };
         options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
-        await using var stream = new FileStream(
-            path,
-            FileMode.CreateNew,
-            FileAccess.Write,
-            FileShare.None,
-            64 * 1024,
-            FileOptions.Asynchronous | FileOptions.WriteThrough);
-        await JsonSerializer.SerializeAsync(stream, value, options, cancellationToken).ConfigureAwait(false);
-        await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-        stream.Flush(flushToDisk: true);
+        var fullPath = Path.GetFullPath(path);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        var temporaryPath = AtomicFile.CreateTemporarySiblingPath(fullPath);
+        try
+        {
+            await using (var stream = new FileStream(
+                temporaryPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                64 * 1024,
+                FileOptions.Asynchronous | FileOptions.WriteThrough))
+            {
+                await JsonSerializer.SerializeAsync(stream, value, options, cancellationToken).ConfigureAwait(false);
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                stream.Flush(flushToDisk: true);
+            }
+
+            AtomicFile.CommitTemporaryFile(temporaryPath, fullPath);
+        }
+        catch
+        {
+            AtomicFile.TryDelete(temporaryPath);
+            throw;
+        }
     }
 
     private static JsonSerializerOptions CreateCompositionJsonOptions()

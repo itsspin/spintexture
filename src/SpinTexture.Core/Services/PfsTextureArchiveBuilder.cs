@@ -8,7 +8,7 @@ using SpinTexture.Core.Tooling;
 
 namespace SpinTexture.Core.Services;
 
-public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder
+public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedArtifactCheckpointParticipant
 {
     private static readonly HashSet<string> SafeLegacyDdsFormats = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -32,7 +32,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder
     private readonly Func<
         IReadOnlyList<NativeTextureProcessRequest>,
         CancellationToken,
-        Task<IReadOnlyList<NativeTextureProcessOutcome>>> processBatch;
+        Task<IReadOnlyList<NativeTextureProcessOutcome>>>? processBatch;
 
     internal PfsTextureArchiveBuilder(
         NativeTextureProcessor processor,
@@ -71,10 +71,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder
             ?? new Dictionary<string, StagedPackFileFingerprint>(StringComparer.OrdinalIgnoreCase);
         this.reuseMaterializer = reuseMaterializer
             ?? new HardLinkOrCopyStagedPackPayloadMaterializer();
-        this.processBatch = processBatch
-            ?? ((requests, cancellationToken) => processor.ProcessBatchAsync(
-                requests,
-                cancellationToken: cancellationToken));
+        this.processBatch = processBatch;
     }
 
     public async Task BuildAsync(
@@ -83,6 +80,21 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder
     {
         ArgumentNullException.ThrowIfNull(context);
         Directory.CreateDirectory(context.WorkingDirectory);
+
+        // sky.s3d is a single renderer-coupled unit: its WLD, palette, color
+        // keys, cloud layers, and celestial billboards must stay byte-for-byte
+        // aligned. Copying the verified source as one artifact is both safer
+        // and faster than rebuilding it member by member.
+        if (CelestialTextureSafetyPolicy.GetPreservedReason(
+                context.RelativeInstallPath,
+                "sky.wld") is not null)
+        {
+            counter.Preserve(CelestialTextureSafetyPolicy.LegacySkyArchivePreservedReason);
+            await CopyAsync(context.SourcePath, context.DestinationPath, cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
         await using var source = await PfsArchive.OpenAsync(
             context.SourcePath,
             cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -215,6 +227,32 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder
                     textureOverrides,
                     context.RelativeInstallPath,
                     entry.Name);
+                var celestialPreservedReason = CelestialTextureSafetyPolicy.GetPreservedReason(
+                    context.RelativeInstallPath,
+                    entry.Name);
+                if (celestialPreservedReason is not null)
+                {
+                    // Renderer-coupled sky assets are a hard safety boundary.
+                    // Even an explicit Reprocess override cannot change their
+                    // dimensions, palette, color key, or sprite border.
+                    counter.Preserve(celestialPreservedReason);
+                    var restored = await RestoreOriginalIfBaselineChangedAsync(
+                        reuseArchive,
+                        entry,
+                        sourceTexturePath,
+                        context.WorkingDirectory,
+                        index,
+                        replacements,
+                        enhancedTexturePaths,
+                        cancellationToken).ConfigureAwait(false);
+                    if (!restored)
+                    {
+                        TryDeleteTemporaryFile(sourceTexturePath);
+                    }
+
+                    continue;
+                }
+
                 if (textureOverride?.Action == TextureOverrideAction.PreserveOriginal)
                 {
                     counter.Preserve("User selected original texture");
@@ -571,6 +609,47 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder
         }
     }
 
+    StagedArtifactCheckpointCapture IStagedArtifactCheckpointParticipant.CaptureCheckpointState() =>
+        new(counter.CaptureCheckpoint(), previewCollector?.CaptureCheckpoint()
+            ?? new TexturePreviewCollectorCheckpoint(new HashSet<int>(), new HashSet<string>()));
+
+    StagedBuildCheckpointContribution IStagedArtifactCheckpointParticipant.CompleteCheckpointCapture(
+        StagedArtifactCheckpointCapture before)
+    {
+        var delta = previewCollector?.CaptureDelta(before.Previews)
+            ?? new TexturePreviewCollectorDelta([], []);
+        return new StagedBuildCheckpointContribution(
+            counter.CaptureDelta(before.Statistics),
+            delta.Previews.Select(item => new StagedBuildCheckpointPreview(
+                item.Slot,
+                MakePreviewPathRelative(item.Entry),
+                0,
+                string.Empty,
+                0,
+                string.Empty)).ToArray(),
+            delta.Reviews);
+    }
+
+    void IStagedArtifactCheckpointParticipant.RestoreCheckpointContribution(
+        StagedBuildCheckpointContribution contribution)
+    {
+        counter.RestoreCheckpoint(contribution.Statistics);
+        previewCollector?.RestoreCheckpoint(
+            contribution.Previews.Select(item => new TexturePreviewSlot(item.Slot, item.Entry)).ToArray(),
+            contribution.ReviewEntries);
+    }
+
+    private static TexturePreviewEntry MakePreviewPathRelative(TexturePreviewEntry entry)
+    {
+        var previewDirectory = Path.GetDirectoryName(entry.OriginalImagePath)!;
+        var buildDirectory = Path.GetDirectoryName(previewDirectory)!;
+        return entry with
+        {
+            OriginalImagePath = Path.GetRelativePath(buildDirectory, entry.OriginalImagePath),
+            EnhancedImagePath = Path.GetRelativePath(buildDirectory, entry.EnhancedImagePath)
+        };
+    }
+
     private async Task ProcessPendingTexturesAsync(
         StagedArtifactBuildContext context,
         IReadOnlyList<PendingTexture> pendingTextures,
@@ -583,10 +662,17 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder
             return;
         }
 
-        var outcomes = await processBatch(
-                pendingTextures.Select(item => item.Request).ToArray(),
-                cancellationToken)
-            .ConfigureAwait(false);
+        var requests = pendingTextures.Select(item => item.Request).ToArray();
+        var outcomes = processBatch is null
+            ? await processor.ProcessBatchAsync(
+                    requests,
+                    new NativeBatchProgressBridge(
+                        progress,
+                        Path.GetFileName(context.SourcePath),
+                        context.Options.Preset),
+                    cancellationToken)
+                .ConfigureAwait(false)
+            : await processBatch(requests, cancellationToken).ConfigureAwait(false);
         if (outcomes.Count != pendingTextures.Count)
         {
             throw new InvalidDataException("Native texture batching returned an unexpected result count.");
@@ -607,6 +693,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder
             if (outcome.Error is not null)
             {
                 if (outcome.Error is not (NativeProcessException
+                    or NativeProcessInactivityException
                     or InvalidDataException
                     or NotSupportedException))
                 {
@@ -703,6 +790,88 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder
             {
                 TryDeleteTemporaryFile(item.SourceTexturePath);
             }
+        }
+    }
+
+    private sealed class NativeBatchProgressBridge : IProgress<NativeOutputLine>
+    {
+        private static readonly TimeSpan ToolOutputThrottle = TimeSpan.FromSeconds(5);
+        private readonly IProgress<ProgressUpdate>? progress;
+        private readonly string archiveName;
+        private readonly TexturePreset preset;
+        private readonly object gate = new();
+        private DateTimeOffset lastToolOutputReport = DateTimeOffset.MinValue;
+        private NativeTextureWorkPhase activePhase = NativeTextureWorkPhase.CpuPreparation;
+        private int lastCompleted;
+        private int lastTotal = 1;
+
+        public NativeBatchProgressBridge(
+            IProgress<ProgressUpdate>? progress,
+            string archiveName,
+            TexturePreset preset)
+        {
+            this.progress = progress;
+            this.archiveName = archiveName;
+            this.preset = preset;
+        }
+
+        public void Report(NativeOutputLine value)
+        {
+            if (progress is null)
+            {
+                return;
+            }
+
+            lock (gate)
+            {
+                if (value.Phase != NativeTextureWorkPhase.ToolOutput)
+                {
+                    activePhase = value.Phase;
+                    lastCompleted = Math.Max(0, value.Completed);
+                    lastTotal = Math.Max(1, value.Total);
+                    ReportPhase(value);
+                    return;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                if (now - lastToolOutputReport < ToolOutputThrottle)
+                {
+                    return;
+                }
+
+                lastToolOutputReport = now;
+                var message = activePhase == NativeTextureWorkPhase.GpuInference
+                    ? preset == TexturePreset.MaximumDetail
+                        ? "GPU worker active: Material Detail is running eight-view TTA. Bursty GPU use is expected."
+                        : "GPU worker active: enhancing this texture batch."
+                    : "Native texture worker is active.";
+                progress.Report(new ProgressUpdate(
+                    "Upscale",
+                    message,
+                    lastCompleted,
+                    lastTotal,
+                    archiveName,
+                    IsHeartbeat: true));
+            }
+        }
+
+        private void ReportPhase(NativeOutputLine value)
+        {
+            var message = value.Phase switch
+            {
+                NativeTextureWorkPhase.CpuPreparation =>
+                    $"CPU preparation: {value.Text}",
+                NativeTextureWorkPhase.GpuInference => value.Text,
+                NativeTextureWorkPhase.Encoding => value.Text,
+                _ => value.Text
+            };
+            progress!.Report(new ProgressUpdate(
+                "Upscale",
+                message,
+                value.Completed,
+                Math.Max(1, value.Total),
+                archiveName,
+                IsHeartbeat: true));
         }
     }
 

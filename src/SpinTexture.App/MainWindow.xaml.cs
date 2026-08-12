@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using SpinTexture.App.Services;
 using SpinTexture.App.ViewModels;
+using SpinTexture.Core.Services;
 
 namespace SpinTexture.App;
 
@@ -16,9 +17,12 @@ public partial class MainWindow : Window
     private bool _previewReturnsToPacks;
     private string? _viewInstallPath;
 
+    internal bool CanStartUpdate => !_viewModel.IsBusy && CanLeaveCurrentSection();
+
     public MainWindow()
     {
         InitializeComponent();
+        InstalledVersionText.Text = ApplicationUpdateService.GetCurrentVersionDisplay();
 
         _viewModel = new MainWindowViewModel(
             new FolderPickerService(),
@@ -235,6 +239,22 @@ public partial class MainWindow : Window
         {
             _viewModel.OpenPackStorageCommand.Execute(null);
         }
+    }
+
+    private async void UpdatesNav_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel.IsBusy || !CanLeaveCurrentSection())
+        {
+            MessageBox.Show(
+                this,
+                "Finish or cancel the current operation before updating SpinTexture.",
+                "Update paused",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        await App.CheckForUpdatesAsync(this, notifyWhenCurrent: true).ConfigureAwait(true);
     }
 
     private void OnLogEntriesChanged(object? sender, NotifyCollectionChangedEventArgs e)

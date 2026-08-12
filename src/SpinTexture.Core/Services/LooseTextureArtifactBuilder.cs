@@ -5,7 +5,7 @@ using SpinTexture.Core.Tooling;
 
 namespace SpinTexture.Core.Services;
 
-internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder
+internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder, IStagedArtifactCheckpointParticipant
 {
     private static readonly HashSet<string> SafeLegacyDdsFormats = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -55,6 +55,17 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder
         }
 
         counter.Discover(new FileInfo(context.SourcePath).Length);
+        var celestialPreservedReason = CelestialTextureSafetyPolicy.GetPreservedReason(
+            context.RelativeInstallPath,
+            Path.GetFileName(context.RelativeInstallPath));
+        if (celestialPreservedReason is not null)
+        {
+            counter.Preserve(celestialPreservedReason);
+            await CopyAsync(context.SourcePath, context.DestinationPath, cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
         byte[]? sourcePayload = null;
         var fullyTransparentControl = false;
         if (metadata.HasAlpha && metadata.FileFormat == TextureFileFormat.Dds)
@@ -181,11 +192,60 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder
         }
     }
 
+    StagedArtifactCheckpointCapture IStagedArtifactCheckpointParticipant.CaptureCheckpointState() =>
+        new(counter.CaptureCheckpoint(), previewCollector?.CaptureCheckpoint()
+            ?? new TexturePreviewCollectorCheckpoint(new HashSet<int>(), new HashSet<string>()));
+
+    StagedBuildCheckpointContribution IStagedArtifactCheckpointParticipant.CompleteCheckpointCapture(
+        StagedArtifactCheckpointCapture before)
+    {
+        var delta = previewCollector?.CaptureDelta(before.Previews)
+            ?? new TexturePreviewCollectorDelta([], []);
+        return new StagedBuildCheckpointContribution(
+            counter.CaptureDelta(before.Statistics),
+            delta.Previews.Select(item => new StagedBuildCheckpointPreview(
+                item.Slot,
+                MakePreviewPathRelative(item.Entry),
+                0,
+                string.Empty,
+                0,
+                string.Empty)).ToArray(),
+            delta.Reviews);
+    }
+
+    void IStagedArtifactCheckpointParticipant.RestoreCheckpointContribution(
+        StagedBuildCheckpointContribution contribution)
+    {
+        counter.RestoreCheckpoint(contribution.Statistics);
+        previewCollector?.RestoreCheckpoint(
+            contribution.Previews.Select(item => new TexturePreviewSlot(item.Slot, item.Entry)).ToArray(),
+            contribution.ReviewEntries);
+    }
+
+    private static TexturePreviewEntry MakePreviewPathRelative(TexturePreviewEntry entry)
+    {
+        var previewDirectory = Path.GetDirectoryName(entry.OriginalImagePath)!;
+        var buildDirectory = Path.GetDirectoryName(previewDirectory)!;
+        return entry with
+        {
+            OriginalImagePath = Path.GetRelativePath(buildDirectory, entry.OriginalImagePath),
+            EnhancedImagePath = Path.GetRelativePath(buildDirectory, entry.EnhancedImagePath)
+        };
+    }
+
     public static async Task<bool> IsCandidateAsync(
         string path,
+        string relativePath,
         int maximumDimension,
         CancellationToken cancellationToken)
     {
+        if (CelestialTextureSafetyPolicy.GetPreservedReason(
+                relativePath,
+                Path.GetFileName(relativePath)) is not null)
+        {
+            return false;
+        }
+
         var metadata = await new TextureHeaderSniffer().ReadFileAsync(path, cancellationToken).ConfigureAwait(false);
         if (metadata is null
             || !metadata.IsSimpleTwoDimensionalTexture
@@ -227,6 +287,13 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder
         int maximumDimension,
         CancellationToken cancellationToken)
     {
+        if (CelestialTextureSafetyPolicy.GetPreservedReason(
+                relativePath,
+                Path.GetFileName(relativePath)) is not null)
+        {
+            return false;
+        }
+
         var metadata = await new TextureHeaderSniffer()
             .ReadFileAsync(path, cancellationToken).ConfigureAwait(false);
         return metadata is not null

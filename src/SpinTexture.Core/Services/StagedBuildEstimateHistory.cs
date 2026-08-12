@@ -140,6 +140,7 @@ public static class StagedBuildEstimateHistory
                 || !OptionsMatch(manifest.Options, requestedOptions)
                 || report.IsIncrementalRepair
                 || report.IsSourceMismatchRepair
+                || report.WasResumed
                 || report.Statistics.ReusedTextures > 0)
             {
                 return null;

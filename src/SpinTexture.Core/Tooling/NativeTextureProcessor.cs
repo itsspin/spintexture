@@ -322,6 +322,7 @@ public sealed class NativeTextureProcessor
         }
 
         var prepared = new PreparedColorJob?[pendingJobs.Count];
+        var preparedCount = 0;
         using var gate = new SemaphoreSlim(
             Math.Min(
                 pendingJobs.Count,
@@ -331,6 +332,12 @@ public sealed class NativeTextureProcessor
             await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                nativeProgress?.Report(new NativeOutputLine(
+                    NativeOutputStream.StandardOutput,
+                    $"Preparing textures for a {pendingJobs.Count:N0}-item neural batch.",
+                    NativeTextureWorkPhase.CpuPreparation,
+                    Volatile.Read(ref preparedCount),
+                    pendingJobs.Count));
                 await CopyTemporaryFileAsync(
                     pending.Request.SourcePath,
                     pending.LocalSourcePath,
@@ -343,6 +350,13 @@ public sealed class NativeTextureProcessor
                     pending.Started,
                     nativeProgress,
                     cancellationToken).ConfigureAwait(false);
+                var completedPreparation = Interlocked.Increment(ref preparedCount);
+                nativeProgress?.Report(new NativeOutputLine(
+                    NativeOutputStream.StandardOutput,
+                    $"Prepared texture {completedPreparation:N0} of {pendingJobs.Count:N0} for the neural batch.",
+                    NativeTextureWorkPhase.CpuPreparation,
+                    completedPreparation,
+                    pendingJobs.Count));
             }
             catch (Exception exception) when (IsPerTextureFailure(exception))
             {
@@ -594,6 +608,21 @@ public sealed class NativeTextureProcessor
                 nativeProgress?.Report(new NativeOutputLine(
                     NativeOutputStream.StandardError,
                     "The accelerated small-texture queue failed; retrying the same model with the conservative Vulkan queue."));
+                invocation = await InvokeNeuralBatchAsync(
+                    jobs,
+                    key,
+                    batchDirectory,
+                    executionState,
+                    ConservativeNeuralWorkerThreads,
+                    nativeProgress,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (NativeProcessInactivityException)
+            {
+                nativeProgress?.Report(new NativeOutputLine(
+                    NativeOutputStream.StandardError,
+                    "The GPU worker stopped reporting activity after a possible driver reset; retrying the same model once without changing quality.",
+                    NativeTextureWorkPhase.GpuInference));
                 invocation = await InvokeNeuralBatchAsync(
                     jobs,
                     key,
@@ -894,7 +923,22 @@ public sealed class NativeTextureProcessor
                     workerThreads),
                 _ => throw new ArgumentOutOfRangeException(nameof(key))
             };
+            var materialDetail = key.WorkerPreset == TexturePreset.MaximumDetail;
+            nativeProgress?.Report(new NativeOutputLine(
+                NativeOutputStream.StandardOutput,
+                materialDetail
+                    ? $"GPU Material Detail with eight-view TTA: processing {jobs.Count:N0} texture(s)."
+                    : $"GPU enhancement: processing {jobs.Count:N0} texture(s) with {key.ModelName}.",
+                NativeTextureWorkPhase.GpuInference,
+                0,
+                jobs.Count));
             await RunCheckedAsync(command, nativeProgress, cancellationToken).ConfigureAwait(false);
+            nativeProgress?.Report(new NativeOutputLine(
+                NativeOutputStream.StandardOutput,
+                $"GPU batch complete; encoding and validating {jobs.Count:N0} texture(s).",
+                NativeTextureWorkPhase.Encoding,
+                0,
+                jobs.Count));
 
             var actualNames = Directory.EnumerateFiles(outputDirectory, "*", SearchOption.TopDirectoryOnly)
                 .Select(Path.GetFileName)
@@ -1917,6 +1961,7 @@ public sealed class NativeTextureProcessor
 
     private static bool IsPerTextureFailure(Exception exception) => exception is
         NativeProcessException
+        or NativeProcessInactivityException
         or InvalidDataException
         or NotSupportedException;
 

@@ -108,6 +108,16 @@ public sealed class StagedPackCatalogService
                     "The staged-pack manifest is missing.");
             }
 
+            if (File.Exists(Path.Combine(buildDirectory, "build-checkpoint.json")))
+            {
+                return Invalid(
+                    safeManifestPath,
+                    buildDirectory,
+                    candidateBuildId,
+                    StagedPackValidationState.InvalidManifest,
+                    "This staged pack is still finalizing crash-recovery metadata and is not ready to use.");
+            }
+
             var manifestBefore = await FileIntegrity
                 .FingerprintAsync(safeManifestPath, cancellationToken)
                 .ConfigureAwait(false);
@@ -227,6 +237,13 @@ public sealed class StagedPackCatalogService
         foreach (var directory in Directory.EnumerateDirectories(stagingPath, "*", options))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (File.Exists(Path.Combine(directory, "build-checkpoint.json")))
+            {
+                // manifest.json may already be durable while workflow reports
+                // are still finalizing. The checkpoint is an explicit
+                // incomplete marker until TexturePackWorkflow removes it.
+                continue;
+            }
             var manifestPath = Path.Combine(directory, "manifest.json");
             if (File.Exists(manifestPath))
             {

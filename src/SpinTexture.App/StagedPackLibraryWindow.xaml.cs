@@ -79,7 +79,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             if (SetField(ref selectedPack, value))
             {
                 OnPropertyChanged(nameof(CanRepair));
-                OnPropertyChanged(nameof(CanRepairSourceMismatch));
+                OnPropertyChanged(nameof(CanRepairCheckedPacks));
                 OnPropertyChanged(nameof(CanPreview));
                 OnPropertyChanged(nameof(CanDelete));
                 OnPropertyChanged(nameof(CanAddHighlightedToCurrent));
@@ -96,7 +96,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             {
                 OnPropertyChanged(nameof(CanInstall));
                 OnPropertyChanged(nameof(CanRepair));
-                OnPropertyChanged(nameof(CanRepairSourceMismatch));
+                OnPropertyChanged(nameof(CanRepairCheckedPacks));
                 OnPropertyChanged(nameof(CanPreview));
                 OnPropertyChanged(nameof(CanDelete));
                 OnPropertyChanged(nameof(CanCheckHighlighted));
@@ -164,9 +164,9 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         && IsInstallAcknowledged
         && Packs.Any(pack => pack.IsSelected && pack.CanSelect);
     public bool CanRepair => !IsBusy
-        && SelectedPack is { CanRepair: true, CanSelect: true };
-    public bool CanRepairSourceMismatch => !IsBusy
-        && SelectedPack is { CanRepairSourceMismatch: true, CanSelect: true };
+        && SelectedPack is { CanRepairAny: true, CanSelect: true };
+    public bool CanRepairCheckedPacks => !IsBusy
+        && Packs.Any(pack => pack.IsSelected && pack.CanSelect && pack.CanRepairAny);
     public bool CanPreview => !IsBusy
         && SelectedPack?.PreviewManifestPath is not null;
     public bool CanDelete => !IsBusy && GetHighlightedPacks().Count != 0;
@@ -623,22 +623,15 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
     private async void Repair_Click(object sender, RoutedEventArgs e)
     {
         var pack = SelectedPack;
-        if (pack is null || !pack.CanRepair)
+        if (pack is null || !pack.CanRepairAny)
         {
             return;
         }
 
-        var prompt = pack.IsCutoutMipRepairCandidate
-            ? "Upgrade this pack's foliage/cutout compatibility?\n\n"
-              + "SpinTexture will SHA-256 verify the complete baseline and create a new immutable replacement. Only previously enhanced alpha-tested textures that use angle-sensitive generated mip levels are reprocessed. Prior enhanced opaque textures are reused, source-identical entries are left original, and the existing staged pack is never modified."
-            : "Salvage this legacy character pack?\n\n"
-              + "Every texture already enhanced successfully will be reused byte-for-byte. Only unchanged eligible textures are retried with the current safe pipeline; newly supported classic indexed character and armor BMPs use the palette-stable Classic HD route. The completed original pack is never modified, and packs built with the current pipeline do not need this second pass.";
         var answer = MessageBox.Show(
             Window.GetWindow(this),
-            prompt,
-            pack.IsCutoutMipRepairCandidate
-                ? "Upgrade cutout compatibility"
-                : "Repair legacy pack",
+            BuildRepairPrompt(pack),
+            "Repair staged pack",
             MessageBoxButton.OKCancel,
             MessageBoxImage.Information);
         if (answer != MessageBoxResult.OK)
@@ -647,39 +640,38 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         }
 
         await RunOperationAsync(
-            pack.IsCutoutMipRepairCandidate
-                ? "Hash-verifying the baseline and upgrading only angle-sensitive enhanced cutouts..."
-                : "Hash-verifying prior work and repairing only missing textures...",
+            pack.CanRepairSourceMismatch
+                ? "Verifying original-source provenance, then applying current texture safety fixes..."
+                : "Hash-verifying prior work and applying only the missing texture safety fixes...",
             async (progress, token) =>
             {
-                var result = await workflow.RepairStagedPackAsync(
-                    paths,
-                    pack.ManifestPath,
-                    TexturePreset.Faithful,
-                    progress,
-                    token).ConfigureAwait(false);
+                var result = await RepairPackAsync(pack, progress, token).ConfigureAwait(false);
                 return result.StagedBuild.ManifestPath;
             },
-            successMessage: pack.IsCutoutMipRepairCandidate
-                ? "Cutout compatibility upgrade complete. Opaque successes were reused, only angle-sensitive enhanced cutouts were regenerated, and the new replacement is checked with your other selected packs."
-                : "Repair pack complete. Prior successes were reused; the repaired replacement is checked with your other selected packs.",
+            successMessage: "Repair complete. The corrected immutable replacement is checked with your other selected packs; the completed original was not modified.",
             replaceSelectedManifestPath: pack.ManifestPath)
             .ConfigureAwait(true);
     }
 
-    private async void RepairSourceMismatch_Click(object sender, RoutedEventArgs e)
+    private async void RepairCheckedPacks_Click(object sender, RoutedEventArgs e)
     {
-        var pack = SelectedPack;
-        if (pack is null || !pack.CanRepairSourceMismatch)
+        var repairQueue = Packs
+            .Where(pack => pack.IsSelected && pack.CanSelect && pack.CanRepairAny)
+            .OrderByDescending(pack => pack.CanRepairSourceMismatch)
+            .ThenBy(pack => pack.CategoryOrder)
+            .ThenBy(pack => pack.CreatedUtc)
+            .ToArray();
+        if (repairQueue.Length == 0 || IsBusy)
         {
             return;
         }
 
         var answer = MessageBox.Show(
             Window.GetWindow(this),
-            "Repair this pack's source mismatch?\n\n"
-            + "SpinTexture detected archives that were accidentally built from a previously installed enhanced pack. It will create a new immutable replacement: complete unaffected archives are reused, while only archives with verified managed provenance are rebuilt from their original bytes. No texture inside an affected archive is reused, the existing pack is never modified, and an unknown client-version change is blocked instead of guessed.",
-            "Repair source mismatch",
+            $"Repair {repairQueue.Length:N0} checked pack(s)?\n\n"
+            + "SpinTexture will process checked source packs that actually need repair. Source mismatches run first, then current safety fixes such as original-compatible sky/celestial assets and angle-safe cutouts. Each repair creates a new immutable replacement and swaps its checkmark from the old pack to the replacement.\n\n"
+            + "The operation stops safely on the first error. Any replacements completed before that point remain staged and checked; no original staged pack is modified.",
+            "Repair checked packs",
             MessageBoxButton.OKCancel,
             MessageBoxImage.Information);
         if (answer != MessageBoxResult.OK)
@@ -687,20 +679,97 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             return;
         }
 
-        await RunOperationAsync(
-            "Verifying original-source provenance and rebuilding only affected archives...",
-            async (progress, token) =>
+        operationCancellation = new CancellationTokenSource();
+        IsBusy = true;
+        var checkedManifestPaths = Packs
+            .Where(pack => pack.IsSelected && pack.CanSelect)
+            .Select(pack => Path.GetFullPath(pack.ManifestPath))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var completed = 0;
+        string? lastReplacementManifestPath = null;
+        var progress = new Progress<ProgressUpdate>(update =>
+        {
+            var detail = string.IsNullOrWhiteSpace(update.CurrentItem)
+                ? update.Message
+                : $"{update.Message}  {update.CurrentItem}";
+            StatusText = $"Repairing checked pack {completed + 1:N0} of {repairQueue.Length:N0}. {detail}";
+        });
+        try
+        {
+            foreach (var pack in repairQueue)
             {
-                var result = await workflow.RepairStagedPackSourceMismatchAsync(
-                    paths,
-                    pack.ManifestPath,
-                    progress,
-                    token).ConfigureAwait(false);
-                return result.StagedBuild.ManifestPath;
-            },
-            successMessage: "Source mismatch repaired. Unaffected archive outputs were reused; affected archives were rebuilt from verified originals. The new replacement is checked with your other selected packs.",
-            replaceSelectedManifestPath: pack.ManifestPath)
-            .ConfigureAwait(true);
+                operationCancellation.Token.ThrowIfCancellationRequested();
+                StatusText = $"Repairing checked pack {completed + 1:N0} of {repairQueue.Length:N0}: {pack.Title}";
+                var result = await RepairPackAsync(
+                        pack,
+                        progress,
+                        operationCancellation.Token)
+                    .ConfigureAwait(true);
+                lastReplacementManifestPath = result.StagedBuild.ManifestPath;
+                checkedManifestPaths.Remove(Path.GetFullPath(pack.ManifestPath));
+                checkedManifestPaths.Add(Path.GetFullPath(lastReplacementManifestPath));
+                completed++;
+            }
+
+            IsBusy = false;
+            await RefreshAsync(lastReplacementManifestPath, checkedManifestPaths).ConfigureAwait(true);
+            StatusText = $"Repaired {completed:N0} checked pack(s). Each corrected replacement is checked; the completed originals remain unchanged.";
+        }
+        catch (OperationCanceledException)
+        {
+            IsBusy = false;
+            await RefreshAsync(lastReplacementManifestPath, checkedManifestPaths).ConfigureAwait(true);
+            StatusText = completed == 0
+                ? "Repair canceled safely before any replacement completed."
+                : $"Repair canceled after {completed:N0} replacement(s). Completed replacements remain staged and checked.";
+        }
+        catch (Exception exception)
+        {
+            IsBusy = false;
+            await RefreshAsync(lastReplacementManifestPath, checkedManifestPaths).ConfigureAwait(true);
+            StatusText = completed == 0
+                ? $"Repair stopped safely: {exception.Message}"
+                : $"Repair stopped after {completed:N0} completed replacement(s): {exception.Message}";
+            MessageBox.Show(
+                Window.GetWindow(this),
+                StatusText,
+                "Repair checked packs",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+        finally
+        {
+            operationCancellation?.Dispose();
+            operationCancellation = null;
+            IsBusy = false;
+            ScheduleDeferredCloseIfRequested();
+        }
+    }
+
+    private Task<TexturePackBuildResult> RepairPackAsync(
+        StagedPackRow pack,
+        IProgress<ProgressUpdate> progress,
+        CancellationToken cancellationToken) =>
+        pack.CanRepairSourceMismatch
+            ? workflow.RepairStagedPackSourceMismatchAsync(
+                paths,
+                pack.ManifestPath,
+                progress,
+                cancellationToken)
+            : workflow.RepairStagedPackAsync(
+                paths,
+                pack.ManifestPath,
+                TexturePreset.Faithful,
+                progress,
+                cancellationToken);
+
+    private static string BuildRepairPrompt(StagedPackRow pack)
+    {
+        var reason = pack.CanRepairSourceMismatch
+            ? "A managed source mismatch was detected. SpinTexture will rebuild only affected archives from verified original bytes, reuse complete unaffected archives, and apply any missing current safety fixes in the same replacement."
+            : pack.RepairReasonText;
+        return $"Repair {pack.Title}?\n\n{reason}\n\n"
+            + "The complete baseline is SHA-256 verified first. Repair creates a new immutable replacement, leaves this completed staged pack unchanged, and checks the replacement for the next install. If this pack was checked, its checkmark moves to the replacement.";
     }
 
     private async void Delete_Click(object sender, RoutedEventArgs e)
@@ -1002,6 +1071,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         OnPropertyChanged(nameof(CanUncheckHighlighted));
         OnPropertyChanged(nameof(CanAddHighlightedToCurrent));
         OnPropertyChanged(nameof(CanClearChecks));
+        OnPropertyChanged(nameof(CanRepairCheckedPacks));
     }
 
     private void UpdateHighlightedSelection()
@@ -1149,7 +1219,10 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             var report = TryReadReport(info.BuildDirectory);
             var isLegacyRepair = report?.IsIncrementalRepair == true;
             var isSourceRepair = report?.IsSourceMismatchRepair == true;
-            var isCutoutMipRepair = report?.IsCutoutMipRepair == true;
+            // The report property keeps its original compatibility name, but
+            // revision-based repairs now apply every missing safety rule.
+            var isSafetyRepair = report?.IsSafetyRepair == true
+                || report?.IsCutoutMipRepair == true;
             var isManualTextureRevision = report?.IsManualTextureRevision == true;
             var scopeTitle = manifest?.Options.Scope switch
             {
@@ -1187,8 +1260,8 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 ? IsActive ? "Installed pack combination" : "Generated pack composition"
                 : isSourceRepair
                     ? $"Source repaired \u00B7 {scopeTitle}"
-                    : isCutoutMipRepair
-                    ? $"Cutout upgraded \u00B7 {scopeTitle}"
+                    : isSafetyRepair
+                    ? $"Safety repaired \u00B7 {scopeTitle}"
                     : isManualTextureRevision
                     ? $"Texture revised \u00B7 {scopeTitle}"
                     : isLegacyRepair
@@ -1204,8 +1277,8 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                             ? "COMPOSITION"
                             : isSourceRepair
                                 ? "SOURCE REPAIRED"
-                                : isCutoutMipRepair
-                                ? "CUTOUT UPGRADED"
+                                : isSafetyRepair
+                                ? "SAFETY REPAIRED"
                                 : isManualTextureRevision
                                 ? "TEXTURE REVISED"
                                 : isLegacyRepair
@@ -1217,7 +1290,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 "ACTIVE COMBINATION" => ("#202E46", "#B9D0FF", "#4B6797"),
                 "COMPOSITION" => ("#27253A", "#CEC7FF", "#4E4A73"),
                 "SOURCE REPAIRED" => ("#382B18", "#F5C76B", "#785C2F"),
-                "CUTOUT UPGRADED" => ("#18343A", "#8CE1E8", "#34717B"),
+                "SAFETY REPAIRED" => ("#18343A", "#8CE1E8", "#34717B"),
                 "TEXTURE REVISED" => ("#32243A", "#D9B6F5", "#674A78"),
                 "REPAIRED" => ("#233345", "#BFD9F5", "#405E7D"),
                 _ => ("#17352B", "#65D6A6", "#292E36")
@@ -1232,10 +1305,10 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                           + $"{report.RebuiltArtifacts:N0} source-contaminated archives rebuilt \u00B7 "
                           + $"{ArtifactCount:N0} archives \u00B7 {FormatBytes(StagedBytes)} \u00B7 "
                           + manifest.CreatedUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture)
-                    : isCutoutMipRepair && report is not null
+                    : isSafetyRepair && report is not null
                         ? $"revision {report.BaselineTexturePipelineRevision:N0}\u2192{report.TexturePipelineRevision:N0} \u00B7 "
                           + $"{report.Statistics.ReusedTextures:N0} prior textures reused \u00B7 "
-                          + $"{report.Statistics.EnhancedTextures:N0} stale cutouts regenerated \u00B7 "
+                          + $"{report.Statistics.EnhancedTextures:N0} affected textures safely updated \u00B7 "
                           + $"{ArtifactCount:N0} archives \u00B7 {FormatBytes(StagedBytes)} \u00B7 "
                           + manifest.CreatedUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture)
                     : isLegacyRepair && report is not null
@@ -1265,10 +1338,10 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                       + $"The source repair reused {report.ReusedArtifacts:N0} verified complete archive outputs and rebuilt "
                       + $"{report.RebuiltArtifacts:N0} affected archives from original bytes. "
                       + "Archive conflicts are checked before composition."
-                : isCutoutMipRepair && report is not null
+                : isSafetyRepair && report is not null
                     ? $"{Title} contains {ArtifactCount:N0} complete install archive(s), derived from verified baseline "
                       + $"{report.BaselineBuildId ?? "unknown"}. The report records {report.Statistics.EnhancedTextures:N0} "
-                      + $"stale enhanced cutouts regenerated under pipeline revision {report.TexturePipelineRevision:N0} and "
+                      + $"affected textures updated under safety revision {report.TexturePipelineRevision:N0} and "
                       + $"{report.Statistics.ReusedTextures:N0} prior enhanced textures reused. Archive conflicts are checked before composition."
                 : $"{Title} contains {ArtifactCount:N0} complete install archive(s). "
                   + $"The report records {report!.Statistics.EnhancedTextures:N0} newly enhanced, "
@@ -1281,31 +1354,45 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             var isCharacterScope = manifest?.Options.Scope is
                 AssetScope.CharactersAndEquipmentOnly
                 or AssetScope.WorldCharactersAndEquipment;
+            var missingRepairRules = manifest is null
+                ? Array.Empty<string>()
+                : TextureProcessingPipeline.GetMissingRepairRuleIds(
+                    report,
+                    manifest.Options.Scope,
+                    ArtifactPaths);
             CanRepair = !IsComposition
                 && manifest is not null
-                && RequiresPipelineRepair(report, manifest.Options.Scope);
-            IsCutoutMipRepairCandidate = CanRepair
+                && missingRepairRules.Count != 0;
+            IsTargetedSafetyRepairCandidate = CanRepair
                 && manifest is not null
-                && TextureProcessingPipeline.RequiresCutoutMipUpgrade(
+                && TextureProcessingPipeline.RequiresTargetedSafetyRepair(
                     report,
-                    manifest.Options.Scope);
+                    manifest.Options.Scope,
+                    ArtifactPaths);
             CanRepairSourceMismatch = !IsComposition
                 && canRepairSourceMismatch
                 && !isSourceRepair;
-            RepairStatusText = IsCutoutMipRepairCandidate
-                ? "One-time cutout compatibility upgrade available: verify the full baseline, reuse opaque successes, and regenerate only previously enhanced alpha-tested foliage, armor, and model textures without angle-sensitive generated mip levels."
-                : isCharacterScope
-                ? CanRepair
-                    ? "Legacy pack: reuse prior output and add the current race, armor, and protected control-texture coverage."
-                    : "Character/equipment first-pass safety and coverage are current; no routine second pass is required."
-                : string.Empty;
-            RepairStatusForeground = CanRepair ? "#F5C76B" : "#65D6A6";
-            SourceRepairStatusText = CanRepairSourceMismatch
-                ? "Managed source mismatch detected: reuse unaffected complete archives and rebuild only the affected archives from verified originals."
-                : string.Empty;
-            RepairButtonText = IsCutoutMipRepairCandidate
-                ? "Upgrade Cutout Compatibility"
-                : "Repair Legacy Pack";
+            CanRepairAny = CanRepair || CanRepairSourceMismatch;
+            var needsCelestialSkySafety = missingRepairRules.Contains(
+                TextureProcessingPipeline.CelestialSkySafetyRuleId,
+                StringComparer.Ordinal);
+            var needsCutoutSafety = missingRepairRules.Contains(
+                TextureProcessingPipeline.CutoutMipSafetyRuleId,
+                StringComparer.Ordinal);
+            RepairReasonText = BuildRepairReasonText(
+                isCharacterScope,
+                IsTargetedSafetyRepairCandidate,
+                needsCelestialSkySafety,
+                needsCutoutSafety);
+            RepairStatusText = CanRepairSourceMismatch
+                ? "Managed source mismatch detected. Repair verifies original-source provenance first, then applies current texture safety fixes in the same immutable replacement."
+                : RepairReasonText;
+            RepairBadgeText = CanRepairSourceMismatch
+                ? "REPAIR REQUIRED BEFORE INSTALL"
+                : "REPAIR AVAILABLE";
+            RepairStatusForeground = CanRepairSourceMismatch ? "#FFD5D8" : "#F5DEAB";
+            RepairPanelBackground = CanRepairSourceMismatch ? "#451F22" : "#382B18";
+            RepairPanelBorderBrush = CanRepairSourceMismatch ? "#8A4149" : "#785C2F";
             SelectionHint = IsComposition
                 ? "Generated combinations are not selectable. Check their source packs instead."
                 : IsActiveComponent
@@ -1320,7 +1407,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 : null;
             CanReviseTextures = !IsComposition
                 && manifest is not null
-                && !RequiresPipelineRepair(report, manifest.Options.Scope)
+                && !RequiresPipelineRepair(report, manifest.Options.Scope, ArtifactPaths)
                 && manifest.Options.Scope is not (AssetScope.AllSafeTextures or AssetScope.SpellEffectsOnly)
                 && ArtifactPaths.All(path => EverQuestInstall.IsPfsArchiveExtension(Path.GetExtension(path)));
         }
@@ -1332,8 +1419,9 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         public bool CanSelect { get; }
         public bool CanRepair { get; }
         public bool CanReviseTextures { get; }
-        public bool IsCutoutMipRepairCandidate { get; }
+        public bool IsTargetedSafetyRepairCandidate { get; }
         public bool CanRepairSourceMismatch { get; }
+        public bool CanRepairAny { get; }
         public string? PreviewManifestPath { get; }
         public string Title { get; }
         public string Badge { get; }
@@ -1344,8 +1432,10 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         public string StateText { get; }
         public string RepairStatusText { get; }
         public string RepairStatusForeground { get; }
-        public string RepairButtonText { get; }
-        public string SourceRepairStatusText { get; }
+        public string RepairBadgeText { get; }
+        public string RepairPanelBackground { get; }
+        public string RepairPanelBorderBrush { get; }
+        public string RepairReasonText { get; }
         public string SelectionHint { get; }
         public string Category { get; }
         public int CategoryOrder { get; }
@@ -1379,10 +1469,42 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
 
         public event PropertyChangedEventHandler? PropertyChanged;
 
+        private static string BuildRepairReasonText(
+            bool isCharacterScope,
+            bool isTargetedSafetyRepair,
+            bool needsCelestialSkySafety,
+            bool needsCutoutSafety)
+        {
+            if (isTargetedSafetyRepair && needsCelestialSkySafety && needsCutoutSafety)
+            {
+                return "Current safety fixes are available: restore protected sky, sun, moon, halo, and related celestial assets from verified originals, and regenerate only angle-sensitive enhanced cutouts. Unaffected enhanced textures are reused.";
+            }
+
+            if (isTargetedSafetyRepair && needsCelestialSkySafety)
+            {
+                return "A sky and celestial safety fix is available. Repair restores protected sky, sun, moon, halo, and related renderer-sensitive assets from verified originals while reusing unaffected enhanced textures.";
+            }
+
+            if (isTargetedSafetyRepair && needsCutoutSafety)
+            {
+                return "A cutout safety fix is available. Repair regenerates only affected alpha-tested foliage, armor, and model textures without angle-sensitive generated mip levels while reusing unaffected enhanced textures.";
+            }
+
+            if (isTargetedSafetyRepair)
+            {
+                return "Current texture safety fixes are available. Repair verifies the baseline and updates only affected entries while reusing unaffected enhanced textures.";
+            }
+
+            return isCharacterScope
+                ? "This legacy pack can be updated without a full rebuild. Repair reuses prior successes and adds current race, armor, control-texture, cutout, and sky/celestial safety coverage."
+                : "This pack can be updated with the current safe pipeline without rebuilding unaffected enhanced textures.";
+        }
+
         private static bool RequiresPipelineRepair(
             TextureBuildReport? report,
-            AssetScope scope) =>
-            TextureProcessingPipeline.RequiresRepair(report, scope);
+            AssetScope scope,
+            IReadOnlyList<string> artifactPaths) =>
+            TextureProcessingPipeline.RequiresRepair(report, scope, artifactPaths);
 
         private static TextureBuildReport? TryReadReport(string buildDirectory)
         {

@@ -149,6 +149,66 @@ internal sealed class TexturePreviewCollector
         }
     }
 
+    internal TexturePreviewCollectorCheckpoint CaptureCheckpoint()
+    {
+        lock (gate)
+        {
+            return new TexturePreviewCollectorCheckpoint(
+                entries.Keys.ToHashSet(),
+                reviewEntries.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase));
+        }
+    }
+
+    internal TexturePreviewCollectorDelta CaptureDelta(TexturePreviewCollectorCheckpoint before)
+    {
+        ArgumentNullException.ThrowIfNull(before);
+        lock (gate)
+        {
+            return new TexturePreviewCollectorDelta(
+                entries.Where(pair => !before.EntryIndices.Contains(pair.Key))
+                    .Select(pair => new TexturePreviewSlot(pair.Key, pair.Value))
+                    .ToArray(),
+                reviewEntries.Where(pair => !before.ReviewKeys.Contains(pair.Key))
+                    .Select(pair => pair.Value)
+                    .ToArray());
+        }
+    }
+
+    internal void RestoreCheckpoint(
+        IReadOnlyList<TexturePreviewSlot> restoredPreviews,
+        IReadOnlyList<TextureReviewEntry> restoredReviews)
+    {
+        ArgumentNullException.ThrowIfNull(restoredPreviews);
+        ArgumentNullException.ThrowIfNull(restoredReviews);
+        lock (gate)
+        {
+            foreach (var restored in restoredPreviews.OrderBy(item => item.Slot))
+            {
+                var entry = restored.Entry;
+                var archiveKey = NormalizeArchiveKey(entry.ArchivePath);
+                var familyKey = $"{archiveKey}|{CreateFamilyKey(entry.LogicalName)}";
+                archiveReservationCounts.TryGetValue(archiveKey, out var archiveReservations);
+                if (!availableIndices.Remove(restored.Slot)
+                    || archiveReservations >= maximumEntriesPerArchive
+                    || !reservedFamilies.Add(familyKey))
+                {
+                    throw new InvalidDataException(
+                        "A staged-build preview checkpoint contains a duplicate or out-of-range preview slot.");
+                }
+
+                reservations.Add(restored.Slot, new Reservation(archiveKey, familyKey));
+                archiveReservationCounts[archiveKey] = archiveReservations + 1;
+                entries[restored.Slot] = entry;
+            }
+
+            foreach (var entry in restoredReviews)
+            {
+                var key = $"{NormalizeArchiveKey(entry.ArchivePath)}|{entry.LogicalName.Trim()}";
+                reviewEntries[key] = entry;
+            }
+        }
+    }
+
     internal static string CreateFamilyKey(string logicalName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(logicalName);
@@ -174,3 +234,13 @@ internal sealed class TexturePreviewCollector
 
     private sealed record Reservation(string ArchiveKey, string FamilyKey);
 }
+
+internal sealed record TexturePreviewCollectorCheckpoint(
+    IReadOnlySet<int> EntryIndices,
+    IReadOnlySet<string> ReviewKeys);
+
+internal sealed record TexturePreviewCollectorDelta(
+    IReadOnlyList<TexturePreviewSlot> Previews,
+    IReadOnlyList<TextureReviewEntry> Reviews);
+
+internal sealed record TexturePreviewSlot(int Slot, TexturePreviewEntry Entry);

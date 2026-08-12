@@ -19,6 +19,10 @@ public interface ITextureWorkflowService
         IProgress<ProgressUpdate> progress,
         CancellationToken cancellationToken);
 
+    Task<RecoverableStagedBuild?> FindRecoverableBuildAsync(
+        string installPath,
+        CancellationToken cancellationToken);
+
     Task<InstallHealthReport> AuditInstallHealthAsync(
         string installPath,
         CancellationToken cancellationToken);
@@ -71,6 +75,14 @@ public sealed class TextureWorkflowService : ITextureWorkflowService
         LastBuildDirectory = result.StagedBuild.BuildDirectory;
         return result;
     }
+
+    public Task<RecoverableStagedBuild?> FindRecoverableBuildAsync(
+        string installPath,
+        CancellationToken cancellationToken) =>
+        new StagedBuildService().FindRecoverableBuildAsync(
+            WorkspaceLocator.ForInstall(installPath, workspaceRoot),
+            TexturePackWorkflow.FreshBuildResumeOperationKey,
+            cancellationToken);
 
     public async Task RestoreAsync(
         string installPath,
