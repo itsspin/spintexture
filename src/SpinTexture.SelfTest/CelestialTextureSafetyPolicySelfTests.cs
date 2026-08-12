@@ -7,8 +7,31 @@ internal static class CelestialTextureSafetyPolicySelfTests
     public static void Run()
     {
         TestLegacySkyArchiveBoundary();
+        TestNativeSkyResourceBoundary();
         TestAuditedLooseCelestialSprites();
         TestConservativeNegativeBoundary();
+    }
+
+    private static void TestNativeSkyResourceBoundary()
+    {
+        AssertEqual(
+            CelestialTextureSafetyPolicy.SkyResourcePreservedReason,
+            CelestialTextureSafetyPolicy.GetSkyResourcePreservedReason(
+                Path.Combine("Resources", "sky", "stars.dds")),
+            "native star atlas");
+        AssertEqual(
+            CelestialTextureSafetyPolicy.SkyResourcePreservedReason,
+            CelestialTextureSafetyPolicy.GetSkyResourcePreservedReason(
+                Path.Combine("resources", "SKY", "fear_comet_stars.dds")),
+            "case-insensitive native sky resource");
+        AssertNull(
+            CelestialTextureSafetyPolicy.GetSkyResourcePreservedReason(
+                Path.Combine("Resources", "skybox", "stars.dds")),
+            "similar resource directory");
+        AssertNull(
+            CelestialTextureSafetyPolicy.GetSkyResourcePreservedReason(
+                Path.Combine("Resources", "sky", "..", "stars.dds")),
+            "native sky traversal");
     }
 
     private static void TestLegacySkyArchiveBoundary()

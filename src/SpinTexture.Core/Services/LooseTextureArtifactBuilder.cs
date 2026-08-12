@@ -55,9 +55,11 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder, ISta
         }
 
         counter.Discover(new FileInfo(context.SourcePath).Length);
-        var celestialPreservedReason = CelestialTextureSafetyPolicy.GetPreservedReason(
-            context.RelativeInstallPath,
-            Path.GetFileName(context.RelativeInstallPath));
+        var celestialPreservedReason = CelestialTextureSafetyPolicy.GetSkyResourcePreservedReason(
+                context.RelativeInstallPath)
+            ?? CelestialTextureSafetyPolicy.GetPreservedReason(
+                context.RelativeInstallPath,
+                Path.GetFileName(context.RelativeInstallPath));
         if (celestialPreservedReason is not null)
         {
             counter.Preserve(celestialPreservedReason);

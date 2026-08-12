@@ -428,7 +428,8 @@ public sealed class TexturePackWorkflow
             or AssetScope.WorldOnly
             or AssetScope.WorldCharactersAndEquipment
             or AssetScope.SelectedZone
-            or AssetScope.SpellEffectsOnly;
+            or AssetScope.SpellEffectsOnly
+            or AssetScope.AllSafeTextures;
         var requiresPipelineRepair = TextureProcessingPipeline.RequiresRepair(
             baselineReport,
             baseline.Options.Scope,
@@ -449,13 +450,30 @@ public sealed class TexturePackWorkflow
                 "This staged pack already uses the current texture pipeline. The completed pack was left unchanged.");
         }
 
-        if (baseline.Options.Scope == AssetScope.AllSafeTextures)
+        var missingRepairRules = TextureProcessingPipeline.GetMissingRepairRuleIds(
+            baselineReport,
+            baseline.Options.Scope,
+            baselineArtifactPaths);
+        var isExactCelestialSafetyRepair = !isManualTextureRevision
+            && isTargetedSafetyRepair
+            && missingRepairRules.Count != 0
+            && missingRepairRules.All(ruleId =>
+                ruleId.Equals(
+                    TextureProcessingPipeline.CelestialSkySafetyRuleId,
+                    StringComparison.Ordinal)
+                || ruleId.Equals(
+                    TextureProcessingPipeline.NativeSkyResourceSafetyRuleId,
+                    StringComparison.Ordinal));
+
+        if (baseline.Options.Scope == AssetScope.AllSafeTextures
+            && !isExactCelestialSafetyRepair)
         {
             throw new InvalidOperationException(
                 "Legacy All Safe packs can mix PFS and loose files and may have been built from managed enhanced sources. Their source provenance must be repaired before a safe mixed-artifact upgrade can be offered; the selected pack was left unchanged.");
         }
 
         if (baseline.Options.Scope != AssetScope.SpellEffectsOnly
+            && !isExactCelestialSafetyRepair
             && baseline.Entries.Any(entry =>
                 !EverQuestInstall.IsPfsArchiveExtension(
                     Path.GetExtension(entry.RelativeInstallPath))))
@@ -524,16 +542,7 @@ public sealed class TexturePackWorkflow
             activeInstallDirectory = Path.GetDirectoryName(activeInstallPath)!;
         }
 
-        var missingRepairRules = TextureProcessingPipeline.GetMissingRepairRuleIds(
-            baselineReport,
-            baseline.Options.Scope,
-            baselineArtifactPaths);
-        if (!isManualTextureRevision
-            && isTargetedSafetyRepair
-            && missingRepairRules.Count == 1
-            && missingRepairRules[0].Equals(
-                TextureProcessingPipeline.CelestialSkySafetyRuleId,
-                StringComparison.Ordinal))
+        if (isExactCelestialSafetyRepair)
         {
             return await RepairCelestialSafetyPackAsync(
                     paths,
@@ -1369,7 +1378,8 @@ public sealed class TexturePackWorkflow
                 Path.GetExtension(artifact.CanonicalRelativeInstallPath)));
 
     private static bool CanOmitSourceIdenticalSafetyArtifact(string relativePath) =>
-        CelestialTextureSafetyPolicy.GetPreservedReason(
+        CelestialTextureSafetyPolicy.GetSkyResourcePreservedReason(relativePath) is not null
+        || CelestialTextureSafetyPolicy.GetPreservedReason(
             relativePath,
             Path.GetFileName(relativePath)) is not null;
 
@@ -2599,6 +2609,8 @@ public sealed class TexturePackWorkflow
             .Where(path => options.Scope != AssetScope.SpellEffectsOnly
                 || SpellEffectTexturePolicy.IsEffectPath(
                     Path.GetRelativePath(paths.InstallPath, path)))
+            .Where(path => CelestialTextureSafetyPolicy.GetSkyResourcePreservedReason(
+                Path.GetRelativePath(paths.InstallPath, path)) is null)
             .ToArray();
         var builder = new LooseTextureArtifactBuilder(
             processor,

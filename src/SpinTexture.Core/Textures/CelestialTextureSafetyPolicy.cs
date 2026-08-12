@@ -13,6 +13,9 @@ public static class CelestialTextureSafetyPolicy
     public const string CelestialSpritePreservedReason =
         "Protected celestial sprite texture";
 
+    public const string SkyResourcePreservedReason =
+        "Protected native sky renderer resource";
+
     // Exact names observed in the supported client. Keep this intentionally
     // narrow: generic words such as "star", "flare", or "moon" must not turn
     // unrelated future art into a protected texture through substring matches.
@@ -102,6 +105,22 @@ public static class CelestialTextureSafetyPolicy
         return CelestialSpritePaths.Contains(canonicalPath)
             ? CelestialSpritePreservedReason
             : null;
+    }
+
+    /// <summary>
+    /// Identifies loose resources owned by EQL's native sky renderer. These
+    /// files are renderer atlases or configuration data rather than ordinary
+    /// world art and must never be staged or repaired as enhanced textures.
+    /// </summary>
+    public static string? GetSkyResourcePreservedReason(string relativeInstallPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(relativeInstallPath);
+        var segments = TrySplitSafeRelativePath(relativeInstallPath);
+        return segments is { Length: >= 3 }
+            && segments[0].Equals("Resources", StringComparison.OrdinalIgnoreCase)
+            && segments[1].Equals("sky", StringComparison.OrdinalIgnoreCase)
+                ? SkyResourcePreservedReason
+                : null;
     }
 
     private static string[]? TrySplitSafeRelativePath(string path)

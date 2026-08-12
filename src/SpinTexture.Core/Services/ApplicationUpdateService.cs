@@ -22,6 +22,7 @@ public sealed record ApplicationUpdateInfo(
 public sealed class ApplicationUpdateService
 {
     public const string ApplyUpdateArgument = "--apply-update";
+    public const string ReleaseVersionFileName = "release-version.json";
     private const string LatestReleaseEndpoint = "https://api.github.com/repos/itsspin/spintexture/releases/latest";
     private const long MaximumArchiveBytes = 512L * 1024L * 1024L;
     private const long MaximumExtractedBytes = 1024L * 1024L * 1024L;
@@ -69,6 +70,7 @@ public sealed class ApplicationUpdateService
     public static string GetCurrentVersionDisplay()
     {
         Assembly? entryAssembly = null;
+        var packagedVersion = ReadPackagedVersion(AppContext.BaseDirectory);
         string? informationalVersion = null;
         string? productVersion = null;
         Version? assemblyVersion = null;
@@ -88,27 +90,32 @@ public sealed class ApplicationUpdateService
 
         try
         {
-            var executablePath = entryAssembly is not null && !string.IsNullOrWhiteSpace(entryAssembly.Location)
-                ? entryAssembly.Location
-                : Environment.ProcessPath;
-            if (!string.IsNullOrWhiteSpace(executablePath) && File.Exists(executablePath))
-            {
-                productVersion = FileVersionInfo.GetVersionInfo(executablePath).ProductVersion;
-            }
+            productVersion = ReadSpinTextureProductVersion(entryAssembly);
         }
         catch
         {
             // Assembly metadata below remains a safe fallback for single-file releases.
         }
 
-        return FormatVersionDisplay(informationalVersion, productVersion, GetCurrentVersion(assemblyVersion));
+        return FormatVersionDisplay(
+            informationalVersion,
+            productVersion,
+            GetCurrentVersion(assemblyVersion),
+            packagedVersion);
     }
 
     public static Version GetCurrentVersion()
     {
         try
         {
-            return GetCurrentVersion(Assembly.GetEntryAssembly()?.GetName().Version);
+            var entryAssembly = Assembly.GetEntryAssembly();
+            if (TryParseVersionCandidate(ReadSpinTextureProductVersion(entryAssembly), out var packagedVersion)
+                || TryParseVersionCandidate(ReadPackagedVersion(AppContext.BaseDirectory), out packagedVersion))
+            {
+                return packagedVersion;
+            }
+
+            return GetCurrentVersion(entryAssembly?.GetName().Version);
         }
         catch
         {
@@ -119,9 +126,13 @@ public sealed class ApplicationUpdateService
     internal static string FormatVersionDisplay(
         string? informationalVersion,
         string? productVersion,
-        Version? assemblyVersion)
+        Version? assemblyVersion,
+        string? packagedVersion = null)
     {
-        foreach (var candidate in new[] { informationalVersion, productVersion })
+        // The running app-host is the installed-version authority. The
+        // release marker is generated from the same GitHub workflow value
+        // and provides a single-file compatibility fallback.
+        foreach (var candidate in new[] { productVersion, packagedVersion, informationalVersion })
         {
             if (string.IsNullOrWhiteSpace(candidate))
             {
@@ -144,6 +155,74 @@ public sealed class ApplicationUpdateService
         }
 
         return "Development build";
+    }
+
+    internal static string? ReadPackagedVersion(string baseDirectory)
+    {
+        try
+        {
+            var markerPath = Path.Combine(Path.GetFullPath(baseDirectory), ReleaseVersionFileName);
+            if (!File.Exists(markerPath))
+            {
+                return null;
+            }
+
+            var marker = JsonSerializer.Deserialize<ReleaseVersionMarker>(
+                File.ReadAllText(markerPath),
+                JsonOptions);
+            if (marker is null || marker.SchemaVersion != 1 || string.IsNullOrWhiteSpace(marker.Version))
+            {
+                return null;
+            }
+
+            var normalized = marker.Version.Trim().TrimStart('v', 'V');
+            return DisplayVersionPattern.IsMatch(normalized) ? normalized : null;
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or JsonException
+            or ArgumentException or NotSupportedException or System.Security.SecurityException)
+        {
+            // Version display must never prevent application startup.
+            return null;
+        }
+    }
+
+    private static string? ReadSpinTextureProductVersion(Assembly? entryAssembly)
+    {
+        var processPath = Environment.ProcessPath;
+        if (!string.IsNullOrWhiteSpace(processPath)
+            && Path.GetFileName(processPath).Equals("SpinTexture.exe", StringComparison.OrdinalIgnoreCase)
+            && File.Exists(processPath))
+        {
+            return FileVersionInfo.GetVersionInfo(processPath).ProductVersion;
+        }
+
+        if (entryAssembly?.GetName().Name?.Equals("SpinTexture", StringComparison.OrdinalIgnoreCase) == true
+            && !string.IsNullOrWhiteSpace(entryAssembly.Location)
+            && File.Exists(entryAssembly.Location))
+        {
+            return FileVersionInfo.GetVersionInfo(entryAssembly.Location).ProductVersion;
+        }
+
+        return null;
+    }
+
+    private static bool TryParseVersionCandidate(string? candidate, out Version version)
+    {
+        version = new Version(0, 0, 0);
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            return false;
+        }
+
+        var normalized = candidate.Trim().TrimStart('v', 'V').Split('+', 2)[0].Split('-', 2)[0];
+        if (!Version.TryParse(normalized, out var parsed) || parsed.Build < 0)
+        {
+            return false;
+        }
+
+        version = GetCurrentVersion(parsed);
+        return true;
     }
 
     private static Version GetCurrentVersion(Version? version)
@@ -662,6 +741,7 @@ public sealed class ApplicationUpdateService
     internal sealed record GitHubAsset(
         [property: JsonPropertyName("name")] string Name,
         [property: JsonPropertyName("browser_download_url")] string DownloadUrl);
+    private sealed record ReleaseVersionMarker(int SchemaVersion, string Version);
     private sealed record ReleaseManifestEntry(string Path, long Bytes, string Sha256);
     private sealed record UpdateApplyPlan(
         int SchemaVersion,
