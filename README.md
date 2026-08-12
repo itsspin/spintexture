@@ -101,7 +101,7 @@ SpinTexture keeps its normal workflow in one cohesive window. Use the top naviga
 | **Selected zone** | Fast visual trial or one favorite zone. Start here. |
 | **World only** | Terrain, architecture, safe world objects, shared plants, furniture, sky, and zone archives. |
 | **Characters + equipment only** | Playable races, biological/NPC mobs, classic armor, robes, weapons, and verified equipment materials without world archives. |
-| **World + characters** | The exact combined world and character/equipment selection. |
+| **World + characters + equipment** | The exact union of World only and Characters + equipment only, including supported mobs, armor, and weapons. |
 | **Spell effects** | Conservative supported particle/effect artwork; unsafe animation sheets and technical assets remain original. |
 | **All safe textures** | The broadest classified selection. Use only after reviewing smaller builds and confirming disk headroom. |
 
@@ -152,7 +152,7 @@ When the checked selection is an additive superset of the active pack, SpinTextu
 
 **Repair Source Mismatch** is a separate recovery path for a World or zone pack that was accidentally built while older enhanced archives were active. It exact-verifies the completed pack and managed install provenance, reuses every unaffected complete archive, and rebuilds only archives proven to have used a prior SpinTexture output as their source. Unknown game-patch changes, missing backups, and corrupt provenance are blocked instead of guessed. The original staged pack remains unchanged.
 
-**Upgrade Cutout Compatibility** appears once for older completed Characters + Equipment, World, combined World + Characters, and selected-zone packs. It creates a new immutable replacement, raw-copies the prior compressed chunks for valid opaque enhancements, leaves source-identical entries untouched, and regenerates only previously enhanced alpha-tested textures without generated soft-alpha mip levels that can cross the legacy renderer's cutoff as the camera angle changes. Fresh builds already use the single-level cutout policy and do not need this upgrade.
+**Upgrade Cutout Compatibility** appears once for older completed Characters + Equipment, World, combined World + Characters + Equipment, and selected-zone packs. It creates a new immutable replacement, raw-copies the prior compressed chunks for valid opaque enhancements, leaves source-identical entries untouched, and regenerates only previously enhanced alpha-tested textures without generated soft-alpha mip levels that can cross the legacy renderer's cutoff as the camera angle changes. Fresh builds already use the single-level cutout policy and do not need this upgrade.
 
 ## Presets and “4K”
 
@@ -202,7 +202,7 @@ SpinTexture does not generate thousands of PNG pairs during every build. That wo
 - **Redo** — rerun only that member with Original Clarity, Texture HD, Material Detail, Illustrated / Clean Painted, or Rustic Painted Fantasy.
 
 The revision is a new full replacement pack. Unselected enhanced members and their stored archive chunks are carried from the exact-verified baseline; the earlier pack is never modified or deleted. Protected technical/control textures cannot be forced through a color model. Loose spell-effect packs currently use whole-scope rebuilds; member-level revision is limited to PFS/S3D/EQG archive packs.
-- **World + characters** is the exact union of **World only** and **Characters + equipment only**.
+- **World + characters + equipment** is the exact union of **World only** and **Characters + equipment only**.
 - **All safe textures** checks every PFS archive plus supported loose DDS/BMP/TGA images; its classifier still skips protected content.
 
 A full-world build can take a long time and consume substantial disk space. Start with one zone, use a 2,048 px cap, and keep at least several tens of gigabytes free. Keep LaunchPad closed during the build; if an external update changes a source later, install preflight blocks the stale pack before any live write. Compatible textures are sent through bounded directory batches, so the neural model is loaded once for many inputs instead of once per texture. Batches are capped by item count and neural-output pixels, and GPU groups remain serial to avoid exhausting VRAM. Lossless PNG handoff is performed in-process, removing two converter launches per enhanced color texture.

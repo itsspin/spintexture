@@ -105,7 +105,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             new ScopeOptionViewModel(AssetScope.SelectedZone, "Selected zone", "Build and validate one zone at a time."),
             new ScopeOptionViewModel(AssetScope.WorldOnly, "World only", "Terrain, architecture, and safe world objects."),
             new ScopeOptionViewModel(AssetScope.CharactersAndEquipmentOnly, "Characters + equipment only", "Race models, armor, weapons, and dedicated wearable-item packs without the world."),
-            new ScopeOptionViewModel(AssetScope.WorldCharactersAndEquipment, "World + characters", "Adds supported character and equipment textures."),
+            new ScopeOptionViewModel(
+                AssetScope.WorldCharactersAndEquipment,
+                "World + characters + equipment",
+                "World textures plus playable races, mobs, armor, weapons, and verified equipment materials."),
             new ScopeOptionViewModel(
                 AssetScope.SpellEffectsOnly,
                 "Spell effects",
