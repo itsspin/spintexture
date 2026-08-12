@@ -213,6 +213,8 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
         }
     }
 
+    internal Task RefreshForLayoutSmokeAsync() => RefreshAsync(CancellationToken.None);
+
     private async Task ApplyAsync(CancellationToken cancellationToken)
     {
         var preset = SelectedPreset;

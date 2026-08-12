@@ -73,8 +73,9 @@ internal static class NativeGraphicsUiText
         _ => key
     };
 
-    public static string GetDisplayValue(string key, string value)
+    public static string GetDisplayValue(string key, string? value)
     {
+        value ??= "(not set)";
         if (value.Equals("TRUE", StringComparison.OrdinalIgnoreCase))
         {
             return "On";
