@@ -322,23 +322,30 @@ public partial class App : Application
                 Settings,
                 NeedsAttention: false,
                 CanApply: true,
-                CanRestore: true));
+                CanRestore: true,
+                AppliedPreset: NativeGraphicsUiPreset.Cinematic));
 
         public Task<NativeGraphicsUiPlan> PlanAsync(
             string installPath,
             NativeGraphicsUiPreset preset,
             CancellationToken cancellationToken)
         {
-            var changes = preset == NativeGraphicsUiPreset.Balanced
-                ? CreateChanges("FALSE", "FALSE", "FALSE", "50")
-                : CreateChanges("TRUE", "TRUE", "TRUE", "100");
+            var changes = preset switch
+            {
+                NativeGraphicsUiPreset.Balanced => CreateChanges("FALSE", "FALSE", "FALSE", "50"),
+                NativeGraphicsUiPreset.Cinematic => CreateChanges("TRUE", "TRUE", "TRUE", "100"),
+                NativeGraphicsUiPreset.CinematicNoBloom => CreateChanges("TRUE", "TRUE", "FALSE", "100"),
+                _ => throw new ArgumentOutOfRangeException(nameof(preset), preset, null)
+            };
             return Task.FromResult(new NativeGraphicsUiPlan(
                 preset,
                 preset == NativeGraphicsUiPreset.Balanced ? "Balanced" : "Cinematic",
                 preset == NativeGraphicsUiPreset.Balanced ? "NATIVE STENCIL SHADOWS" : "FULL NATIVE LIGHTING",
                 preset == NativeGraphicsUiPreset.Balanced
                     ? "Enables built-in shadows while preserving your other lighting values."
-                    : "Enables every verified built-in lighting feature and maximum shadow range.",
+                    : preset == NativeGraphicsUiPreset.Cinematic
+                        ? "Enables every verified built-in lighting feature and maximum shadow range."
+                        : "Enables Cinematic lighting and maximum shadow range with Bloom disabled.",
                 preset == NativeGraphicsUiPreset.Balanced
                     ? "Moderate GPU cost; the recommended starting point."
                     : "Very high GPU cost in dense zones.",

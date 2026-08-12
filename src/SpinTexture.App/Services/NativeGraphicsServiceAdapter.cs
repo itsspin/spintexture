@@ -107,6 +107,7 @@ public sealed class NativeGraphicsServiceAdapter : INativeGraphicsService
     {
         NativeGraphicsUiPreset.Balanced => NativeGraphicsPreset.Balanced,
         NativeGraphicsUiPreset.Cinematic => NativeGraphicsPreset.Cinematic,
+        NativeGraphicsUiPreset.CinematicNoBloom => NativeGraphicsPreset.CinematicNoBloom,
         _ => throw new ArgumentOutOfRangeException(nameof(preset), preset, null)
     };
 
@@ -118,7 +119,7 @@ public sealed class NativeGraphicsServiceAdapter : INativeGraphicsService
             NativeGraphicsSettingsState.Original => ("Current EQL graphics settings", "UNMANAGED"),
             NativeGraphicsSettingsState.Applied => (
                 status.AppliedPreset is { } preset
-                    ? $"{preset} native preset active"
+                    ? $"{GetPresetDisplayName(preset)} native preset active"
                     : "Managed native preset active",
                 "MANAGED"),
             NativeGraphicsSettingsState.Modified => ("Managed settings changed externally", "REVIEW"),
@@ -141,7 +142,14 @@ public sealed class NativeGraphicsServiceAdapter : INativeGraphicsService
                 or NativeGraphicsSettingsState.Modified
                 or NativeGraphicsSettingsState.RecoveryRequired,
             status.CanApply,
-            status.CanRestore);
+            status.CanRestore,
+            status.AppliedPreset switch
+            {
+                NativeGraphicsPreset.Balanced => NativeGraphicsUiPreset.Balanced,
+                NativeGraphicsPreset.Cinematic => NativeGraphicsUiPreset.Cinematic,
+                NativeGraphicsPreset.CinematicNoBloom => NativeGraphicsUiPreset.CinematicNoBloom,
+                _ => null
+            });
     }
 
     private static NativeGraphicsPresentation GetPresentation(NativeGraphicsUiPreset preset) => preset switch
@@ -156,6 +164,11 @@ public sealed class NativeGraphicsServiceAdapter : INativeGraphicsService
             "MAX SHADOW RANGE + LIGHTING + BLOOM",
             "Enables the verified built-in stencil-shadow, multipass-lighting, post-effects, and bloom-lighting settings, and raises EQL's native Shadow Clip Plane to its maximum setting.",
             "Very high GPU cost. Native bloom can enlarge or halo bright sun, moon, and star sprites; choose Balanced if you see that effect."),
+        NativeGraphicsUiPreset.CinematicNoBloom => new NativeGraphicsPresentation(
+            "Cinematic",
+            "MAX SHADOW RANGE + LIGHTING",
+            "Enables the verified built-in stencil-shadow, multipass-lighting, and post-effects settings, raises EQL's native Shadow Clip Plane to maximum, and explicitly disables Bloom.",
+            "High GPU cost. Bloom is off to reduce halos around bright sky sprites while retaining Cinematic lighting and shadows."),
         _ => throw new ArgumentOutOfRangeException(nameof(preset), preset, null)
     };
 
@@ -164,4 +177,10 @@ public sealed class NativeGraphicsServiceAdapter : INativeGraphicsService
         string Eyebrow,
         string Description,
         string PerformanceNote);
+
+    private static string GetPresetDisplayName(NativeGraphicsPreset preset) => preset switch
+    {
+        NativeGraphicsPreset.CinematicNoBloom => "Cinematic (Bloom off)",
+        _ => preset.ToString()
+    };
 }

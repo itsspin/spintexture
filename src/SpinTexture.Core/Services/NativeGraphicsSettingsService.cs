@@ -186,8 +186,8 @@ public sealed class NativeGraphicsSettingsService
                               currentFingerprint.Sha256,
                               manifest.AppliedSha256,
                               StringComparison.OrdinalIgnoreCase)
-                ? $"The {manifest.Preset} native preset is active and verified."
-                : $"The {manifest.Preset} native preset is active. EverQuest changed unrelated preferences; SpinTexture will preserve them during restore.";
+                ? $"The {GetPresetDisplayName(manifest.Preset)} native preset is active and verified."
+                : $"The {GetPresetDisplayName(manifest.Preset)} native preset is active. EverQuest changed unrelated preferences; SpinTexture will preserve them during restore.";
             return new NativeGraphicsSettingsStatus(
                 NativeGraphicsSettingsState.Applied,
                 settingsPath,
@@ -279,12 +279,19 @@ public sealed class NativeGraphicsSettingsService
                 target.Exists && !current.Exists));
         }
 
-        var distanceSummary = preset == NativeGraphicsPreset.Cinematic
+        var distanceSummary = preset is NativeGraphicsPreset.Cinematic
+            or NativeGraphicsPreset.CinematicNoBloom
             ? "Cinematic uses EQL's verified maximum native shadow clip distance."
             : "Balanced preserves the pre-preset shadow clip distance.";
+        var bloomSummary = preset switch
+        {
+            NativeGraphicsPreset.Cinematic => " Bloom is enabled.",
+            NativeGraphicsPreset.CinematicNoBloom => " Bloom is disabled to reduce bright sky-sprite halos.",
+            _ => string.Empty
+        };
         var summary = changes.Count == 0
-            ? $"The {preset} native preset already matches eqclient.ini. {distanceSummary}"
-            : $"{changes.Count:N0} native EQL setting change(s) are planned. {distanceSummary}";
+            ? $"The {GetPresetDisplayName(preset)} native preset already matches eqclient.ini. {distanceSummary}{bloomSummary}"
+            : $"{changes.Count:N0} native EQL setting change(s) are planned. {distanceSummary}{bloomSummary}";
         return new NativeGraphicsSettingsPlan(preset, status, changes, summary);
     }
 
@@ -312,7 +319,8 @@ public sealed class NativeGraphicsSettingsService
 
         if (!plan.HasChanges)
         {
-            throw new InvalidOperationException($"The {preset} native preset is already active.");
+            throw new InvalidOperationException(
+                $"The {GetPresetDisplayName(preset)} native preset is already active.");
         }
 
         var settingsPath = plan.Status.SettingsPath;
@@ -990,7 +998,8 @@ public sealed class NativeGraphicsSettingsService
     {
         var desired = baseline.Select(value => value with { }).ToList();
         SetStored(desired, "Defaults", "Shadows", true, "TRUE");
-        if (preset == NativeGraphicsPreset.Cinematic)
+        if (preset is NativeGraphicsPreset.Cinematic
+            or NativeGraphicsPreset.CinematicNoBloom)
         {
             SetStored(desired, "Defaults", "MultiPassLighting", true, "TRUE");
             SetStored(desired, "Defaults", "PostEffects", true, "TRUE");
@@ -1000,7 +1009,12 @@ public sealed class NativeGraphicsSettingsService
                     "Defaults",
                     "Bloom")))
             {
-                SetStored(desired, "Defaults", "Bloom", true, "TRUE");
+                SetStored(
+                    desired,
+                    "Defaults",
+                    "Bloom",
+                    true,
+                    preset == NativeGraphicsPreset.Cinematic ? "TRUE" : "FALSE");
             }
 
             if (managedSettings.Any(setting => SameSetting(
@@ -1020,6 +1034,12 @@ public sealed class NativeGraphicsSettingsService
 
         return desired;
     }
+
+    private static string GetPresetDisplayName(NativeGraphicsPreset preset) => preset switch
+    {
+        NativeGraphicsPreset.CinematicNoBloom => "Cinematic (Bloom off)",
+        _ => preset.ToString()
+    };
 
     private static IReadOnlyList<NativeGraphicsStoredSetting> BuildAppliedSettings(
         IReadOnlyList<NativeGraphicsStoredSetting> baseline,

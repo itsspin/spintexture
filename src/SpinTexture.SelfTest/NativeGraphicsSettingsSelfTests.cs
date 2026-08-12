@@ -12,6 +12,7 @@ internal static class NativeGraphicsSettingsSelfTests
     public static async Task RunAsync(CancellationToken cancellationToken)
     {
         await TestPresetSwitchingAndRestoreAsync(cancellationToken).ConfigureAwait(false);
+        await TestCinematicBloomToggleAsync(cancellationToken).ConfigureAwait(false);
         await TestSwitchBackToBaselineRetiresTransactionAsync(cancellationToken)
             .ConfigureAwait(false);
         await TestManagedConflictAndBooleanNormalizationAsync(cancellationToken).ConfigureAwait(false);
@@ -26,6 +27,74 @@ internal static class NativeGraphicsSettingsSelfTests
         await TestMalformedInputsFailClosedAsync(cancellationToken).ConfigureAwait(false);
         await TestPostCommitRollbackAsync(cancellationToken).ConfigureAwait(false);
         TestIniRoundTripAndWhitespaceOnlyValue();
+    }
+
+    private static async Task TestCinematicBloomToggleAsync(CancellationToken cancellationToken)
+    {
+        const string originalText =
+            "[Defaults]\r\nShadows=FALSE\r\nMultiPassLighting=FALSE\r\n"
+            + "PostEffects=FALSE\r\nBloom=TRUE\r\n"
+            + "[Options]\r\nShadowClipPlane=40\r\n";
+        await using var fixture = await NativeGraphicsFixture.CreateAsync(
+                Encoding.UTF8.GetBytes(originalText),
+                cancellationToken)
+            .ConfigureAwait(false);
+        var service = fixture.CreateService();
+
+        var withoutBloomPlan = await service.PlanAsync(
+                fixture.Paths,
+                NativeGraphicsPreset.CinematicNoBloom,
+                cancellationToken)
+            .ConfigureAwait(false);
+        Assert(
+            withoutBloomPlan.Changes.Any(change =>
+                change.Key == "Bloom" && change.PlannedValue == "FALSE"),
+            "Cinematic without Bloom explicitly previews Bloom off");
+
+        var withoutBloom = await service.ApplyAsync(
+                fixture.Paths,
+                NativeGraphicsPreset.CinematicNoBloom,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        AssertEqual(
+            NativeGraphicsPreset.CinematicNoBloom,
+            withoutBloom.Status.AppliedPreset,
+            "Bloom-off Cinematic identity");
+        var withoutBloomText = await fixture.ReadSettingsTextAsync(cancellationToken)
+            .ConfigureAwait(false);
+        AssertContains(withoutBloomText, "MultiPassLighting=TRUE", "Bloom-off Cinematic keeps advanced lighting");
+        AssertContains(withoutBloomText, "PostEffects=TRUE", "Bloom-off Cinematic keeps post effects");
+        AssertContains(withoutBloomText, "Bloom=FALSE", "Bloom-off Cinematic disables Bloom");
+        AssertContains(withoutBloomText, "ShadowClipPlane=100", "Bloom-off Cinematic keeps maximum shadows");
+
+        var withBloom = await service.ApplyAsync(
+                fixture.Paths,
+                NativeGraphicsPreset.Cinematic,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        AssertEqual(withoutBloom.TransactionId, withBloom.TransactionId, "Bloom toggle reuses transaction");
+        AssertContains(
+            await fixture.ReadSettingsTextAsync(cancellationToken).ConfigureAwait(false),
+            "Bloom=TRUE",
+            "Bloom can be re-enabled without leaving Cinematic");
+
+        var disabledAgain = await service.ApplyAsync(
+                fixture.Paths,
+                NativeGraphicsPreset.CinematicNoBloom,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        AssertEqual(withBloom.TransactionId, disabledAgain.TransactionId, "reverse Bloom toggle transaction");
+        AssertContains(
+            await fixture.ReadSettingsTextAsync(cancellationToken).ConfigureAwait(false),
+            "Bloom=FALSE",
+            "Bloom can be disabled again");
+
+        await service.RestoreAsync(fixture.Paths, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        AssertSequenceEqual(
+            Encoding.UTF8.GetBytes(originalText),
+            await File.ReadAllBytesAsync(fixture.SettingsPath, cancellationToken).ConfigureAwait(false),
+            "Bloom-toggle transaction restores the exact original settings");
     }
 
     private static async Task TestLegacyPreBloomRestoreAndMigrationAsync(
