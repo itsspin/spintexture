@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Http;
 using System.Windows;
 using SpinTexture.App.Services;
 using SpinTexture.Core.Pipeline;
@@ -18,7 +19,14 @@ public partial class App : Application
         {
             try
             {
-                new MainWindow().Show();
+                var window = new MainWindow();
+                window.Show();
+                _ = CheckForUpdatesAsync(window, notifyWhenCurrent: false);
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(20)).ConfigureAwait(false);
+                    new ApplicationUpdateService().CleanupCompletedUpdates();
+                });
             }
             catch (Exception exception)
             {
@@ -29,6 +37,29 @@ public partial class App : Application
                         ? string.Empty
                         : $"\n\nDiagnostic details were saved to:\n{logPath}"),
                     "SpinTexture startup failed",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+                Shutdown(1);
+            }
+
+            return;
+        }
+
+        if (ApplicationUpdateService.TryParseApplyArguments(e.Args, out var updatePlanPath))
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            try
+            {
+                await ApplicationUpdateService.ApplyPreparedUpdateAsync(updatePlanPath).ConfigureAwait(true);
+                Shutdown(0);
+            }
+            catch (Exception exception)
+            {
+                var logPath = TryWriteStartupFailure(exception);
+                MessageBox.Show(
+                    "SpinTexture could not finish the update. The previous installation was restored."
+                    + (logPath is null ? string.Empty : $"\n\nDetails: {logPath}"),
+                    "SpinTexture update failed",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
                 Shutdown(1);
@@ -85,6 +116,93 @@ public partial class App : Application
         {
             ShowLaunchFailure(exception.Message);
             Shutdown(1);
+        }
+    }
+
+    internal static async Task CheckForUpdatesAsync(Window owner, bool notifyWhenCurrent)
+    {
+        try
+        {
+            var updateService = new ApplicationUpdateService();
+            var update = await updateService.CheckAsync().ConfigureAwait(true);
+            if (!owner.IsVisible || owner is MainWindow mainWindow && !mainWindow.CanStartUpdate)
+            {
+                return;
+            }
+
+            if (update is null)
+            {
+                if (notifyWhenCurrent)
+                {
+                    MessageBox.Show(
+                        owner,
+                        "You already have the latest stable version of SpinTexture.",
+                        "SpinTexture is up to date",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                }
+
+                return;
+            }
+
+            var choice = MessageBox.Show(
+                owner,
+                $"SpinTexture {update.AvailableVersion.ToString(3)} is available.\n\n"
+                + "Download, verify, install, and restart now? Your EQ directory, staged-pack location, packs, and backups will stay in place.",
+                "SpinTexture update available",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Information);
+            if (choice != MessageBoxResult.Yes)
+            {
+                return;
+            }
+
+            var executablePath = Environment.ProcessPath
+                ?? throw new InvalidOperationException("Windows did not report the SpinTexture executable path.");
+            var installDirectory = Path.GetDirectoryName(executablePath)
+                ?? throw new InvalidOperationException("The SpinTexture executable has no parent directory.");
+            var originalTitle = owner.Title;
+            owner.IsEnabled = false;
+            owner.Title = $"SpinTexture - Downloading {update.AvailableVersion.ToString(3)}";
+            string planPath;
+            try
+            {
+                var downloadProgress = new Progress<double>(percent =>
+                    owner.Title = $"SpinTexture - Downloading update {percent:0}%");
+                planPath = await updateService.DownloadAndPrepareAsync(
+                    update,
+                    installDirectory,
+                    Path.GetFileName(executablePath),
+                    downloadProgress).ConfigureAwait(true);
+            }
+            finally
+            {
+                owner.IsEnabled = true;
+                owner.Title = originalTitle;
+            }
+
+            var process = Process.Start(ApplicationUpdateService.CreateApplyStartInfo(planPath));
+            if (process is null)
+            {
+                throw new InvalidOperationException("Windows did not start the verified updater.");
+            }
+
+            owner.Close();
+        }
+        catch (Exception exception) when (exception is
+            HttpRequestException or TaskCanceledException or IOException or UnauthorizedAccessException
+            or InvalidDataException or InvalidOperationException or System.Security.SecurityException)
+        {
+            if (notifyWhenCurrent && owner.IsVisible)
+            {
+                owner.IsEnabled = true;
+                MessageBox.Show(
+                    owner,
+                    $"SpinTexture could not check or install the update. The current version is unchanged.\n\n{exception.Message}",
+                    "Update unavailable",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
         }
     }
 

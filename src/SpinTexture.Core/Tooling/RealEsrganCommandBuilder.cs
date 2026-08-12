@@ -4,6 +4,8 @@ namespace SpinTexture.Core.Tooling;
 
 public sealed class RealEsrganCommandBuilder
 {
+    internal static readonly TimeSpan StandardWorkerInactivityTimeout = TimeSpan.FromMinutes(45);
+    internal static readonly TimeSpan MaximumDetailWorkerInactivityTimeout = TimeSpan.FromMinutes(90);
     public const int MinimumOutputScale = 2;
     public const int ModelScale = 4;
     public const string LegacyFaithfulModelName = "realesrnet-x4plus";
@@ -66,7 +68,10 @@ public sealed class RealEsrganCommandBuilder
             executablePath,
             arguments,
             Path.GetDirectoryName(Path.GetFullPath(executablePath)),
-            DisplayName: "Real-ESRGAN ncnn Vulkan");
+            DisplayName: "Real-ESRGAN ncnn Vulkan",
+            InactivityTimeout: preset == TexturePreset.MaximumDetail
+                ? MaximumDetailWorkerInactivityTimeout
+                : StandardWorkerInactivityTimeout);
     }
 
     public TextureUpscaleModelSelection ResolveModel(string modelsPath, TexturePreset preset)

@@ -16,6 +16,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private readonly ITextureWorkflowService _workflow;
     private readonly IUserDialogService _dialogs;
     private readonly IEnhancedLauncherService _enhancedLauncher;
+    private readonly AppPreferencesStore _preferences;
     private string _installPath = string.Empty;
     private string _statusText = "Choose an EverQuest Legends directory to begin";
     private string _currentStage = "READY";
@@ -48,6 +49,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private int _buildTotalArtifacts;
     private double _currentArtifactFraction;
     private TimeSpan _archiveBuildStartedAt;
+    private TimeSpan _lastBuildActivityAt;
+    private TimeSpan _freshArtifactStartedAt;
+    private bool _isMeasuringFreshArtifact;
+    private bool _resumedBuildNeedsFreshEtaSample;
+    private double? _smoothedSecondsPerArtifact;
+    private string _currentBuildPhase = "archive preparation";
     private bool _stagedBuildSucceeded;
     private string _overallProgressText = "No overall job is running";
     private string _progressEtaText = "Choose an asset set to see its estimate";
@@ -57,12 +64,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         IFolderPickerService folderPicker,
         ITextureWorkflowService workflow,
         IUserDialogService dialogs,
-        IEnhancedLauncherService enhancedLauncher)
+        IEnhancedLauncherService enhancedLauncher,
+        AppPreferencesStore? preferences = null)
     {
         _folderPicker = folderPicker;
         _workflow = workflow;
         _dialogs = dialogs;
         _enhancedLauncher = enhancedLauncher;
+        _preferences = preferences ?? new AppPreferencesStore();
         _buildProgressTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromSeconds(1)
@@ -138,6 +147,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         TextureCaps = [1024, 2048, 4096];
         _selectedPresetOption = PresetOptions.Single(option => option.Value == TexturePreset.ClassicHd);
         _selectedScopeOption = ScopeOptions.Single(option => option.Value == AssetScope.WorldOnly);
+        var rememberedInstall = _preferences.Read().LastInstallPath;
+        if (!string.IsNullOrWhiteSpace(rememberedInstall)
+            && Directory.Exists(rememberedInstall)
+            && File.Exists(Path.Combine(rememberedInstall, "eqgame.exe")))
+        {
+            _installPath = rememberedInstall;
+            _statusText = "Remembered EverQuest directory • ready to analyze";
+        }
 
         BrowseCommand = new RelayCommand(_ => Browse(), _ => !IsBusy);
         AnalyzeCommand = new AsyncRelayCommand(AnalyzeAsync, CanAnalyze);
@@ -233,6 +250,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             OnPropertyChanged(nameof(PathStateText));
             OnPropertyChanged(nameof(IsClientSignaturePresent));
             RefreshCommands();
+            if (IsClientSignaturePresent)
+            {
+                _ = RememberInstallPathAsync(normalized);
+            }
         }
     }
 
@@ -561,6 +582,19 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         StatusText = "Directory selected • ready for read-only analysis";
     }
 
+    private async Task RememberInstallPathAsync(string installPath)
+    {
+        try
+        {
+            await _preferences.WriteLastInstallPathAsync(installPath).ConfigureAwait(true);
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            AddLog("WARN", $"The client path could not be remembered: {exception.Message}");
+        }
+    }
+
     private async Task AnalyzeAsync(CancellationToken cancellationToken)
     {
         BeginOperation("ANALYZE", "Reading archive and loose-texture inventory");
@@ -570,6 +604,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             var progress = new Progress<ProgressUpdate>(HandleProgress);
             ScanSummary summary = await _workflow.AnalyzeAsync(InstallPath, progress, cancellationToken);
+            await _preferences.WriteLastInstallPathAsync(InstallPath, cancellationToken).ConfigureAwait(true);
 
             _scanSummary = summary;
             Zones.Clear();
@@ -585,6 +620,35 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             HasManagedBackup = _workflow.HasRestorableBackup(InstallPath);
             HasStagedPack = _workflow.HasStagedPack(InstallPath);
             await RefreshInstallHealthAsync(cancellationToken, fast: true).ConfigureAwait(true);
+            RecoverableStagedBuild? recovery = await _workflow
+                .FindRecoverableBuildAsync(InstallPath, cancellationToken)
+                .ConfigureAwait(true);
+            if (recovery is not null)
+            {
+                SelectedPresetOption = PresetOptions.Single(option =>
+                    option.Value == recovery.Options.Preset);
+                SelectedScopeOption = ScopeOptions.Single(option =>
+                    option.Value == recovery.Options.Scope);
+                SelectedMaximumDimension = recovery.Options.MaximumDimension;
+                GenerateMipMaps = recovery.Options.GenerateMipMaps;
+                if (recovery.Options.Scope == AssetScope.SelectedZone
+                    && !string.IsNullOrWhiteSpace(recovery.Options.SelectedZone))
+                {
+                    var matchingZone = Zones.FirstOrDefault(zone => zone.Equals(
+                        recovery.Options.SelectedZone,
+                        StringComparison.OrdinalIgnoreCase));
+                    if (matchingZone is not null)
+                    {
+                        SelectedZone = matchingZone;
+                    }
+                }
+
+                var recoveryMessage =
+                    $"Saved crash recovery found: {recovery.VerifiedArtifacts:N0} of {recovery.TotalArtifacts:N0} artifacts are intact. Build Staged Pack will verify current sources and resume this selection.";
+                AddLog("SAFE", recoveryMessage);
+                StatusText = recoveryMessage;
+                CurrentItem = "Saved staged-build work is ready to verify and resume";
+            }
             OnPropertyChanged(nameof(ArchiveCountText));
             OnPropertyChanged(nameof(PackedTextureCountText));
             OnPropertyChanged(nameof(LooseTextureCountText));
@@ -600,6 +664,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             StatusText = "Analysis complete • review scope and output estimate";
             CurrentStage = "ANALYZED";
             CurrentItem = "Ready to build a staged pack";
+            if (recovery is not null)
+            {
+                StatusText =
+                    $"Saved crash recovery found: {recovery.VerifiedArtifacts:N0} of {recovery.TotalArtifacts:N0} artifacts are intact. Build Staged Pack will verify current sources and resume this selection.";
+                CurrentItem = "Saved staged-build work is ready to verify and resume";
+            }
         }
         catch (OperationCanceledException)
         {
@@ -891,7 +961,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 : string.Empty;
         }
         StatusText = update.Message;
-        AddLog("STEP", $"{update.Stage}: {update.Message}");
+        if (!update.IsHeartbeat)
+        {
+            AddLog("STEP", $"{update.Stage}: {update.Message}");
+        }
     }
 
     private void BeginStagedBuildProgress()
@@ -902,6 +975,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _buildTotalArtifacts = 0;
         _currentArtifactFraction = 0;
         _archiveBuildStartedAt = TimeSpan.Zero;
+        _lastBuildActivityAt = TimeSpan.Zero;
+        _freshArtifactStartedAt = TimeSpan.Zero;
+        _isMeasuringFreshArtifact = false;
+        _resumedBuildNeedsFreshEtaSample = false;
+        _smoothedSecondsPerArtifact = null;
+        _currentBuildPhase = "archive preparation";
         _stagedBuildSucceeded = false;
         _buildStopwatch.Restart();
         _buildProgressTimer.Start();
@@ -933,6 +1012,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private void HandleStagedBuildProgress(ProgressUpdate update)
     {
+        _lastBuildActivityAt = _buildStopwatch.Elapsed;
+        UpdateCurrentBuildPhase(update);
         if (update.Stage.Equals("Plan", StringComparison.OrdinalIgnoreCase))
         {
             if (!_hasEnteredArchiveBuild)
@@ -950,6 +1031,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
 
+        if (update.Stage.Equals("Resume", StringComparison.OrdinalIgnoreCase))
+        {
+            _resumedBuildNeedsFreshEtaSample = update.Completed > 0;
+            ProgressCountText = update.Total > 0
+                ? $"Recovering {Math.Min(update.Completed, update.Total):N0} of {update.Total:N0} verified artifacts"
+                : "Recovering verified artifacts";
+            return;
+        }
+
         if (update.Stage.Equals("Build", StringComparison.OrdinalIgnoreCase))
         {
             if (!_hasEnteredArchiveBuild)
@@ -959,7 +1049,33 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
             _hasEnteredArchiveBuild = true;
             _buildTotalArtifacts = Math.Max(_buildTotalArtifacts, update.Total);
-            _buildCompletedArtifacts = Math.Clamp(update.Completed, 0, Math.Max(0, _buildTotalArtifacts));
+            var previouslyCompleted = _buildCompletedArtifacts;
+            _buildCompletedArtifacts = Math.Max(
+                _buildCompletedArtifacts,
+                Math.Clamp(update.Completed, 0, Math.Max(0, _buildTotalArtifacts)));
+            var resumedArtifact = update.Message.Contains(
+                "skipped duplicate upscaling",
+                StringComparison.OrdinalIgnoreCase);
+            var startingFreshArtifact = update.Message.StartsWith(
+                "Rebuilding complete install artifact",
+                StringComparison.OrdinalIgnoreCase);
+            if (startingFreshArtifact && !_isMeasuringFreshArtifact)
+            {
+                _freshArtifactStartedAt = _buildStopwatch.Elapsed;
+                _isMeasuringFreshArtifact = true;
+            }
+
+            if (_buildCompletedArtifacts > previouslyCompleted
+                && !resumedArtifact
+                && _isMeasuringFreshArtifact)
+            {
+                var observed = (_buildStopwatch.Elapsed - _freshArtifactStartedAt).TotalSeconds;
+                _smoothedSecondsPerArtifact = _smoothedSecondsPerArtifact is null
+                    ? observed
+                    : (_smoothedSecondsPerArtifact.Value * 0.80) + (observed * 0.20);
+                _isMeasuringFreshArtifact = false;
+                _resumedBuildNeedsFreshEtaSample = false;
+            }
             _currentArtifactFraction = 0;
             UpdateOverallBuildProgress();
             return;
@@ -978,10 +1094,49 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             bool validating = update.Message.StartsWith(
                 "Validating enhanced textures",
                 StringComparison.OrdinalIgnoreCase);
-            _currentArtifactFraction = validating
+            var reportedFraction = validating
                 ? 0.62 + nestedFraction * 0.33
                 : nestedFraction * 0.58;
+            // CPU/GPU/encoding sub-batches use different local totals. Their
+            // heartbeat must never make the overall artifact bar move back.
+            _currentArtifactFraction = Math.Max(
+                _currentArtifactFraction,
+                reportedFraction);
             UpdateOverallBuildProgress();
+        }
+    }
+
+    private void UpdateCurrentBuildPhase(ProgressUpdate update)
+    {
+        if (update.Message.StartsWith("CPU preparation", StringComparison.OrdinalIgnoreCase))
+        {
+            _currentBuildPhase = "CPU texture preparation";
+        }
+        else if (update.Message.Contains("Material Detail", StringComparison.OrdinalIgnoreCase)
+                 && update.Message.Contains("GPU", StringComparison.OrdinalIgnoreCase))
+        {
+            _currentBuildPhase = "GPU Material Detail/TTA";
+        }
+        else if (update.Message.StartsWith("GPU enhancement", StringComparison.OrdinalIgnoreCase)
+                 || update.Message.StartsWith("GPU worker", StringComparison.OrdinalIgnoreCase))
+        {
+            _currentBuildPhase = "GPU enhancement";
+        }
+        else if (update.Message.Contains("encoding and validating", StringComparison.OrdinalIgnoreCase))
+        {
+            _currentBuildPhase = "texture encoding and validation";
+        }
+        else if (update.Message.StartsWith("Validating enhanced textures", StringComparison.OrdinalIgnoreCase))
+        {
+            _currentBuildPhase = "archive validation";
+        }
+        else if (update.Message.StartsWith("Preparing safe textures", StringComparison.OrdinalIgnoreCase))
+        {
+            _currentBuildPhase = "archive texture scan";
+        }
+        else if (update.Stage.Equals("Resume", StringComparison.OrdinalIgnoreCase))
+        {
+            _currentBuildPhase = "checkpoint recovery";
         }
     }
 
@@ -1030,6 +1185,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         double completedWork = _buildCompletedArtifacts + _currentArtifactFraction;
         var archiveElapsed = _buildStopwatch.Elapsed - _archiveBuildStartedAt;
+        if (_resumedBuildNeedsFreshEtaSample && _smoothedSecondsPerArtifact is null)
+        {
+            ProgressEtaText = $"Recovered {_buildCompletedArtifacts:N0} verified artifacts · measuring the first remaining artifact · elapsed {FormatDuration(_buildStopwatch.Elapsed)}";
+            return;
+        }
         if (completedWork < 1 || archiveElapsed < TimeSpan.FromSeconds(8))
         {
             ProgressEtaText = $"Measuring this PC's speed… · elapsed {FormatDuration(_buildStopwatch.Elapsed)}";
@@ -1037,8 +1197,23 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
 
         double remainingWork = Math.Max(0, _buildTotalArtifacts - completedWork);
-        var remaining = TimeSpan.FromSeconds(
-            archiveElapsed.TotalSeconds / completedWork * remainingWork);
+        var rawSecondsPerArtifact = archiveElapsed.TotalSeconds / completedWork;
+        var secondsPerArtifact = _smoothedSecondsPerArtifact is null
+            ? rawSecondsPerArtifact
+            : _smoothedSecondsPerArtifact.Value;
+        var remaining = TimeSpan.FromSeconds(secondsPerArtifact * remainingWork);
+        var quietFor = _buildStopwatch.Elapsed - _lastBuildActivityAt;
+        var activitySuffix = quietFor >= TimeSpan.FromSeconds(15)
+            ? $" · still working in {_currentBuildPhase}; last worker activity {FormatDuration(quietFor)} ago"
+            : string.Empty;
+        var materialSuffix = SelectedPresetOption.Value == TexturePreset.MaximumDetail
+            ? " · Material Detail/TTA"
+            : string.Empty;
+        if (remaining > TimeSpan.FromSeconds(2))
+        {
+            ProgressEtaText = $"About {FormatDuration(remaining)} remaining · elapsed {FormatDuration(_buildStopwatch.Elapsed)}{materialSuffix}{activitySuffix}";
+            return;
+        }
         ProgressEtaText = remaining <= TimeSpan.FromSeconds(2)
             ? $"Finishing… · elapsed {FormatDuration(_buildStopwatch.Elapsed)}"
             : $"About {FormatDuration(remaining)} remaining · elapsed {FormatDuration(_buildStopwatch.Elapsed)}";
@@ -1238,7 +1413,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             TexturePreset.Faithful => 0.22,
             TexturePreset.ClassicHd => 0.18,
-            TexturePreset.MaximumDetail => 0.51,
+            // Material Detail enables eight-view TTA. Field evidence from a
+            // 1,872-artifact combined build measured roughly 1.8 minutes per
+            // artifact, so the no-history forecast must not resemble a normal
+            // one-pass model estimate.
+            TexturePreset.MaximumDetail => 1.45,
             TexturePreset.Illustrated => 0.26,
             TexturePreset.RusticPainted => 0.29,
             _ => 0.18
@@ -1292,7 +1471,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             {
                 TexturePreset.Faithful => 0.22,
                 TexturePreset.ClassicHd => 0.18,
-                TexturePreset.MaximumDetail => 0.51,
+            TexturePreset.MaximumDetail => 1.45,
                 TexturePreset.Illustrated => 0.26,
                 TexturePreset.RusticPainted => 0.29,
                 _ => 0.18

@@ -7,6 +7,7 @@ public sealed record TextureUpscaleModelSelection(
 public sealed class UpscaylCommandBuilder
 {
     public const int ModelScale = 4;
+    internal static readonly TimeSpan WorkerInactivityTimeout = TimeSpan.FromMinutes(45);
 
     // The first complete .param/.bin pair wins. Supporting aliases keeps local
     // model experiments possible without changing the application binary.
@@ -84,7 +85,8 @@ public sealed class UpscaylCommandBuilder
                 "-f", "png"
             ],
             Path.GetDirectoryName(Path.GetFullPath(executablePath)),
-            DisplayName: "Upscayl ncnn Vulkan game-texture worker");
+            DisplayName: "Upscayl ncnn Vulkan game-texture worker",
+            InactivityTimeout: WorkerInactivityTimeout);
     }
 
     public static bool HasTextureSpecializedModel(string modelsPath) =>

@@ -75,6 +75,7 @@ internal static class Program
             Console.WriteLine("Running SpinTexture safety and fidelity self-tests...");
             await ArchiveSelfTests.RunAsync(Console.Out).ConfigureAwait(false);
             await TexturePipelineSelfTests.RunAsync(Console.Out).ConfigureAwait(false);
+            await ApplicationUpdateSelfTests.RunAsync(Console.Out).ConfigureAwait(false);
             Console.WriteLine("All SpinTexture self-tests passed.");
             return 0;
         }

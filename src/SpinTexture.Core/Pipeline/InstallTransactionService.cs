@@ -769,7 +769,7 @@ public sealed class InstallTransactionService
             {
                 throw new InvalidOperationException(
                     $"The live client archive no longer matches the original bytes recorded by this staged pack: {entry.RelativeInstallPath}. "
-                    + "If Pack Library offers Repair Source Mismatch for this pack, use it; otherwise finish any LaunchPad update and rebuild the affected pack. No client files were changed.",
+                    + "If Pack Library offers Repair Pack for this build, use it; otherwise finish any LaunchPad update and rebuild the affected pack. No client files were changed.",
                     exception);
             }
             prepared.Add(new PreparedBuildArtifact(entry, stagedPath, installPath));

@@ -1,4 +1,5 @@
 using SpinTexture.Core.Models;
+using SpinTexture.Core.Textures;
 
 namespace SpinTexture.Core.Services;
 
@@ -6,50 +7,83 @@ namespace SpinTexture.Core.Services;
 /// Identifies the texture-processing behavior used by a build independently
 /// of the JSON report schema. Revision 2 bounded alpha-tested mip chains at
 /// 4x4. Revision 3 retains only the enhanced top level for alpha-tested
-/// cutouts because the legacy renderer can discard those generated soft-alpha
-/// levels based on view angle. Older packs can be upgraded without rerunning
-/// their successfully enhanced opaque textures.
+/// cutouts because the legacy renderer can discard generated soft-alpha levels
+/// based on view angle. Revision 4 adds the celestial/sky safety policy. Older
+/// packs can advance through these independent safety rules without rerunning
+/// unaffected successfully enhanced textures.
 /// </summary>
 public static class TextureProcessingPipeline
 {
-    public const int CurrentRevision = 3;
+    public const int CurrentRevision = 4;
+    public const string CharacterEquipmentCoverageRuleId =
+        "character-equipment-coverage-v1";
+    public const string CutoutMipSafetyRuleId =
+        "cutout-single-level-mips-v3";
+    public const string CelestialSkySafetyRuleId =
+        "celestial-sky-originals-v4";
 
     public static bool RequiresRepair(
         TextureBuildReport? report,
         AssetScope scope)
+        => RequiresRepair(report, scope, artifactPaths: null);
+
+    public static bool RequiresRepair(
+        TextureBuildReport? report,
+        AssetScope scope,
+        IEnumerable<string>? artifactPaths)
     {
         if (scope is not (AssetScope.CharactersAndEquipmentOnly
             or AssetScope.WorldCharactersAndEquipment
             or AssetScope.WorldOnly
-            or AssetScope.SelectedZone))
+            or AssetScope.SelectedZone
+            or AssetScope.SpellEffectsOnly))
         {
             return false;
         }
 
+        // Revisions are only a compatibility hint. Repair requirements are
+        // scope-specific: for example, a valid revision-3 character pack does
+        // not contain environmental sky/celestial assets and therefore has no
+        // revision-4 work to do.
         return report is null
-            || report.TexturePipelineRevision < CurrentRevision;
+            || GetMissingRepairRuleIds(report, scope, artifactPaths).Count != 0;
     }
 
     /// <summary>
-    /// Distinguishes the narrow cutout-policy upgrade from the original
-    /// character/equipment coverage repair. World-bearing PFS packs always use
-    /// the narrow path when stale. Character-bearing packs use it after revision
-    /// 1, or after a recorded incremental coverage repair. Fresh revision-0 or
-    /// no-report character/combined packs still receive the legacy coverage pass
-    /// (which also writes the current revision).
+    /// Distinguishes a targeted safety-policy upgrade from the original broad
+    /// character/equipment coverage repair. Every stale revision-1-or-newer PFS
+    /// pack has sufficient provenance for targeted reuse. The two older special
+    /// cases remain supported so already-released World and repaired character
+    /// packs do not lose their safe incremental upgrade path.
     /// </summary>
-    public static bool RequiresCutoutMipUpgrade(
+    public static bool RequiresTargetedSafetyRepair(
         TextureBuildReport? report,
         AssetScope scope)
+        => RequiresTargetedSafetyRepair(report, scope, artifactPaths: null);
+
+    public static bool RequiresTargetedSafetyRepair(
+        TextureBuildReport? report,
+        AssetScope scope,
+        IEnumerable<string>? artifactPaths)
     {
-        if (!RequiresRepair(report, scope))
+        if (!RequiresRepair(report, scope, artifactPaths))
         {
             return false;
+        }
+
+        if (report is not null && report.TexturePipelineRevision >= 1)
+        {
+            return true;
         }
 
         if (scope is AssetScope.WorldOnly or AssetScope.SelectedZone)
         {
             return true;
+        }
+
+        if (scope == AssetScope.SpellEffectsOnly)
+        {
+            return report is not null;
         }
 
         // Revision 0 character-bearing packs still need the broader missing
@@ -59,6 +93,104 @@ public static class TextureProcessingPipeline
             && (report.TexturePipelineRevision >= 1
                 || (report.IsIncrementalRepair
                     && !report.IsSourceMismatchRepair));
+    }
+
+    /// <summary>
+    /// Compatibility name retained for older UI and test callers. The targeted
+    /// route now applies every missing safety rule, not only the cutout rule.
+    /// </summary>
+    public static bool RequiresCutoutMipUpgrade(
+        TextureBuildReport? report,
+        AssetScope scope) =>
+        RequiresTargetedSafetyRepair(report, scope);
+
+    public static IReadOnlyList<string> GetCurrentRepairRuleIds(AssetScope scope) =>
+        GetRepairRuleIdsThroughRevision(scope, CurrentRevision, artifactPaths: null);
+
+    public static IReadOnlyList<string> GetCurrentRepairRuleIds(
+        AssetScope scope,
+        IEnumerable<string>? artifactPaths) =>
+        GetRepairRuleIdsThroughRevision(scope, CurrentRevision, artifactPaths);
+
+    public static IReadOnlyList<string> GetMissingRepairRuleIds(
+        TextureBuildReport? report,
+        AssetScope scope)
+        => GetMissingRepairRuleIds(report, scope, artifactPaths: null);
+
+    public static IReadOnlyList<string> GetMissingRepairRuleIds(
+        TextureBuildReport? report,
+        AssetScope scope,
+        IEnumerable<string>? artifactPaths)
+    {
+        var recorded = GetRecordedRepairRuleIds(report, scope)
+            .ToHashSet(StringComparer.Ordinal);
+        return GetCurrentRepairRuleIds(scope, artifactPaths)
+            .Where(ruleId => !recorded.Contains(ruleId))
+            .ToArray();
+    }
+
+    public static IReadOnlyList<string> GetRecordedRepairRuleIds(
+        TextureBuildReport? report,
+        AssetScope scope)
+    {
+        if (report?.AppliedRepairRuleIds is { Count: > 0 } recorded)
+        {
+            return recorded
+                .Where(ruleId => !string.IsNullOrWhiteSpace(ruleId))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+        }
+
+        return GetRepairRuleIdsThroughRevision(
+            scope,
+            report?.TexturePipelineRevision ?? 0,
+            artifactPaths: null);
+    }
+
+    private static IReadOnlyList<string> GetRepairRuleIdsThroughRevision(
+        AssetScope scope,
+        int revision,
+        IEnumerable<string>? artifactPaths)
+    {
+        var rules = new List<string>(3);
+        if (revision >= 1
+            && scope is AssetScope.CharactersAndEquipmentOnly
+                or AssetScope.WorldCharactersAndEquipment)
+        {
+            rules.Add(CharacterEquipmentCoverageRuleId);
+        }
+
+        if (revision >= 3
+            && scope is AssetScope.CharactersAndEquipmentOnly
+                or AssetScope.WorldCharactersAndEquipment
+                or AssetScope.WorldOnly
+                or AssetScope.SelectedZone)
+        {
+            rules.Add(CutoutMipSafetyRuleId);
+        }
+
+        var paths = artifactPaths?.ToArray();
+        var hasTopLevelSkyArchive = paths?.Any(path =>
+            Path.GetFileName(path).Equals("sky.s3d", StringComparison.OrdinalIgnoreCase)
+            && !path.Trim().Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
+                .Contains(Path.DirectorySeparatorChar)) == true;
+        var hasProtectedLooseCelestial = paths?.Any(path =>
+            CelestialTextureSafetyPolicy.GetPreservedReason(
+                path,
+                Path.GetFileName(path)) is not null) == true;
+        var celestialApplies = scope switch
+        {
+            AssetScope.WorldCharactersAndEquipment or AssetScope.WorldOnly => true,
+            AssetScope.SelectedZone => hasTopLevelSkyArchive,
+            AssetScope.SpellEffectsOnly => paths is null || hasProtectedLooseCelestial,
+            _ => false
+        };
+        if (revision >= 4 && celestialApplies)
+        {
+            rules.Add(CelestialSkySafetyRuleId);
+        }
+
+        return rules.ToArray();
     }
 }
 
@@ -101,15 +233,22 @@ public sealed record TextureBuildReport(
     public const int CurrentSchemaVersion = 3;
     public DateTimeOffset? StartedUtc { get; init; }
     public double? DurationSeconds { get; init; }
+    public bool WasResumed { get; init; }
+    public int ResumedArtifacts { get; init; }
     public bool IsIncrementalRepair { get; init; }
     public bool IsSourceMismatchRepair { get; init; }
+    public bool IsSafetyRepair { get; init; }
+    // Retained so reports written before the generic safety-repair terminology
+    // and older app versions continue to recognize the cutout upgrade.
     public bool IsCutoutMipRepair { get; init; }
     public bool IsManualTextureRevision { get; init; }
     public string? BaselineBuildId { get; init; }
     public int BaselineTexturePipelineRevision { get; init; }
     public int ReusedArtifacts { get; init; }
     public int RebuiltArtifacts { get; init; }
+    public int SafetyUpgradedArtifacts { get; init; }
     public int TexturePipelineRevision { get; init; }
+    public IReadOnlyList<string> AppliedRepairRuleIds { get; init; } = [];
 }
 
 internal sealed class TextureBuildCounter
@@ -208,4 +347,99 @@ internal sealed class TextureBuildCounter
             };
         }
     }
+
+    internal TextureBuildCounterCheckpoint CaptureCheckpoint()
+    {
+        lock (gate)
+        {
+            return new TextureBuildCounterCheckpoint(
+                discovered,
+                enhanced,
+                preserved,
+                reused,
+                fallback,
+                sourceBytes,
+                enhancedBytes,
+                new Dictionary<string, int>(reasons, StringComparer.OrdinalIgnoreCase),
+                warnings.ToArray());
+        }
+    }
+
+    internal TextureBuildCounterCheckpoint CaptureDelta(TextureBuildCounterCheckpoint before)
+    {
+        ArgumentNullException.ThrowIfNull(before);
+        var after = CaptureCheckpoint();
+        var reasonDelta = after.PreservedReasons.ToDictionary(
+            pair => pair.Key,
+            pair => checked(pair.Value - before.PreservedReasons.GetValueOrDefault(pair.Key)),
+            StringComparer.OrdinalIgnoreCase);
+        var appendedWarnings = after.Warnings
+            .Skip(Math.Min(before.Warnings.Count, after.Warnings.Count))
+            .ToArray();
+        return new TextureBuildCounterCheckpoint(
+            checked(after.DiscoveredTextures - before.DiscoveredTextures),
+            checked(after.EnhancedTextures - before.EnhancedTextures),
+            checked(after.PreservedTextures - before.PreservedTextures),
+            checked(after.ReusedTextures - before.ReusedTextures),
+            checked(after.FallbackTextures - before.FallbackTextures),
+            checked(after.SourceTextureBytes - before.SourceTextureBytes),
+            checked(after.EnhancedTextureBytes - before.EnhancedTextureBytes),
+            reasonDelta,
+            appendedWarnings);
+    }
+
+    internal void RestoreCheckpoint(TextureBuildCounterCheckpoint contribution)
+    {
+        ValidateCheckpoint(contribution);
+        lock (gate)
+        {
+            discovered = checked(discovered + contribution.DiscoveredTextures);
+            enhanced = checked(enhanced + contribution.EnhancedTextures);
+            preserved = checked(preserved + contribution.PreservedTextures);
+            reused = checked(reused + contribution.ReusedTextures);
+            fallback = checked(fallback + contribution.FallbackTextures);
+            sourceBytes = checked(sourceBytes + contribution.SourceTextureBytes);
+            enhancedBytes = checked(enhancedBytes + contribution.EnhancedTextureBytes);
+            foreach (var pair in contribution.PreservedReasons)
+            {
+                reasons[pair.Key] = checked(reasons.GetValueOrDefault(pair.Key) + pair.Value);
+            }
+
+            foreach (var warning in contribution.Warnings)
+            {
+                if (warnings.Count < 100)
+                {
+                    warnings.Add(warning);
+                }
+            }
+        }
+    }
+
+    private static void ValidateCheckpoint(TextureBuildCounterCheckpoint contribution)
+    {
+        ArgumentNullException.ThrowIfNull(contribution);
+        if (contribution.DiscoveredTextures < 0
+            || contribution.EnhancedTextures < 0
+            || contribution.PreservedTextures < 0
+            || contribution.ReusedTextures < 0
+            || contribution.FallbackTextures < 0
+            || contribution.SourceTextureBytes < 0
+            || contribution.EnhancedTextureBytes < 0
+            || contribution.PreservedReasons.Any(pair => string.IsNullOrWhiteSpace(pair.Key) || pair.Value < 0)
+            || contribution.Warnings.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new InvalidDataException("A staged-build statistics checkpoint is invalid.");
+        }
+    }
 }
+
+internal sealed record TextureBuildCounterCheckpoint(
+    int DiscoveredTextures,
+    int EnhancedTextures,
+    int PreservedTextures,
+    int ReusedTextures,
+    int FallbackTextures,
+    long SourceTextureBytes,
+    long EnhancedTextureBytes,
+    IReadOnlyDictionary<string, int> PreservedReasons,
+    IReadOnlyList<string> Warnings);
