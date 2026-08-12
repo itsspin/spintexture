@@ -7,13 +7,12 @@
         <SolidColorBrush x:Key="Panel" Color="#111318" />
         <SolidColorBrush x:Key="PanelRaised" Color="#171A20" />
         <SolidColorBrush x:Key="PanelInset" Color="#0C0E12" />
-        <SolidColorBrush x:Key="Border" Color="#292E36" />
+        <SolidColorBrush x:Key="Border" Color="#303640" />
         <SolidColorBrush x:Key="Text" Color="#F4F0E7" />
-        <SolidColorBrush x:Key="Muted" Color="#A6A8AD" />
+        <SolidColorBrush x:Key="Muted" Color="#B8BBC1" />
         <SolidColorBrush x:Key="Accent" Color="#FF7A32" />
         <SolidColorBrush x:Key="Safe" Color="#65D6A6" />
         <SolidColorBrush x:Key="Warning" Color="#F5C76B" />
-        <SolidColorBrush x:Key="Danger" Color="#FF747A" />
 
         <Style TargetType="TextBlock">
             <Setter Property="Foreground" Value="{StaticResource Text}" />
@@ -22,9 +21,10 @@
         <Style TargetType="Button">
             <Setter Property="Background" Value="#242830" />
             <Setter Property="Foreground" Value="{StaticResource Text}" />
-            <Setter Property="BorderBrush" Value="#3A414B" />
+            <Setter Property="BorderBrush" Value="#46505C" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="Padding" Value="14,9" />
+            <Setter Property="Padding" Value="16,10" />
+            <Setter Property="FontSize" Value="12" />
             <Setter Property="FontWeight" Value="SemiBold" />
             <Setter Property="Margin" Value="0,0,9,0" />
             <Setter Property="Cursor" Value="Hand" />
@@ -42,7 +42,7 @@
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="Surface" Property="Background" Value="#303640" />
-                                <Setter TargetName="Surface" Property="BorderBrush" Value="#56606E" />
+                                <Setter TargetName="Surface" Property="BorderBrush" Value="#697583" />
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
                                 <Setter TargetName="Surface" Property="Background" Value="#1C1F25" />
@@ -58,7 +58,7 @@
 
         <Style x:Key="PresetItemStyle" TargetType="ListBoxItem">
             <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-            <Setter Property="Margin" Value="0,0,10,0" />
+            <Setter Property="Margin" Value="0,0,12,0" />
             <Setter Property="Padding" Value="0" />
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
@@ -66,20 +66,37 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="ListBoxItem">
-                        <Border x:Name="Card"
-                                Background="{StaticResource PanelRaised}"
-                                BorderBrush="{StaticResource Border}"
-                                BorderThickness="1" CornerRadius="8" Padding="16">
-                            <ContentPresenter />
+                        <Border x:Name="Card" Background="{StaticResource PanelRaised}"
+                                BorderBrush="{StaticResource Border}" BorderThickness="1"
+                                CornerRadius="10" Padding="20">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Border x:Name="SelectionDot" Width="24" Height="24" CornerRadius="12"
+                                        Background="#101217" BorderBrush="#59616E" BorderThickness="2"
+                                        Margin="0,1,15,0" VerticalAlignment="Top">
+                                    <TextBlock x:Name="SelectionCheck" Text="&#xE73E;"
+                                               FontFamily="Segoe Fluent Icons" FontSize="12"
+                                               Foreground="#090A0D" Visibility="Collapsed"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
+                                <ContentPresenter Grid.Column="1" />
+                            </Grid>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Card" Property="BorderBrush" Value="#59616E" />
+                                <Setter TargetName="Card" Property="BorderBrush" Value="#66717E" />
                                 <Setter TargetName="Card" Property="Background" Value="#1B1F26" />
                             </Trigger>
                             <Trigger Property="IsSelected" Value="True">
                                 <Setter TargetName="Card" Property="BorderBrush" Value="{StaticResource Accent}" />
-                                <Setter TargetName="Card" Property="Background" Value="#251812" />
+                                <Setter TargetName="Card" Property="BorderThickness" Value="2" />
+                                <Setter TargetName="Card" Property="Background" Value="#211711" />
+                                <Setter TargetName="SelectionDot" Property="Background" Value="{StaticResource Accent}" />
+                                <Setter TargetName="SelectionDot" Property="BorderBrush" Value="{StaticResource Accent}" />
+                                <Setter TargetName="SelectionCheck" Property="Visibility" Value="Visible" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter TargetName="Card" Property="Opacity" Value="0.45" />
@@ -91,88 +108,66 @@
         </Style>
     </UserControl.Resources>
 
-    <Grid Margin="24">
+    <Grid Margin="28,22,28,24">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <Grid>
+        <Grid MaxWidth="1480" HorizontalAlignment="Stretch">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel>
                 <TextBlock Text="NATIVE GRAPHICS" Foreground="{StaticResource Accent}"
-                           FontSize="10" FontWeight="Bold" />
-                <TextBlock Text="Cinematic lighting, built into EQL"
-                           FontSize="26" FontWeight="SemiBold" Margin="0,5,0,0" />
-                <TextBlock Text="Enable EverQuest Legends' own stencil shadows, maximum native shadow range, and lighting path. No ReShade, shader DLL, hook, overlay, or injector is installed."
-                           Foreground="{StaticResource Muted}" FontSize="12" Margin="0,7,0,0"
-                           TextWrapping="Wrap" MaxWidth="720" />
+                           FontSize="11" FontWeight="Bold" />
+                <TextBlock Text="Make EQL's built-in lighting easier to use"
+                           FontSize="28" FontWeight="SemiBold" Margin="0,5,0,0" />
+                <TextBlock Text="Choose a safe starting preset or turn on the full native lighting path. SpinTexture previews every change and keeps a verified restore point."
+                           Foreground="{StaticResource Muted}" FontSize="13" Margin="0,7,0,0"
+                           TextWrapping="Wrap" MaxWidth="850" LineHeight="19" />
             </StackPanel>
-            <StackPanel Grid.Column="1" HorizontalAlignment="Right">
-                <Border Background="#17352B" BorderBrush="#2A6A55" BorderThickness="1"
-                        CornerRadius="5" Padding="10,5">
-                    <TextBlock Text="100% NATIVE / NO INJECTOR" Foreground="{StaticResource Safe}"
-                               FontSize="9" FontWeight="Bold" />
-                </Border>
-                <Button Content="Back to Build" Click="Close_Click" Margin="0,10,0,0" Padding="14,7" />
-            </StackPanel>
+            <Border Grid.Column="1" Background="#17352B" BorderBrush="#2A6A55"
+                    BorderThickness="1" CornerRadius="6" Padding="11,6"
+                    VerticalAlignment="Top" Margin="20,0,0,0">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="&#xE73E;" FontFamily="Segoe Fluent Icons"
+                               Foreground="{StaticResource Safe}" FontSize="12" Margin="0,0,7,0" />
+                    <TextBlock Text="EQL NATIVE · NO INJECTOR" Foreground="{StaticResource Safe}"
+                               FontSize="10" FontWeight="Bold" />
+                </StackPanel>
+            </Border>
         </Grid>
 
-        <ScrollViewer Grid.Row="1" Margin="0,20,0,18" VerticalScrollBarVisibility="Auto">
-            <StackPanel>
+        <ScrollViewer Grid.Row="1" Margin="0,22,0,18" VerticalScrollBarVisibility="Auto">
+            <StackPanel MaxWidth="1480" HorizontalAlignment="Stretch">
                 <Border Background="{StaticResource Panel}" BorderBrush="{StaticResource Border}"
-                        BorderThickness="1" CornerRadius="9" Padding="16">
+                        BorderThickness="1" CornerRadius="10" Padding="18">
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
-                        <Border Width="42" Height="42" CornerRadius="21" Background="#19372F">
+                        <Border Width="46" Height="46" CornerRadius="23" Background="#19372F">
                             <TextBlock Text="&#xE9D9;" FontFamily="Segoe Fluent Icons"
-                                       Foreground="{StaticResource Safe}" FontSize="19"
+                                       Foreground="{StaticResource Safe}" FontSize="20"
                                        HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
-                        <StackPanel Grid.Column="1" Margin="13,0,20,0" VerticalAlignment="Center">
-                            <TextBlock Text="CURRENT STATE" Foreground="{StaticResource Muted}"
-                                       FontSize="9" FontWeight="Bold" />
-                            <TextBlock Text="{Binding CurrentStateTitle}" FontSize="16"
+                        <StackPanel Grid.Column="1" Margin="15,0,24,0" VerticalAlignment="Center">
+                            <TextBlock Text="ACTIVE NOW" Foreground="{StaticResource Muted}"
+                                       FontSize="10" FontWeight="Bold" />
+                            <TextBlock Text="{Binding CurrentStateTitle}" FontSize="18"
                                        FontWeight="SemiBold" Margin="0,3,0,0" />
                             <TextBlock Text="{Binding CurrentStateSummary}" Foreground="{StaticResource Muted}"
-                                       FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap" />
-                            <ItemsControl ItemsSource="{Binding CurrentValues}" Margin="0,7,0,0">
-                                <ItemsControl.ItemsPanel>
-                                    <ItemsPanelTemplate>
-                                        <WrapPanel />
-                                    </ItemsPanelTemplate>
-                                </ItemsControl.ItemsPanel>
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <Border Background="#0D1514" BorderBrush="#263D37" BorderThickness="1"
-                                                CornerRadius="4" Padding="7,3" Margin="0,0,6,4">
-                                            <StackPanel Orientation="Horizontal">
-                                                <TextBlock Text="{Binding QualifiedKey}" Foreground="#91A39D"
-                                                           FontFamily="Consolas" FontSize="8" />
-                                                <TextBlock Text=" = " Foreground="#596D67" FontSize="8" />
-                                                <TextBlock Text="{Binding Value}" Foreground="{StaticResource Safe}"
-                                                           FontFamily="Consolas" FontSize="8" FontWeight="Bold" />
-                                            </StackPanel>
-                                        </Border>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
-                            <TextBlock Text="{Binding SettingsPath}" Foreground="#7F8792"
-                                       FontFamily="Consolas" FontSize="9" Margin="0,5,0,0"
-                                       TextTrimming="CharacterEllipsis" />
+                                       FontSize="12" Margin="0,4,0,0" TextWrapping="Wrap" LineHeight="18" />
                             <TextBlock Text="{Binding RestoreAvailabilityText}" Foreground="{StaticResource Safe}"
-                                       FontSize="9" Margin="0,4,0,0" />
+                                       FontSize="11" Margin="0,7,0,0" />
                         </StackPanel>
-                        <Border Grid.Column="2" VerticalAlignment="Top"
-                                BorderThickness="1" CornerRadius="4" Padding="9,4">
+                        <Border Grid.Column="2" VerticalAlignment="Top" BorderThickness="1"
+                                CornerRadius="5" Padding="10,5">
                             <Border.Style>
                                 <Style TargetType="Border">
                                     <Setter Property="Background" Value="#202A25" />
@@ -185,7 +180,7 @@
                                     </Style.Triggers>
                                 </Style>
                             </Border.Style>
-                            <TextBlock Text="{Binding CurrentStateBadge}" FontSize="9" FontWeight="Bold">
+                            <TextBlock Text="{Binding CurrentStateBadge}" FontSize="10" FontWeight="Bold">
                                 <TextBlock.Style>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="Foreground" Value="{StaticResource Safe}" />
@@ -201,8 +196,22 @@
                     </Grid>
                 </Border>
 
-                <TextBlock Text="CHOOSE A PRESET" Foreground="{StaticResource Accent}"
-                           FontSize="10" FontWeight="Bold" Margin="0,18,0,8" />
+                <Grid Margin="0,22,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Border Width="28" Height="28" CornerRadius="14" Background="#362116">
+                        <TextBlock Text="1" Foreground="{StaticResource Accent}" FontWeight="Bold"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <StackPanel Grid.Column="1" Margin="10,-1,0,0">
+                        <TextBlock Text="Choose the look you want" FontSize="18" FontWeight="SemiBold" />
+                        <TextBlock Text="Balanced is the recommended starting point. Cinematic enables every verified native feature and costs more GPU performance."
+                                   Foreground="{StaticResource Muted}" FontSize="12" Margin="0,3,0,0" />
+                    </StackPanel>
+                </Grid>
+
                 <ListBox ItemsSource="{Binding Presets}" SelectedItem="{Binding SelectedPreset}"
                          ItemContainerStyle="{StaticResource PresetItemStyle}"
                          Background="Transparent" BorderThickness="0"
@@ -216,141 +225,144 @@
                         <DataTemplate>
                             <StackPanel>
                                 <Grid>
-                                    <TextBlock Text="{Binding Eyebrow}" Foreground="{StaticResource Accent}"
-                                               FontSize="9" FontWeight="Bold" />
-                                    <Border HorizontalAlignment="Right" Padding="7,3" CornerRadius="4"
+                                    <TextBlock Text="{Binding Name}" FontSize="20" FontWeight="SemiBold" />
+                                    <Border HorizontalAlignment="Right" Padding="8,4" CornerRadius="4"
                                             Background="#202A25">
-                                        <TextBlock Text="EQL NATIVE" Foreground="{StaticResource Safe}"
-                                                   FontSize="8" FontWeight="Bold" />
+                                        <TextBlock Text="{Binding ChoiceBadge}" Foreground="{StaticResource Safe}"
+                                                   FontSize="9" FontWeight="Bold" />
                                     </Border>
                                 </Grid>
-                                <TextBlock Text="{Binding Name}" FontSize="18" FontWeight="SemiBold"
-                                           Margin="0,8,0,0" />
+                                <TextBlock Text="{Binding FeatureSummary}" Foreground="#E6D4C8"
+                                           FontSize="11" FontWeight="SemiBold" TextWrapping="Wrap"
+                                           Margin="0,9,0,0" />
                                 <TextBlock Text="{Binding Description}" Foreground="{StaticResource Muted}"
-                                           FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0" LineHeight="17" />
-                                <TextBlock Text="{Binding PerformanceNote}" Foreground="{StaticResource Warning}"
-                                           FontSize="10" TextWrapping="Wrap" Margin="0,9,0,0" />
+                                           FontSize="12" TextWrapping="Wrap" Margin="0,7,0,0" LineHeight="18" />
+                                <Border Background="#211B0F" BorderBrush="#4E401F" BorderThickness="1"
+                                        CornerRadius="5" Padding="9,6" Margin="0,12,0,0">
+                                    <TextBlock Text="{Binding PerformanceNote}" Foreground="{StaticResource Warning}"
+                                               FontSize="11" TextWrapping="Wrap" />
+                                </Border>
                             </StackPanel>
                         </DataTemplate>
                     </ListBox.ItemTemplate>
                 </ListBox>
 
-                <Grid Margin="0,16,0,0">
+                <Grid Margin="0,22,0,10">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="12" />
+                        <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
-                    <Border Background="#211B0F" BorderBrush="#5A4822" BorderThickness="1"
-                            CornerRadius="7" Padding="13">
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="&#xE7BA;" FontFamily="Segoe Fluent Icons"
-                                       Foreground="{StaticResource Warning}" FontSize="16" Margin="0,1,10,0" />
-                            <TextBlock Foreground="#E9D7AA" FontSize="10" TextWrapping="Wrap" LineHeight="16">
-                                <Run Text="PERFORMANCE: " FontWeight="Bold" />
-                                <Run Text="Balanced adds native stencil-shadow cost. Cinematic also enables the maximum native shadow range, multipass lighting, post effects, and bloom lighting and may significantly reduce frame rate in dense zones." />
-                            </TextBlock>
-                        </StackPanel>
+                    <Border Width="28" Height="28" CornerRadius="14" Background="#362116">
+                        <TextBlock Text="2" Foreground="{StaticResource Accent}" FontWeight="Bold"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
                     </Border>
-                    <Border Grid.Column="2" Background="#101B22" BorderBrush="#294657" BorderThickness="1"
-                            CornerRadius="7" Padding="13">
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="&#xE9CE;" FontFamily="Segoe Fluent Icons"
-                                       Foreground="#84C8F4" FontSize="16" Margin="0,1,10,0" />
-                            <TextBlock Foreground="#C8DDEB" FontSize="10" TextWrapping="Wrap" LineHeight="16">
-                                <Run Text="SHADOW DISTANCE: " FontWeight="Bold" />
-                                <Run Text="Cinematic sets EQL's verified native Shadow Clip Plane to 100 (maximum); Balanced preserves your original value. This extends cast shadows only. It cannot override zone-authored tree/object culling, and distant nighttime objects may simply be outside local light range." />
-                            </TextBlock>
-                        </StackPanel>
-                    </Border>
+                    <StackPanel Grid.Column="1" Margin="10,-1,0,0">
+                        <TextBlock Text="Review what will change" FontSize="18" FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding PlanSummary}" Foreground="{StaticResource Muted}"
+                                   FontSize="12" Margin="0,3,0,0" />
+                    </StackPanel>
                 </Grid>
 
-                <Border Background="#121A24" BorderBrush="#30465D" BorderThickness="1"
-                        CornerRadius="7" Padding="13" Margin="0,12,0,0">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto" />
-                            <ColumnDefinition Width="*" />
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Text="&#xE950;" FontFamily="Segoe Fluent Icons"
-                                   Foreground="#84C8F4" FontSize="17" Margin="0,1,11,0" />
-                        <StackPanel Grid.Column="1">
-                            <TextBlock Text="OPTIONAL GPU FINISH — MANUAL PER-GAME PROFILE"
-                                       Foreground="#9CD2F4" FontSize="9" FontWeight="Bold" />
-                            <TextBlock Foreground="#C8DDEB" FontSize="10" TextWrapping="Wrap"
-                                       LineHeight="16" Margin="0,5,0,0">
-                                <Run Text="AMD Adrenalin: add eqgame.exe and try Vivid Gaming or Dynamic Contrast with Radeon Image Sharpening.  " />
-                                <Run Text="NVIDIA app: when EverQuest is supported, try RTX Dynamic Vibrance or RTX HDR on an HDR display.  " />
-                                <Run Text="SpinTexture does not silently write undocumented driver profiles. Driver filters process the finished frame, so they can also affect UI colors and sharpness; they cannot create correct live depth of field or geometry-cast shadows." />
-                            </TextBlock>
-                        </StackPanel>
-                    </Grid>
-                </Border>
-
                 <Border Background="{StaticResource Panel}" BorderBrush="{StaticResource Border}"
-                        BorderThickness="1" CornerRadius="9" Padding="16" Margin="0,16,0,0">
+                        BorderThickness="1" CornerRadius="10" Padding="16">
                     <StackPanel>
-                        <Grid>
-                            <StackPanel>
-                                <TextBlock Text="EXACT PLANNED CHANGES" Foreground="{StaticResource Accent}"
-                                           FontSize="10" FontWeight="Bold" />
-                                <TextBlock Text="{Binding PlanSummary}" Foreground="{StaticResource Muted}"
-                                           FontSize="10" Margin="0,4,0,0" />
-                            </StackPanel>
-                            <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center"
-                                       Text="eqclient.ini only" Foreground="{StaticResource Safe}"
-                                       FontSize="9" FontWeight="Bold" />
-                        </Grid>
-                        <ItemsControl ItemsSource="{Binding PlannedChanges}" Margin="0,11,0,0">
+                        <ItemsControl ItemsSource="{Binding PlannedChanges}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
-                                    <Border Background="{StaticResource PanelInset}" BorderBrush="{StaticResource Border}"
-                                            BorderThickness="1" CornerRadius="5" Padding="11" Margin="0,0,0,6">
-                                        <Grid>
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="1.1*" />
-                                                <ColumnDefinition Width="0.75*" />
-                                                <ColumnDefinition Width="Auto" />
-                                                <ColumnDefinition Width="0.75*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="{Binding QualifiedKey}" FontFamily="Consolas"
-                                                       FontSize="10" FontWeight="SemiBold" />
-                                            <TextBlock Grid.Column="1" Text="{Binding CurrentValue}"
-                                                       Foreground="{StaticResource Muted}" FontFamily="Consolas"
-                                                       FontSize="10" HorizontalAlignment="Right" />
-                                            <TextBlock Grid.Column="2" Text="  &#x2192;  " Foreground="{StaticResource Accent}" />
-                                            <TextBlock Grid.Column="3" Text="{Binding PlannedValue}"
-                                                       Foreground="{StaticResource Safe}" FontFamily="Consolas"
-                                                       FontSize="10" FontWeight="Bold" />
-                                            <Border Grid.Column="4" Background="#263027" CornerRadius="3"
-                                                    Padding="6,2" Margin="8,0,0,0">
-                                                <TextBlock Text="{Binding ChangeBadge}" Foreground="{StaticResource Safe}"
-                                                           FontSize="8" FontWeight="Bold" />
-                                            </Border>
-                                        </Grid>
-                                    </Border>
+                                    <Grid Margin="0,0,0,8" Background="{StaticResource PanelInset}">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="220" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding DisplayName}" FontSize="12"
+                                                   FontWeight="SemiBold" Margin="12,10" />
+                                        <TextBlock Grid.Column="1" Text="{Binding CurrentDisplayValue}"
+                                                   Foreground="{StaticResource Muted}" FontSize="12"
+                                                   HorizontalAlignment="Right" Margin="12,10" />
+                                        <TextBlock Grid.Column="2" Text="&#x2192;" Foreground="{StaticResource Accent}"
+                                                   FontSize="14" Margin="8,9" />
+                                        <TextBlock Grid.Column="3" Text="{Binding PlannedDisplayValue}"
+                                                   Foreground="{StaticResource Safe}" FontSize="12"
+                                                   FontWeight="Bold" Margin="12,10" />
+                                    </Grid>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
                         <Border Background="#13211C" BorderBrush="#285442" BorderThickness="1"
-                                CornerRadius="5" Padding="11" Margin="0,5,0,0">
-                            <TextBlock Foreground="#BDEBD9" FontSize="10" TextWrapping="Wrap">
-                                Only the managed native graphics keys shown above are touched. No texture-pack, UI-layout, nameplate, font, DLL, or game-archive file is modified. Cinematic uses EQL's own shadow-distance, post-effects, and bloom paths. Depth of field is not added because this client does not expose a native DOF renderer or supported control.
+                                CornerRadius="6" Padding="12" Margin="0,4,0,0">
+                            <TextBlock Foreground="#C6EBDD" FontSize="11" TextWrapping="Wrap" LineHeight="17">
+                                <Run Text="Only eqclient.ini is changed. " FontWeight="Bold" />
+                                <Run Text="Texture packs, game archives, UI files, fonts, DLLs, and the game executable are untouched. SpinTexture backs up the managed values before applying." />
                             </TextBlock>
                         </Border>
                     </StackPanel>
                 </Border>
+
+                <Expander Margin="0,14,0,0" Foreground="{StaticResource Text}">
+                    <Expander.Header>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE713;" FontFamily="Segoe Fluent Icons"
+                                       Foreground="#8CCDF5" FontSize="14" Margin="0,0,8,0" />
+                            <TextBlock Text="Technical details and optional AMD/NVIDIA finishing"
+                                       FontSize="12" FontWeight="SemiBold" />
+                        </StackPanel>
+                    </Expander.Header>
+                    <Border Background="#101820" BorderBrush="#2C4658" BorderThickness="1"
+                            CornerRadius="8" Padding="15" Margin="0,10,0,0">
+                        <StackPanel>
+                            <TextBlock Text="Current managed values" Foreground="#9CD2F4"
+                                       FontSize="11" FontWeight="Bold" />
+                            <ItemsControl ItemsSource="{Binding CurrentValues}" Margin="0,8,0,0">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Background="#0D1514" BorderBrush="#263D37"
+                                                BorderThickness="1" CornerRadius="5" Padding="8,5"
+                                                Margin="0,0,7,6">
+                                            <TextBlock FontSize="10">
+                                                <Run Text="{Binding DisplayName}" Foreground="#B8C5C0" />
+                                                <Run Text="  " />
+                                                <Run Text="{Binding DisplayValue}" Foreground="{StaticResource Safe}"
+                                                     FontWeight="Bold" />
+                                            </TextBlock>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <TextBlock Text="{Binding SettingsPath}" Foreground="#8D96A2"
+                                       FontFamily="Consolas" FontSize="10" TextTrimming="CharacterEllipsis" />
+                            <Separator Background="#2C4658" Margin="0,13,0,12" />
+                            <TextBlock Foreground="#C8DDEB" FontSize="11" TextWrapping="Wrap" LineHeight="18">
+                                <Run Text="Shadow distance: " FontWeight="Bold" />
+                                <Run Text="Cinematic sets EQL's verified Shadow Clip Plane to 100 (maximum). This extends cast shadows only; it cannot change zone-authored tree or object visibility." />
+                            </TextBlock>
+                            <TextBlock Foreground="#C8DDEB" FontSize="11" TextWrapping="Wrap"
+                                       LineHeight="18" Margin="0,8,0,0">
+                                <Run Text="Optional driver finish: " FontWeight="Bold" />
+                                <Run Text="AMD Adrenalin can add Display Color Enhancement and Radeon Image Sharpening. NVIDIA can offer RTX Dynamic Vibrance or RTX HDR for supported games. These manual filters process the finished frame and may also affect the UI. SpinTexture does not write driver profiles." />
+                            </TextBlock>
+                            <TextBlock Foreground="#C8DDEB" FontSize="11" TextWrapping="Wrap"
+                                       LineHeight="18" Margin="0,8,0,0">
+                                <Run Text="Depth of field: " FontWeight="Bold" />
+                                <Run Text="Not enabled because this EQL client does not expose a supported native depth-of-field control." />
+                            </TextBlock>
+                        </StackPanel>
+                    </Border>
+                </Expander>
             </StackPanel>
         </ScrollViewer>
 
-        <Grid Grid.Row="2">
+        <Grid Grid.Row="2" MaxWidth="1480" HorizontalAlignment="Stretch">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel Margin="0,0,18,0">
-                <Border x:Name="StatusBorder" BorderThickness="1" CornerRadius="5" Padding="10,7">
+                <Border BorderThickness="1" CornerRadius="6" Padding="11,8">
                     <Border.Style>
                         <Style TargetType="Border">
                             <Setter Property="Background" Value="#111820" />
@@ -364,17 +376,28 @@
                         </Style>
                     </Border.Style>
                     <TextBlock Text="{Binding StatusText}" Foreground="#BED9EA"
-                               FontSize="10" TextWrapping="Wrap" />
+                               FontSize="11" TextWrapping="Wrap" />
                 </Border>
-                <ProgressBar Height="4" Margin="0,8,0,0" IsIndeterminate="{Binding IsBusy}" />
+                <ProgressBar Height="4" Margin="0,7,0,0" IsIndeterminate="{Binding IsBusy}" />
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
-                <Button Content="Cancel" Command="{Binding CancelCommand}" />
+                <Button Content="Cancel" Command="{Binding CancelCommand}">
+                    <Button.Style>
+                        <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsBusy}" Value="True">
+                                    <Setter Property="Visibility" Value="Visible" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Button.Style>
+                </Button>
                 <Button Content="Refresh" Command="{Binding RefreshCommand}" />
-                <Button Content="Restore Original" Command="{Binding RestoreCommand}"
+                <Button Content="Restore Previous Settings" Command="{Binding RestoreCommand}"
                         Background="#29313B" BorderBrush="#586474" />
                 <Button Content="{Binding ApplyButtonText}" Command="{Binding ApplyCommand}"
-                        Margin="0" Background="#9B3B16" BorderBrush="#E2672E" Padding="18,10" />
+                        Margin="0" Background="#9B3B16" BorderBrush="#E2672E" Padding="20,11" />
             </StackPanel>
         </Grid>
     </Grid>
