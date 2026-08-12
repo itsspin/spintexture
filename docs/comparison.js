@@ -2,7 +2,7 @@
 
 document.querySelectorAll("[data-comparison]").forEach((comparison) => {
   const range = comparison.querySelector("[data-comparison-range]");
-  const output = document.querySelector("[data-position-output]");
+  const output = comparison.closest(".comparison-card")?.querySelector("[data-position-output]");
 
   if (!(range instanceof HTMLInputElement)) {
     return;
