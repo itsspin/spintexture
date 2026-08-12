@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Windows.Threading;
 using SpinTexture.App.Services;
 using SpinTexture.Core.Models;
 using SpinTexture.Core.Pipeline;
@@ -38,6 +40,18 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private string _installHealthText = "No enhanced pack is active";
     private string? _previewManifestPath;
     private InstallHealthReport? _installHealth;
+    private readonly DispatcherTimer _buildProgressTimer;
+    private readonly Stopwatch _buildStopwatch = new();
+    private bool _isStagedBuildOperation;
+    private bool _hasEnteredArchiveBuild;
+    private int _buildCompletedArtifacts;
+    private int _buildTotalArtifacts;
+    private double _currentArtifactFraction;
+    private TimeSpan _archiveBuildStartedAt;
+    private bool _stagedBuildSucceeded;
+    private string _overallProgressText = "No overall job is running";
+    private string _progressEtaText = "Choose an asset set to see its estimate";
+    private string _progressCountText = string.Empty;
 
     public MainWindowViewModel(
         IFolderPickerService folderPicker,
@@ -49,6 +63,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _workflow = workflow;
         _dialogs = dialogs;
         _enhancedLauncher = enhancedLauncher;
+        _buildProgressTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromSeconds(1)
+        };
+        _buildProgressTimer.Tick += OnBuildProgressTimerTick;
 
         PresetOptions =
         [
@@ -105,7 +124,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             new ScopeOptionViewModel(AssetScope.SelectedZone, "Selected zone", "Build and validate one zone at a time."),
             new ScopeOptionViewModel(AssetScope.WorldOnly, "World only", "Terrain, architecture, and safe world objects."),
             new ScopeOptionViewModel(AssetScope.CharactersAndEquipmentOnly, "Characters + equipment only", "Race models, armor, weapons, and dedicated wearable-item packs without the world."),
-            new ScopeOptionViewModel(AssetScope.WorldCharactersAndEquipment, "World + characters", "Adds supported character and equipment textures."),
+            new ScopeOptionViewModel(
+                AssetScope.WorldCharactersAndEquipment,
+                "World + characters + equipment",
+                "World textures plus playable races, mobs, armor, weapons, and verified equipment materials."),
             new ScopeOptionViewModel(
                 AssetScope.SpellEffectsOnly,
                 "Spell effects",
@@ -259,6 +281,24 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         get => _progressValue;
         private set => SetProperty(ref _progressValue, value);
+    }
+
+    public string OverallProgressText
+    {
+        get => _overallProgressText;
+        private set => SetProperty(ref _overallProgressText, value);
+    }
+
+    public string ProgressEtaText
+    {
+        get => _progressEtaText;
+        private set => SetProperty(ref _progressEtaText, value);
+    }
+
+    public string ProgressCountText
+    {
+        get => _progressCountText;
+        private set => SetProperty(ref _progressCountText, value);
     }
 
     public bool IsBusy
@@ -584,6 +624,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         const string operation = "STAGED BUILD";
         BeginOperation(operation, "Preparing immutable staged output");
+        BeginStagedBuildProgress();
         AddLog("SAFE", "Started staged-pack workflow. The live client remains immutable.");
 
         string? previewToOpenAfterBuild = null;
@@ -637,6 +678,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             HasStagedPack = _workflow.HasStagedPack(InstallPath);
             await RefreshInstallHealthAsync(cancellationToken).ConfigureAwait(true);
             AddLog("NEXT", "Review the previews, close EverQuest and LaunchPad, then install the staged pack. Installation reuses this output without rerunning AI.");
+            _stagedBuildSucceeded = true;
         }
         catch (OperationCanceledException)
         {
@@ -665,6 +707,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
         finally
         {
+            EndStagedBuildProgress();
             EndOperation();
             if (previewToOpenAfterBuild is not null)
             {
@@ -820,6 +863,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         CurrentItem = message;
         ProgressValue = 0;
         StatusText = message;
+        OverallProgressText = "Overall progress";
+        ProgressEtaText = string.Empty;
+        ProgressCountText = string.Empty;
     }
 
     private void EndOperation()
@@ -832,9 +878,170 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         CurrentStage = update.Stage.ToUpperInvariant();
         CurrentItem = update.CurrentItem ?? update.Message;
-        ProgressValue = update.Percent;
+        if (_isStagedBuildOperation)
+        {
+            HandleStagedBuildProgress(update);
+        }
+        else
+        {
+            ProgressValue = update.Percent;
+            OverallProgressText = update.Stage;
+            ProgressCountText = update.Total > 0
+                ? $"{Math.Min(update.Completed, update.Total):N0} of {update.Total:N0}"
+                : string.Empty;
+        }
         StatusText = update.Message;
         AddLog("STEP", $"{update.Stage}: {update.Message}");
+    }
+
+    private void BeginStagedBuildProgress()
+    {
+        _isStagedBuildOperation = true;
+        _hasEnteredArchiveBuild = false;
+        _buildCompletedArtifacts = 0;
+        _buildTotalArtifacts = 0;
+        _currentArtifactFraction = 0;
+        _archiveBuildStartedAt = TimeSpan.Zero;
+        _stagedBuildSucceeded = false;
+        _buildStopwatch.Restart();
+        _buildProgressTimer.Start();
+        ProgressValue = 0;
+        OverallProgressText = $"Overall · {SelectedScopeOption.Name}";
+        ProgressCountText = "Planning selected archives";
+        ProgressEtaText = $"Pre-build estimate: {EstimatedTimeText}";
+    }
+
+    private void EndStagedBuildProgress()
+    {
+        _buildProgressTimer.Stop();
+        _buildStopwatch.Stop();
+        if (_isStagedBuildOperation && _stagedBuildSucceeded)
+        {
+            ProgressValue = 100;
+            ProgressCountText = _buildTotalArtifacts > 0
+                ? $"{_buildTotalArtifacts:N0} of {_buildTotalArtifacts:N0} artifacts"
+                : "Complete";
+            ProgressEtaText = $"Finished in {FormatDuration(_buildStopwatch.Elapsed)}";
+        }
+        else if (_isStagedBuildOperation)
+        {
+            ProgressEtaText = $"Stopped after {FormatDuration(_buildStopwatch.Elapsed)}";
+        }
+
+        _isStagedBuildOperation = false;
+    }
+
+    private void HandleStagedBuildProgress(ProgressUpdate update)
+    {
+        if (update.Stage.Equals("Plan", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!_hasEnteredArchiveBuild)
+            {
+                ProgressValue = Math.Max(
+                    ProgressValue,
+                    update.Total <= 0
+                        ? 0
+                        : Math.Clamp(update.Percent * 0.10, 0, 10));
+                ProgressCountText = update.Total > 0
+                    ? $"Planning {Math.Min(update.Completed, update.Total):N0} of {update.Total:N0} candidate archives"
+                    : "Planning selected archives";
+            }
+
+            return;
+        }
+
+        if (update.Stage.Equals("Build", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!_hasEnteredArchiveBuild)
+            {
+                _archiveBuildStartedAt = _buildStopwatch.Elapsed;
+            }
+
+            _hasEnteredArchiveBuild = true;
+            _buildTotalArtifacts = Math.Max(_buildTotalArtifacts, update.Total);
+            _buildCompletedArtifacts = Math.Clamp(update.Completed, 0, Math.Max(0, _buildTotalArtifacts));
+            _currentArtifactFraction = 0;
+            UpdateOverallBuildProgress();
+            return;
+        }
+
+        if (!_hasEnteredArchiveBuild || _buildTotalArtifacts <= 0)
+        {
+            return;
+        }
+
+        if (update.Stage.Equals("Upscale", StringComparison.OrdinalIgnoreCase))
+        {
+            double nestedFraction = update.Total <= 0
+                ? 0
+                : Math.Clamp((double)update.Completed / update.Total, 0, 1);
+            bool validating = update.Message.StartsWith(
+                "Validating enhanced textures",
+                StringComparison.OrdinalIgnoreCase);
+            _currentArtifactFraction = validating
+                ? 0.62 + nestedFraction * 0.33
+                : nestedFraction * 0.58;
+            UpdateOverallBuildProgress();
+        }
+    }
+
+    private void UpdateOverallBuildProgress()
+    {
+        if (_buildTotalArtifacts <= 0)
+        {
+            ProgressValue = Math.Max(ProgressValue, 10);
+            return;
+        }
+
+        double artifactProgress = Math.Clamp(
+            _buildCompletedArtifacts + _currentArtifactFraction,
+            0,
+            _buildTotalArtifacts);
+        ProgressValue = 10 + artifactProgress / _buildTotalArtifacts * 90;
+        int displayArtifact = Math.Min(
+            _buildTotalArtifacts,
+            _buildCompletedArtifacts + (_buildCompletedArtifacts < _buildTotalArtifacts ? 1 : 0));
+        ProgressCountText = _buildCompletedArtifacts >= _buildTotalArtifacts
+            ? $"{_buildTotalArtifacts:N0} of {_buildTotalArtifacts:N0} artifacts"
+            : $"Artifact {displayArtifact:N0} of {_buildTotalArtifacts:N0}";
+        UpdateBuildEtaText();
+    }
+
+    private void OnBuildProgressTimerTick(object? sender, EventArgs e)
+    {
+        if (_isStagedBuildOperation)
+        {
+            UpdateBuildEtaText();
+        }
+    }
+
+    private void UpdateBuildEtaText()
+    {
+        if (!_isStagedBuildOperation)
+        {
+            return;
+        }
+
+        if (!_hasEnteredArchiveBuild || _buildTotalArtifacts <= 0)
+        {
+            ProgressEtaText = $"Pre-build estimate: {EstimatedTimeText} · elapsed {FormatDuration(_buildStopwatch.Elapsed)}";
+            return;
+        }
+
+        double completedWork = _buildCompletedArtifacts + _currentArtifactFraction;
+        var archiveElapsed = _buildStopwatch.Elapsed - _archiveBuildStartedAt;
+        if (completedWork < 1 || archiveElapsed < TimeSpan.FromSeconds(8))
+        {
+            ProgressEtaText = $"Measuring this PC's speed… · elapsed {FormatDuration(_buildStopwatch.Elapsed)}";
+            return;
+        }
+
+        double remainingWork = Math.Max(0, _buildTotalArtifacts - completedWork);
+        var remaining = TimeSpan.FromSeconds(
+            archiveElapsed.TotalSeconds / completedWork * remainingWork);
+        ProgressEtaText = remaining <= TimeSpan.FromSeconds(2)
+            ? $"Finishing… · elapsed {FormatDuration(_buildStopwatch.Elapsed)}"
+            : $"About {FormatDuration(remaining)} remaining · elapsed {FormatDuration(_buildStopwatch.Elapsed)}";
     }
 
     private void Cancel()
@@ -1147,8 +1354,25 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         return $"{value:0.#} {units[unit]}";
     }
 
+    private static string FormatDuration(TimeSpan duration)
+    {
+        if (duration.TotalHours >= 1)
+        {
+            return $"{(int)duration.TotalHours:N0}h {duration.Minutes:D2}m";
+        }
+
+        if (duration.TotalMinutes >= 1)
+        {
+            return $"{(int)duration.TotalMinutes:N0}m {duration.Seconds:D2}s";
+        }
+
+        return $"{Math.Max(0, (int)duration.TotalSeconds):N0}s";
+    }
+
     public void Dispose()
     {
+        _buildProgressTimer.Stop();
+        _buildProgressTimer.Tick -= OnBuildProgressTimerTick;
         AnalyzeCommand.Dispose();
         BuildStagedPackCommand.Dispose();
         InstallLatestPackCommand.Dispose();
