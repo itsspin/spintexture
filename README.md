@@ -1,12 +1,46 @@
-# SpinTexture for EverQuest Legends
+<p align="center">
+  <img src="docs/assets/spintexture-logo.png" alt="SpinTexture logo in ember gold and frost blue over etched obsidian" width="1000">
+</p>
 
-[![CI](https://github.com/itsspin/spintexture/actions/workflows/ci.yml/badge.svg)](https://github.com/itsspin/spintexture/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/itsspin/spintexture?display_name=tag)](https://github.com/itsspin/spintexture/releases/latest)
-[![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-5aa9ff)](https://github.com/itsspin/spintexture/releases/latest)
+<h1 align="center">SpinTexture for EverQuest Legends</h1>
+
+<p align="center">
+  <strong>Original Norrath. Sharper detail. Your art direction.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/itsspin/spintexture/releases/latest"><strong>Download the latest release</strong></a>
+  &nbsp;·&nbsp;
+  <a href="https://itsspin.github.io/spintexture/"><strong>Compare original vs enhanced</strong></a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/itsspin/SPINFOURKAYYY"><strong>4K UI scaling</strong></a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/itsspin/spinips"><strong>SpinUI + Loremaster</strong></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/itsspin/spintexture/actions/workflows/ci.yml"><img src="https://github.com/itsspin/spintexture/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/itsspin/spintexture/releases/latest"><img src="https://img.shields.io/github/v/release/itsspin/spintexture?display_name=tag" alt="Latest release"></a>
+  <a href="https://github.com/itsspin/spintexture/releases/latest"><img src="https://img.shields.io/badge/platform-Windows%20x64-5aa9ff" alt="Windows x64"></a>
+</p>
+
+> [!NOTE]
+> SpinTexture is an independent community project for EverQuest Legends and is not affiliated with or endorsed by Daybreak Game Company.
 
 SpinTexture is a portable Windows texture-pack builder for EverQuest Legends. It reconstructs clearer, higher-resolution world, character, armor, and equipment textures while preserving the original art direction, legacy container formats, alpha behavior, and safe fallbacks. No EverQuest assets are included with the program.
 
 It does **not** inject a DLL, hook Direct3D, install ReShade, modify the game executable, contact game servers, or read credentials. Texture enhancements are staged outside the client, reviewed, then installed as complete verified archives with exact backups. The optional Native Graphics presets make reversible edits to five supported `eqclient.ini` values only.
+
+## Complete your EverQuest Legends setup
+
+SpinTexture focuses on game textures and supported native lighting settings. These optional companion projects improve the interface without overlapping SpinTexture's texture-pack workflow:
+
+| Companion project | Best for |
+| --- | --- |
+| **[SpinFOURKAYYY](https://github.com/itsspin/SPINFOURKAYYY)** | Scales the complete EverQuest Legends interface for 4K, ultrawide, and other high-resolution displays while preserving each character's layout. |
+| **[SpinUI + Spin's Loremaster](https://github.com/itsspin/spinips)** | Rebuilds the native UI with two complete visual themes and adds the non-injecting, log-driven Loremaster encounter and adventure companion. |
+
+Both are separate, optional downloads. Use SpinFOURKAYYY for readable UI scaling and SpinUI for a redesigned interface, layout profiles, and Loremaster.
 
 | Enhanced characters, armor, and equipment | Enhanced world gameplay |
 | --- | --- |
