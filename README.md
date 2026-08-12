@@ -13,6 +13,8 @@
   &nbsp;·&nbsp;
   <a href="https://itsspin.github.io/spintexture/"><strong>Compare original vs enhanced</strong></a>
   &nbsp;·&nbsp;
+  <a href="#quick-start"><strong>Quick start</strong></a>
+  &nbsp;·&nbsp;
   <a href="https://github.com/itsspin/SPINFOURKAYYY"><strong>4K UI scaling</strong></a>
   &nbsp;·&nbsp;
   <a href="https://github.com/itsspin/spinips"><strong>SpinUI + Loremaster</strong></a>
@@ -31,16 +33,9 @@ SpinTexture is a portable Windows texture-pack builder for EverQuest Legends. It
 
 It does **not** inject a DLL, hook Direct3D, install ReShade, modify the game executable, contact game servers, or read credentials. Texture enhancements are staged outside the client, reviewed, then installed as complete verified archives with exact backups. The optional Native Graphics presets make reversible edits to five supported `eqclient.ini` values only.
 
-## Complete your EverQuest Legends setup
-
-SpinTexture focuses on game textures and supported native lighting settings. These optional companion projects improve the interface without overlapping SpinTexture's texture-pack workflow:
-
-| Companion project | Best for |
-| --- | --- |
-| **[SpinFOURKAYYY](https://github.com/itsspin/SPINFOURKAYYY)** | Scales the complete EverQuest Legends interface for 4K, ultrawide, and other high-resolution displays while preserving each character's layout. |
-| **[SpinUI + Spin's Loremaster](https://github.com/itsspin/spinips)** | Rebuilds the native UI with two complete visual themes and adds the non-injecting, log-driven Loremaster encounter and adventure companion. |
-
-Both are separate, optional downloads. Use SpinFOURKAYYY for readable UI scaling and SpinUI for a redesigned interface, layout profiles, and Loremaster.
+| Build | Review | Install | Play | Restore |
+| --- | --- | --- | --- | --- |
+| Choose a zone, the world, characters + equipment, spell effects, or all safe textures. | Compare real source and final compressed textures from your own client. | Check compatible packs; SpinTexture verifies and composes them without rerunning AI. | Start the verified enhanced client without letting LaunchPad replace custom archives. | Return every managed archive and graphics setting to its exact backed-up original. |
 
 | Enhanced characters, armor, and equipment | Enhanced world gameplay |
 | --- | --- |
@@ -56,31 +51,88 @@ Jump directly to the **[characters + equipment comparison](https://itsspin.githu
 
 **[Open the interactive comparison gallery](https://itsspin.github.io/spintexture/)** to drag or swipe between unchanged original client screenshots and the same scenes using SpinTexture-enhanced world, character, and equipment textures. Each comparison is keyboard accessible with the arrow keys. Small pose and background-creature differences come from the live game; no capture was retouched to manufacture detail.
 
-## Download
+## Download and install SpinTexture
 
-Download the latest `SpinTexture-<version>-win-x64.zip` from [GitHub Releases](https://github.com/itsspin/spintexture/releases/latest), verify the accompanying SHA-256 file, and extract the whole folder. Keep `Tools` beside `SpinTexture.exe`.
+1. Open the [latest GitHub release](https://github.com/itsspin/spintexture/releases/latest) and download `SpinTexture-<version>-win-x64.zip` plus its SHA-256 file.
+2. Optional but recommended: verify the ZIP in PowerShell. Replace the filename below with the release you downloaded.
 
-Read [How SpinTexture works](docs/ARCHITECTURE.md) for the processing pipeline and [Safety, installation, and exact restore](docs/SAFETY_AND_RESTORE.md) before a large full-client build.
+   ```powershell
+   Get-FileHash .\SpinTexture-<version>-win-x64.zip -Algorithm SHA256
+   ```
 
-The safe first run is **Selected zone → lavastorm → Texture HD → 2,048 px → Build Staged Pack**. Staging writes only to SpinTexture's managed workspace. If another SpinTexture pack is active, build inputs come from its exact verified original backups rather than the enhanced live archives.
+3. Extract the **entire ZIP** into a normal writable folder. Do not run the app from inside the ZIP.
+4. Keep `SpinTexture.exe` and the included `Tools` folder together. The portable Windows build already includes its .NET runtime and pinned upscaling workers.
+5. Close EverQuest and LaunchPad, then open `SpinTexture.exe`. Choose the EverQuest Legends folder that directly contains `eqgame.exe`.
 
-## Using the app
+No installer, administrator access, Python setup, DLL registration, or graphics injection is required.
 
-1. Make a full copy of the EverQuest Legends directory as an extra precaution.
-2. Extract the complete SpinTexture release folder; keep the `Tools` folder beside `SpinTexture.exe`.
-3. Run `SpinTexture.exe` and choose the directory containing `eqgame.exe`.
-4. Select **Analyze Client**. This is read-only.
-5. For a quick proof, select **Selected zone** and **lavastorm**.
-6. Choose an art direction and click **Build Staged Pack**. Texture Review opens inside the same SpinTexture window when the staged output is ready.
-7. Inspect several rock, ground, structure, vegetation, and effect textures. Start with **Fit**, then choose **1:1** to judge the actual output pixels. New builds also include a complete searchable index of safely editable archive textures. From the Staged Pack Library, choose **Keep original** or a **Redo** art direction for any reviewed entry; SpinTexture creates a new immutable pack and reuses every unselected result.
-8. Choose **Packs** in the top navigation. Filter by Zones, Characters & Equipment, Spell Effects, or World / Combined; check every completed pack you want active, then choose **Install Checked Packs**. SpinTexture verifies and composes disjoint packs without running AI again. Close EverQuest and LaunchPad before installing.
-9. For normal play, use **Play Enhanced EQ** or the install-specific desktop shortcut SpinTexture creates. The shortcut starts SpinTexture in a small verification mode and then starts `eqgame.exe patchme`; it does not upscale or copy archives on each launch.
-10. If this Legends client presents EverQuest's manual login screen, sign in there. Manual `patchme` authentication support can vary and should be tested with the target server/account. SpinTexture never reads, stores, forwards, or reuses a LaunchPad login ticket or account credentials.
-11. Use **Restore** to put the exact backed-up originals back.
+## Quick start
 
-Large completed packs do not have to remain on the Windows system drive. Choose **Storage** in the top navigation, select a parent folder on another internal or external drive, and choose **Move + Verify Pack Library**. SpinTexture creates its own install-specific folder, copies every staged file, verifies SHA-256 hashes, and switches the saved location only after the complete destination matches. Original backups, recovery records, settings, and the game client do not move. If cleanup of the old copy is blocked by Windows, the verified new location remains active and the app reports the old folder that can be removed later.
+Start with one zone. It is the fastest way to confirm visual quality, GPU stability, disk usage, and the enhanced launch path before committing to a large build.
 
-LaunchPad validates asset archives and can restore customized files whenever it starts. Do not use LaunchPad for everyday enhanced play. When the game actually needs an update, restore the originals first, run LaunchPad, then analyze the patched client again. SpinTexture reuses a staged pack only while every source archive still matches its build-time SHA-256; if a patch changed an archive, a safe rebuild against the patched client is required. The credential-free `patchme` route uses EverQuest's manual login path and should be tested with the target server/account before committing to a very large full-game build.
+1. In **Build → Source**, choose the folder containing `eqgame.exe`, then click **Analyze Client (Read Only)**. Analysis inventories archives and textures without changing the client.
+2. Under **Asset Set**, choose **Selected zone**, then select **lavastorm**.
+3. Choose **Texture HD**. It is the recommended faithful-detail route for a first world build.
+4. Set the texture ceiling to **2,048 px** and leave **Generate full mip chains** enabled.
+5. Review the estimated time and disk use, acknowledge the install notice, then click **Build Staged Pack**. Building writes only to SpinTexture's managed pack library; it does not install anything into EverQuest.
+6. Open **Review** when the build completes. Use **Fit** to judge the whole texture and **1:1** to inspect the pixels that will actually be installed. Protected or fidelity-rejected textures remain original by design.
+7. Open **Packs**, check the new Lavastorm pack, and click **Install Checked Packs**. Keep EverQuest and LaunchPad closed while SpinTexture verifies sources, creates exact backups, and atomically installs the selected archives.
+8. Click **Play Enhanced EQ**. SpinTexture performs a quick integrity check and starts the enhanced client; it does not rerun the upscaler or recopy every archive each time you play.
+
+> [!IMPORTANT]
+> LaunchPad validates game archives and can replace enhanced textures with the originals whenever it starts. Use **Play Enhanced EQ** or the install-specific desktop shortcut for normal enhanced play. The shortcut starts `eqgame.exe patchme` through SpinTexture's verifier and never reads, stores, forwards, or reuses LaunchPad credentials or login tickets. Manual-login behavior can vary, so prove this path with the small zone build before creating a full-client pack.
+
+## The five main sections
+
+SpinTexture keeps its normal workflow in one cohesive window. Use the top navigation to move between these sections:
+
+| Section | What to do there |
+| --- | --- |
+| **Build** | Analyze the client, choose an asset set and art direction, set the size ceiling, estimate the job, and create a reusable staged pack. |
+| **Packs** | Filter completed builds, check everything that should be active together, inspect contents, repair an older pack, delete an unneeded pack, and install the checked selection. |
+| **Review** | Compare original and final compressed textures, search archive members, keep a specific original, or redo only selected textures with another art direction. |
+| **Graphics** | Preview and apply supported native Shadows, Advanced Lighting, Post Effects, Bloom, and shadow-distance settings without an injector. |
+| **Storage** | Move the large reusable staged-pack library to another drive with full SHA-256 verification. Backups and recovery records stay in the install profile. |
+
+### Choosing what to build
+
+| Asset set | Recommended use |
+| --- | --- |
+| **Selected zone** | Fast visual trial or one favorite zone. Start here. |
+| **World only** | Terrain, architecture, safe world objects, shared plants, furniture, sky, and zone archives. |
+| **Characters + equipment only** | Playable races, biological/NPC mobs, classic armor, robes, weapons, and verified equipment materials without world archives. |
+| **World + characters** | The exact combined world and character/equipment selection. |
+| **Spell effects** | Conservative supported particle/effect artwork; unsafe animation sheets and technical assets remain original. |
+| **All safe textures** | The broadest classified selection. Use only after reviewing smaller builds and confirming disk headroom. |
+
+### Managing more than one pack
+
+In **Packs**, the checkbox means “include this pack in the next install.” Clicking the rest of a card only focuses it for details, preview, repair, or deletion. You can check a character pack plus several disjoint zone packs and install them together. SpinTexture verifies and composes compatible packs without rerunning AI; if the checked selection only adds new archives to the active set, only those new archives are written and backed up.
+
+Completed packs remain reusable. Building a new zone does not erase an earlier character or world build. When two packs contain conflicting versions of the same complete archive, SpinTexture blocks the composition instead of silently choosing one.
+
+## Everyday play, updates, and restore
+
+- **Everyday enhanced play:** click **Play Enhanced EQ** or use the SpinTexture-created desktop shortcut. The quick health check does not upscale or reinstall the pack.
+- **Before an official game update:** close the game, open SpinTexture, and click **Restore**. This restores exact verified originals.
+- **Patch normally:** run LaunchPad only after restoration and let it finish the update.
+- **After patching:** reopen SpinTexture and run **Analyze Client** again. A staged pack remains installable only while every source archive still matches its build-time SHA-256. Rebuild archives changed by the patch; never force an old whole archive over a newer client.
+- **Return to vanilla at any time:** close EverQuest and LaunchPad, then click **Restore**. Native Graphics settings managed by SpinTexture have their own previewed restore path in **Graphics**.
+
+Large packs do not have to remain on the Windows system drive. Open **Storage**, choose a parent folder on another internal or external drive, then click **Move + Verify Pack Library**. SpinTexture creates an install-specific folder, copies every staged file, verifies SHA-256, and changes the saved location only after the destination is complete. The game client, original backups, recovery records, and settings are not moved.
+
+Read [How SpinTexture works](docs/ARCHITECTURE.md) for the complete pipeline and [Safety, installation, and exact restore](docs/SAFETY_AND_RESTORE.md) before a large full-client build.
+
+## Complete your EverQuest Legends setup
+
+SpinTexture focuses on game textures and supported native lighting settings. These optional companion projects improve the interface without overlapping SpinTexture's texture-pack workflow:
+
+| Companion project | Best for |
+| --- | --- |
+| **[SpinFOURKAYYY](https://github.com/itsspin/SPINFOURKAYYY)** | Scales the complete EverQuest Legends interface for 4K, ultrawide, and other high-resolution displays while preserving each character's layout. |
+| **[SpinUI + Spin's Loremaster](https://github.com/itsspin/spinips)** | Rebuilds the native UI with two complete visual themes and adds the non-injecting, log-driven Loremaster encounter and adventure companion. |
+
+Both are separate, optional downloads. Use SpinFOURKAYYY for readable UI scaling and SpinUI for a redesigned interface, layout profiles, and Loremaster.
 
 ## Before/after review
 
