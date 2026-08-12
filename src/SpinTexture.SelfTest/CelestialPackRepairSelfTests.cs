@@ -12,6 +12,7 @@ internal static class CelestialPackRepairSelfTests
     {
         await TestWorldCelestialRepairAsync(cancellationToken).ConfigureAwait(false);
         await TestSpellCelestialRepairAsync(cancellationToken).ConfigureAwait(false);
+        await TestAllSafeNativeSkyRepairAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static Task TestWorldCelestialRepairAsync(CancellationToken cancellationToken) =>
@@ -21,6 +22,7 @@ internal static class CelestialPackRepairSelfTests
             "sky.s3d",
             "forest.s3d",
             useHistoricalBackupFallback: true,
+            TextureProcessingPipeline.CelestialSkySafetyRuleId,
             cancellationToken);
 
     private static Task TestSpellCelestialRepairAsync(CancellationToken cancellationToken) =>
@@ -30,6 +32,17 @@ internal static class CelestialPackRepairSelfTests
             Path.Combine("SpellEffects", "fullmoon01.dds"),
             Path.Combine("SpellEffects", "ordinary.dds"),
             useHistoricalBackupFallback: false,
+            TextureProcessingPipeline.CelestialSkySafetyRuleId,
+            cancellationToken);
+
+    private static Task TestAllSafeNativeSkyRepairAsync(CancellationToken cancellationToken) =>
+        TestPackAsync(
+            "all-safe-native-sky",
+            AssetScope.AllSafeTextures,
+            Path.Combine("Resources", "sky", "stars.dds"),
+            "ordinary.s3d",
+            useHistoricalBackupFallback: false,
+            TextureProcessingPipeline.NativeSkyResourceSafetyRuleId,
             cancellationToken);
 
     private static async Task TestPackAsync(
@@ -38,6 +51,7 @@ internal static class CelestialPackRepairSelfTests
         string protectedRelativePath,
         string ordinaryRelativePath,
         bool useHistoricalBackupFallback,
+        string expectedRepairRuleId,
         CancellationToken cancellationToken)
     {
         var root = Path.Combine(
@@ -256,9 +270,9 @@ internal static class CelestialPackRepairSelfTests
             Assert(repaired.Report.IsSafetyRepair, "safety report flag");
             Assert(
                 repaired.Report.AppliedRepairRuleIds.Contains(
-                    TextureProcessingPipeline.CelestialSkySafetyRuleId,
+                    expectedRepairRuleId,
                     StringComparer.Ordinal),
-                "celestial rule recorded");
+                "expected safety rule recorded");
             AssertSequenceEqual(
                 useHistoricalBackupFallback ? badProtected : protectedOriginal,
                 await File.ReadAllBytesAsync(

@@ -14,6 +14,7 @@ internal static class ApplicationUpdateSelfTests
     {
         TestReleaseSelection();
         TestArgumentsAndChecksum();
+        TestPackagedVersionMarker();
         await TestCheckEndpointAsync().ConfigureAwait(false);
         await TestPreferencesAsync().ConfigureAwait(false);
         await TestPreparedUpdateRollbackAndCommitAsync().ConfigureAwait(false);
@@ -85,6 +86,46 @@ internal static class ApplicationUpdateSelfTests
         Assert(
             ApplicationUpdateService.FormatVersionDisplay(null, null, new Version(0, 0, 0)) == "Development build",
             "Unversioned builds did not receive a friendly display fallback.");
+        Assert(
+            ApplicationUpdateService.FormatVersionDisplay(
+                "1.0.0+stale", "1.0.5+apphost", new Version(1, 0, 0), "1.0.5") == "v1.0.5",
+            "The packaged release version did not replace stale assembly metadata.");
+        Assert(
+            ApplicationUpdateService.FormatVersionDisplay(
+                "1.0.0+stale", "1.0.4+apphost", new Version(1, 0, 0), "9.9.9") == "v1.0.4",
+            "The Windows app-host version did not take precedence over stale assembly metadata.");
+    }
+
+    private static void TestPackagedVersionMarker()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(root, ApplicationUpdateService.ReleaseVersionFileName),
+                """{"schemaVersion":1,"version":"1.0.5"}""");
+            Assert(
+                ApplicationUpdateService.ReadPackagedVersion(root) == "1.0.5",
+                "The packaged release marker was not read.");
+
+            File.WriteAllText(
+                Path.Combine(root, ApplicationUpdateService.ReleaseVersionFileName),
+                """{"schemaVersion":2,"version":"9.9.9"}""");
+            Assert(
+                ApplicationUpdateService.ReadPackagedVersion(root) is null,
+                "An unsupported packaged release marker was accepted.");
+
+            File.WriteAllText(
+                Path.Combine(root, ApplicationUpdateService.ReleaseVersionFileName),
+                "not-json");
+            Assert(
+                ApplicationUpdateService.ReadPackagedVersion(root) is null,
+                "A damaged packaged release marker was accepted.");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     private static async Task TestPreferencesAsync()

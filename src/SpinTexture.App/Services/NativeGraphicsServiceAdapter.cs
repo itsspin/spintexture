@@ -155,7 +155,7 @@ public sealed class NativeGraphicsServiceAdapter : INativeGraphicsService
             "Cinematic",
             "MAX SHADOW RANGE + LIGHTING + BLOOM",
             "Enables the verified built-in stencil-shadow, multipass-lighting, post-effects, and bloom-lighting settings, and raises EQL's native Shadow Clip Plane to its maximum setting.",
-            "Very high GPU cost; maximum-distance shadows may reduce frame rate significantly in dense zones."),
+            "Very high GPU cost. Native bloom can enlarge or halo bright sun, moon, and star sprites; choose Balanced if you see that effect."),
         _ => throw new ArgumentOutOfRangeException(nameof(preset), preset, null)
     };
 

@@ -1375,7 +1375,10 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             CanRepairAny = CanRepair || CanRepairSourceMismatch;
             var needsCelestialSkySafety = missingRepairRules.Contains(
                 TextureProcessingPipeline.CelestialSkySafetyRuleId,
-                StringComparer.Ordinal);
+                StringComparer.Ordinal)
+                || missingRepairRules.Contains(
+                    TextureProcessingPipeline.NativeSkyResourceSafetyRuleId,
+                    StringComparer.Ordinal);
             var needsCutoutSafety = missingRepairRules.Contains(
                 TextureProcessingPipeline.CutoutMipSafetyRuleId,
                 StringComparer.Ordinal);

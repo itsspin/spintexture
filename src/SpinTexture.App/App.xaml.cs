@@ -10,6 +10,7 @@ namespace SpinTexture.App;
 public partial class App : Application
 {
     private const string StartupSmokeArgument = "--startup-smoke";
+    private const string ExpectedVersionArgument = "--expected-version";
 
     protected override async void OnStartup(StartupEventArgs e)
     {
@@ -68,12 +69,25 @@ public partial class App : Application
             return;
         }
 
-        if (e.Args.Length == 1
-            && e.Args[0].Equals(StartupSmokeArgument, StringComparison.Ordinal))
+        if ((e.Args.Length == 1 || e.Args.Length == 3)
+            && e.Args[0].Equals(StartupSmokeArgument, StringComparison.Ordinal)
+            && (e.Args.Length == 1
+                || e.Args[1].Equals(ExpectedVersionArgument, StringComparison.Ordinal)))
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             try
             {
+                if (e.Args.Length == 3)
+                {
+                    var expectedDisplay = $"v{e.Args[2].Trim().TrimStart('v', 'V')}";
+                    var actualDisplay = ApplicationUpdateService.GetCurrentVersionDisplay();
+                    if (!actualDisplay.Equals(expectedDisplay, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidDataException(
+                            $"The packaged app reports {actualDisplay}, not {expectedDisplay}.");
+                    }
+                }
+
                 var window = new MainWindow();
                 window.ApplyTemplate();
                 window.Measure(new Size(1440, 900));

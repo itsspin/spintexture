@@ -8,19 +8,22 @@ namespace SpinTexture.Core.Services;
 /// of the JSON report schema. Revision 2 bounded alpha-tested mip chains at
 /// 4x4. Revision 3 retains only the enhanced top level for alpha-tested
 /// cutouts because the legacy renderer can discard generated soft-alpha levels
-/// based on view angle. Revision 4 adds the celestial/sky safety policy. Older
+/// based on view angle. Revision 4 adds the legacy celestial/sky safety policy.
+/// Revision 5 closes the native Resources/sky atlas boundary. Older
 /// packs can advance through these independent safety rules without rerunning
 /// unaffected successfully enhanced textures.
 /// </summary>
 public static class TextureProcessingPipeline
 {
-    public const int CurrentRevision = 4;
+    public const int CurrentRevision = 5;
     public const string CharacterEquipmentCoverageRuleId =
         "character-equipment-coverage-v1";
     public const string CutoutMipSafetyRuleId =
         "cutout-single-level-mips-v3";
     public const string CelestialSkySafetyRuleId =
         "celestial-sky-originals-v4";
+    public const string NativeSkyResourceSafetyRuleId =
+        "native-sky-resources-originals-v5";
 
     public static bool RequiresRepair(
         TextureBuildReport? report,
@@ -36,7 +39,8 @@ public static class TextureProcessingPipeline
             or AssetScope.WorldCharactersAndEquipment
             or AssetScope.WorldOnly
             or AssetScope.SelectedZone
-            or AssetScope.SpellEffectsOnly))
+            or AssetScope.SpellEffectsOnly
+            or AssetScope.AllSafeTextures))
         {
             return false;
         }
@@ -83,6 +87,14 @@ public static class TextureProcessingPipeline
 
         if (scope == AssetScope.SpellEffectsOnly)
         {
+            return report is not null;
+        }
+
+        if (scope == AssetScope.AllSafeTextures)
+        {
+            // Mixed packs remain ineligible for broad reconstruction. A
+            // recorded pack containing a now-protected native sky resource can
+            // still use the exact whole-artifact safety path.
             return report is not null;
         }
 
@@ -152,7 +164,7 @@ public static class TextureProcessingPipeline
         int revision,
         IEnumerable<string>? artifactPaths)
     {
-        var rules = new List<string>(3);
+        var rules = new List<string>(4);
         if (revision >= 1
             && scope is AssetScope.CharactersAndEquipmentOnly
                 or AssetScope.WorldCharactersAndEquipment)
@@ -178,16 +190,28 @@ public static class TextureProcessingPipeline
             CelestialTextureSafetyPolicy.GetPreservedReason(
                 path,
                 Path.GetFileName(path)) is not null) == true;
+        var hasProtectedNativeSkyResource = paths?.Any(path =>
+            CelestialTextureSafetyPolicy.GetSkyResourcePreservedReason(path) is not null) == true;
         var celestialApplies = scope switch
         {
             AssetScope.WorldCharactersAndEquipment or AssetScope.WorldOnly => true,
             AssetScope.SelectedZone => hasTopLevelSkyArchive,
             AssetScope.SpellEffectsOnly => paths is null || hasProtectedLooseCelestial,
+            AssetScope.AllSafeTextures => hasTopLevelSkyArchive || hasProtectedLooseCelestial,
             _ => false
         };
         if (revision >= 4 && celestialApplies)
         {
             rules.Add(CelestialSkySafetyRuleId);
+        }
+
+        if (revision >= 5 && hasProtectedNativeSkyResource)
+        {
+            // Fresh packs never stage Resources/sky. This rule therefore
+            // applies only to an older manifest that actually contains one of
+            // those renderer-owned files, regardless of the broad scope that
+            // originally discovered it.
+            rules.Add(NativeSkyResourceSafetyRuleId);
         }
 
         return rules.ToArray();

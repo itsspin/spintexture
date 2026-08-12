@@ -138,6 +138,20 @@ Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $resolv
 Copy-Item -LiteralPath (Join-Path $projectRoot 'THIRD_PARTY_NOTICES.md') -Destination $resolvedPublishRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot 'docs') -Destination (Join-Path $resolvedPublishRoot 'docs') -Recurse
 
+$releaseVersionPath = Join-Path $resolvedPublishRoot 'release-version.json'
+if (-not [string]::IsNullOrWhiteSpace($Version)) {
+    $publishedProductVersion = (Get-Item -LiteralPath (Join-Path $resolvedPublishRoot 'SpinTexture.exe')).VersionInfo.ProductVersion
+    $normalizedPublishedVersion = ($publishedProductVersion -split '\+', 2)[0]
+    if (-not $normalizedPublishedVersion.Equals($Version, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Published SpinTexture.exe reports version '$publishedProductVersion', expected '$Version'."
+    }
+
+    [pscustomobject]@{
+        SchemaVersion = 1
+        Version = $Version
+    } | ConvertTo-Json | Set-Content -LiteralPath $releaseVersionPath -Encoding UTF8
+}
+
 $requiredPublishedFiles = @(
     (Join-Path $resolvedPublishRoot 'SpinTexture.exe'),
     (Join-Path $resolvedPublishRoot 'docs\SAFETY_AND_RESTORE.md'),
@@ -155,15 +169,23 @@ $requiredPublishedFiles = @(
     (Join-Path $resolvedPublishRoot 'Tools\upscayl\models\4x-PBRify_UpscalerSPANV4.bin'),
     (Join-Path $resolvedPublishRoot 'Tools\upscayl\models\4x-PBRify_UpscalerSPANV4.param')
 )
+if (-not [string]::IsNullOrWhiteSpace($Version)) {
+    $requiredPublishedFiles += $releaseVersionPath
+}
 foreach ($publishedFile in $requiredPublishedFiles) {
     if (-not (Test-Path -LiteralPath $publishedFile -PathType Leaf)) {
         throw "Published release is incomplete: $publishedFile"
     }
 }
 
+$startupSmokeArguments = @('--startup-smoke')
+if (-not [string]::IsNullOrWhiteSpace($Version)) {
+    $startupSmokeArguments += '--expected-version'
+    $startupSmokeArguments += $Version
+}
 $startupSmoke = Start-Process `
     -FilePath (Join-Path $resolvedPublishRoot 'SpinTexture.exe') `
-    -ArgumentList '--startup-smoke' `
+    -ArgumentList $startupSmokeArguments `
     -WorkingDirectory $resolvedPublishRoot `
     -PassThru
 if (-not $startupSmoke.WaitForExit(60000)) {

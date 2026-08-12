@@ -50,9 +50,11 @@ internal sealed class LooseTextureSafetyRepairBuilder : IStagedArtifactBuilder
         cancellationToken.ThrowIfCancellationRequested();
         var logicalName = Path.GetFileName(context.RelativeInstallPath);
         counter.Discover(new FileInfo(context.SourcePath).Length);
-        var preservedReason = CelestialTextureSafetyPolicy.GetPreservedReason(
-            context.RelativeInstallPath,
-            logicalName);
+        var preservedReason = CelestialTextureSafetyPolicy.GetSkyResourcePreservedReason(
+                context.RelativeInstallPath)
+            ?? CelestialTextureSafetyPolicy.GetPreservedReason(
+                context.RelativeInstallPath,
+                logicalName);
         if (preservedReason is not null)
         {
             await CopyOriginalAsync(

@@ -229,10 +229,22 @@ public static class TexturePipelineSelfTests
             "a current World-only pack should not offer another cutout upgrade");
         Assert(
             !TextureProcessingPipeline.RequiresRepair(
-                Report(revision: 0),
+                Report(revision: 3),
                 AssetScope.AllSafeTextures,
-                Array.Empty<string>()),
-            "loose/all-safe packs remain outside PFS revision repair");
+                ["ordinary.s3d", Path.Combine("SpellEffects", "ordinary.dds")]),
+            "an all-safe pack without native sky resources remains outside broad mixed-artifact repair");
+        Assert(
+            TextureProcessingPipeline.RequiresRepair(
+                Report(revision: 3),
+                AssetScope.AllSafeTextures,
+                [Path.Combine("Resources", "sky", "stars.dds"), "ordinary.s3d"]),
+            "an older all-safe pack containing the native star atlas receives exact safety repair");
+        Assert(
+            TextureProcessingPipeline.RequiresRepair(
+                Report(revision: 3),
+                AssetScope.AllSafeTextures,
+                ["sky.s3d", "ordinary.s3d"]),
+            "an older all-safe pack containing legacy sky.s3d receives exact celestial repair");
     }
 
     private static void TestHeaderSniffingAndClassification()
