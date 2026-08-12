@@ -32,6 +32,35 @@ public partial class NativeGraphicsWindow : UserControl, IDisposable
     public bool CanNavigateAway => !viewModel.IsBusy;
     public event EventHandler? CloseRequested;
 
+    internal async Task RunLayoutSmokeAsync(Size viewport)
+    {
+        await viewModel.RefreshForLayoutSmokeAsync().ConfigureAwait(true);
+        TechnicalDetailsToggle.IsChecked = true;
+        ApplyTemplate();
+        Measure(viewport);
+        Arrange(new Rect(new Point(), viewport));
+        UpdateLayout();
+
+        if (PresetList.ActualWidth > viewport.Width + 0.5)
+        {
+            throw new InvalidOperationException(
+                $"Native graphics presets overflowed the {viewport.Width:N0}px viewport.");
+        }
+
+        for (var index = 0; index < PresetList.Items.Count; index++)
+        {
+            if (PresetList.ItemContainerGenerator.ContainerFromIndex(index) is ListBoxItem item
+                && item.ActualWidth > (PresetList.ActualWidth / 2d) + 0.5)
+            {
+                throw new InvalidOperationException(
+                    $"Native graphics preset {index + 1} did not fit in its two-column layout.");
+            }
+        }
+
+        TechnicalDetailsToggle.IsChecked = false;
+        UpdateLayout();
+    }
+
     private void Close_Click(object sender, RoutedEventArgs e)
     {
         if (viewModel.IsBusy)
