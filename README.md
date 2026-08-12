@@ -75,6 +75,7 @@ Start with one zone. It is the fastest way to confirm visual quality, GPU stabil
 3. Choose **Texture HD**. It is the recommended faithful-detail route for a first world build.
 4. Set the texture ceiling to **2,048 px** and leave **Generate full mip chains** enabled.
 5. Review the estimated time and disk use, acknowledge the install notice, then click **Build Staged Pack**. Building writes only to SpinTexture's managed pack library; it does not install anything into EverQuest.
+   The footer tracks overall job progress across the complete selected asset set, including artifact count, elapsed time, and a live ETA that recalibrates from the measured speed of the current PC as archives finish.
 6. Open **Review** when the build completes. Use **Fit** to judge the whole texture and **1:1** to inspect the pixels that will actually be installed. Protected or fidelity-rejected textures remain original by design.
 7. Open **Packs**, check the new Lavastorm pack, and click **Install Checked Packs**. Keep EverQuest and LaunchPad closed while SpinTexture verifies sources, creates exact backups, and atomically installs the selected archives.
 8. Click **Play Enhanced EQ**. SpinTexture performs a quick integrity check and starts the enhanced client; it does not rerun the upscaler or recopy every archive each time you play.
