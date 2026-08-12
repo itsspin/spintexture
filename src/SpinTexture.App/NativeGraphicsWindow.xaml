@@ -258,6 +258,30 @@
                     </ListBox.ItemTemplate>
                 </ListBox>
 
+                <Border Background="#101820" BorderBrush="#2C4658" BorderThickness="1"
+                        CornerRadius="8" Padding="14,11" Margin="0,10,0,0"
+                        Visibility="{Binding IsCinematicSelected, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock Text="Optional Cinematic bloom"
+                                       Foreground="{StaticResource Text}" FontSize="13" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding BloomChoiceText}" Foreground="{StaticResource Muted}"
+                                       FontSize="11" TextWrapping="Wrap" Margin="0,4,18,0" />
+                        </StackPanel>
+                        <CheckBox Grid.Column="1" Content="Enable Bloom"
+                                  IsChecked="{Binding IsBloomEnabled, Mode=TwoWay}"
+                                  Command="{Binding BloomChangedCommand}"
+                                  IsEnabled="{Binding IsNotBusy}"
+                                  Foreground="{StaticResource Text}"
+                                  VerticalAlignment="Center"
+                                  AutomationProperties.Name="Enable Bloom for the Cinematic native graphics preset" />
+                    </Grid>
+                </Border>
+
                 <Grid Margin="0,22,0,10">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />

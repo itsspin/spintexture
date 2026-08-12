@@ -19,6 +19,7 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
     private bool currentStateNeedsAttention;
     private string statusText = "No changes have been made.";
     private bool isError;
+    private bool isBloomEnabled;
 
     public NativeGraphicsWindowViewModel(string installPath, INativeGraphicsService service)
     {
@@ -29,6 +30,7 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
         RefreshCommand = new AsyncRelayCommand(RefreshAsync, () => !IsBusy);
         ApplyCommand = new AsyncRelayCommand(ApplyAsync, CanApply);
         RestoreCommand = new AsyncRelayCommand(RestoreAsync, () => !IsBusy && CanRestore);
+        BloomChangedCommand = new AsyncRelayCommand(UpdateBloomChoiceAsync, () => !IsBusy && IsCinematicSelected);
         CancelCommand = new RelayCommand(_ => Cancel(), _ => IsBusy);
     }
 
@@ -44,6 +46,8 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
                 OnPropertyChanged(nameof(PlannedChanges));
                 OnPropertyChanged(nameof(PlanSummary));
                 OnPropertyChanged(nameof(ApplyButtonText));
+                OnPropertyChanged(nameof(IsCinematicSelected));
+                BloomChangedCommand.RaiseCanExecuteChanged();
                 RefreshCommands();
             }
         }
@@ -61,6 +65,24 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
     public string ApplyButtonText => SelectedPreset is null
         ? "Apply Native Preset"
         : $"Apply {SelectedPreset.Name}";
+
+    public bool IsCinematicSelected => SelectedPreset?.IsCinematic == true;
+
+    public bool IsBloomEnabled
+    {
+        get => isBloomEnabled;
+        set
+        {
+            if (SetProperty(ref isBloomEnabled, value))
+            {
+                OnPropertyChanged(nameof(BloomChoiceText));
+            }
+        }
+    }
+
+    public string BloomChoiceText => IsBloomEnabled
+        ? "Bloom on. Brighter glow, with a higher chance of halos around sun, moon, and star sprites."
+        : "Bloom off. Recommended for clean skies while keeping Cinematic lighting and maximum shadows.";
 
     public bool IsBusy
     {
@@ -159,6 +181,7 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
     public AsyncRelayCommand RefreshCommand { get; }
     public AsyncRelayCommand ApplyCommand { get; }
     public AsyncRelayCommand RestoreCommand { get; }
+    public AsyncRelayCommand BloomChangedCommand { get; }
     public RelayCommand CancelCommand { get; }
 
     private async Task RefreshAsync(CancellationToken cancellationToken)
@@ -182,20 +205,29 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
                 return;
             }
 
+            var cinematicPreset = status.AppliedPreset is NativeGraphicsUiPreset.Cinematic
+                or NativeGraphicsUiPreset.CinematicNoBloom
+                    ? status.AppliedPreset.Value
+                    : previousPreset is NativeGraphicsUiPreset.Cinematic
+                        or NativeGraphicsUiPreset.CinematicNoBloom
+                            ? previousPreset
+                            : NativeGraphicsUiPreset.CinematicNoBloom;
+            IsBloomEnabled = cinematicPreset == NativeGraphicsUiPreset.Cinematic;
             var balancedTask = service.PlanAsync(
                 installPath,
                 NativeGraphicsUiPreset.Balanced,
                 cancellationToken);
             var cinematicTask = service.PlanAsync(
                 installPath,
-                NativeGraphicsUiPreset.Cinematic,
+                cinematicPreset,
                 cancellationToken);
             await Task.WhenAll(balancedTask, cinematicTask).ConfigureAwait(true);
 
             Presets.Clear();
             Presets.Add(await balancedTask.ConfigureAwait(true));
             Presets.Add(await cinematicTask.ConfigureAwait(true));
-            SelectedPreset = Presets.First(plan => plan.Preset == previousPreset);
+            SelectedPreset = Presets.FirstOrDefault(plan => plan.Preset == previousPreset)
+                ?? Presets.First(plan => plan.Preset == cinematicPreset);
             StatusText = "Ready. Review the exact setting changes before applying a preset.";
         }
         catch (OperationCanceledException)
@@ -214,6 +246,52 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
     }
 
     internal Task RefreshForLayoutSmokeAsync() => RefreshAsync(CancellationToken.None);
+
+    private async Task UpdateBloomChoiceAsync(CancellationToken cancellationToken)
+    {
+        if (!IsCinematicSelected)
+        {
+            return;
+        }
+
+        IsBusy = true;
+        IsError = false;
+        StatusText = "Updating the Cinematic preview. No settings are being changed.";
+        try
+        {
+            var requested = IsBloomEnabled
+                ? NativeGraphicsUiPreset.Cinematic
+                : NativeGraphicsUiPreset.CinematicNoBloom;
+            var plan = await service.PlanAsync(installPath, requested, cancellationToken)
+                .ConfigureAwait(true);
+            var index = Presets.IndexOf(SelectedPreset!);
+            if (index < 0)
+            {
+                index = Presets.ToList().FindIndex(candidate => candidate.IsCinematic);
+            }
+
+            if (index >= 0)
+            {
+                Presets[index] = plan;
+            }
+
+            SelectedPreset = plan;
+            StatusText = "Ready. Review the exact Bloom and Cinematic setting changes before applying.";
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText = "Bloom preview canceled. No native graphics settings were changed.";
+            throw;
+        }
+        catch (Exception exception)
+        {
+            ShowError("The Bloom choice could not be previewed", exception);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
 
     private async Task ApplyAsync(CancellationToken cancellationToken)
     {
@@ -321,7 +399,15 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
 
         var plans = await Task.WhenAll(
                 service.PlanAsync(installPath, NativeGraphicsUiPreset.Balanced, cancellationToken),
-                service.PlanAsync(installPath, NativeGraphicsUiPreset.Cinematic, cancellationToken))
+                service.PlanAsync(
+                    installPath,
+                    selected is NativeGraphicsUiPreset.Cinematic
+                        or NativeGraphicsUiPreset.CinematicNoBloom
+                            ? selected
+                            : IsBloomEnabled
+                                ? NativeGraphicsUiPreset.Cinematic
+                                : NativeGraphicsUiPreset.CinematicNoBloom,
+                    cancellationToken))
             .ConfigureAwait(true);
         Presets.Clear();
         foreach (var plan in plans)
@@ -330,6 +416,7 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
         }
 
         SelectedPreset = Presets.First(plan => plan.Preset == selected);
+        IsBloomEnabled = selected == NativeGraphicsUiPreset.Cinematic;
         StatusText = successMessage;
     }
 
@@ -367,6 +454,7 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
         RefreshCommand.RaiseCanExecuteChanged();
         ApplyCommand.RaiseCanExecuteChanged();
         RestoreCommand.RaiseCanExecuteChanged();
+        BloomChangedCommand.RaiseCanExecuteChanged();
         CancelCommand.RaiseCanExecuteChanged();
     }
 
@@ -375,5 +463,6 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
         RefreshCommand.Dispose();
         ApplyCommand.Dispose();
         RestoreCommand.Dispose();
+        BloomChangedCommand.Dispose();
     }
 }

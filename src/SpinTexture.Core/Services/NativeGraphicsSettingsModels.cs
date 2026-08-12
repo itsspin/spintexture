@@ -5,7 +5,8 @@ namespace SpinTexture.Core.Services;
 public enum NativeGraphicsPreset
 {
     Balanced,
-    Cinematic
+    Cinematic,
+    CinematicNoBloom
 }
 
 public enum NativeGraphicsSettingsState

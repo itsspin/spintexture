@@ -3,7 +3,8 @@ namespace SpinTexture.App.Services;
 public enum NativeGraphicsUiPreset
 {
     Balanced,
-    Cinematic
+    Cinematic,
+    CinematicNoBloom
 }
 
 public sealed record NativeGraphicsUiStatus(
@@ -15,7 +16,8 @@ public sealed record NativeGraphicsUiStatus(
     IReadOnlyList<NativeGraphicsUiSetting> ManagedValues,
     bool NeedsAttention,
     bool CanApply,
-    bool CanRestore);
+    bool CanRestore,
+    NativeGraphicsUiPreset? AppliedPreset = null);
 
 public sealed record NativeGraphicsUiSetting(
     string Section,
@@ -52,13 +54,18 @@ public sealed record NativeGraphicsUiPlan(
     bool HasChanges,
     bool CanApply)
 {
+    public bool IsCinematic => Preset is NativeGraphicsUiPreset.Cinematic
+        or NativeGraphicsUiPreset.CinematicNoBloom;
+
+    public bool IsBloomEnabled => Preset == NativeGraphicsUiPreset.Cinematic;
+
     public string ChoiceBadge => Preset == NativeGraphicsUiPreset.Balanced
         ? "RECOMMENDED"
         : "MAXIMUM";
 
     public string FeatureSummary => Preset == NativeGraphicsUiPreset.Balanced
-        ? "Shadows on  •  Your lighting, bloom, and shadow range stay unchanged"
-        : "Shadows on  •  Advanced lighting on  •  Bloom on  •  Maximum shadow range";
+        ? "Shadows on | Your lighting, bloom, and shadow range stay unchanged"
+        : $"Shadows on | Advanced lighting on | Bloom {(IsBloomEnabled ? "on" : "off")} | Maximum shadow range";
 }
 
 internal static class NativeGraphicsUiText
