@@ -18,7 +18,7 @@ It does **not** inject a DLL, hook Direct3D, install ReShade, modify the game ex
 
 [![Open the SpinTexture comparison gallery](docs/media/comparisons/characters-enhanced.png)](https://itsspin.github.io/spintexture/)
 
-Jump directly to the **[characters + equipment comparison](https://itsspin.github.io/spintexture/#characters)** or the **[Lavastorm world + equipment comparison](https://itsspin.github.io/spintexture/#lavastorm)**.
+Jump directly to the **[characters + equipment comparison](https://itsspin.github.io/spintexture/#characters)**, **[Lavastorm world + equipment comparison](https://itsspin.github.io/spintexture/#lavastorm)**, or **[Nagafen's Lair world + creature comparison](https://itsspin.github.io/spintexture/#nagafen)**.
 
 **[Open the interactive comparison gallery](https://itsspin.github.io/spintexture/)** to drag or swipe between unchanged original client screenshots and the same scenes using SpinTexture-enhanced world, character, and equipment textures. Each comparison is keyboard accessible with the arrow keys. Small pose and background-creature differences come from the live game; no capture was retouched to manufacture detail.
 
