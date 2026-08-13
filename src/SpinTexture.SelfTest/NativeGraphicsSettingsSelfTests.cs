@@ -13,6 +13,7 @@ internal static class NativeGraphicsSettingsSelfTests
     {
         await TestPresetSwitchingAndRestoreAsync(cancellationToken).ConfigureAwait(false);
         await TestCinematicBloomToggleAsync(cancellationToken).ConfigureAwait(false);
+        await TestThirdPersonPitchLockAsync(cancellationToken).ConfigureAwait(false);
         await TestSwitchBackToBaselineRetiresTransactionAsync(cancellationToken)
             .ConfigureAwait(false);
         await TestManagedConflictAndBooleanNormalizationAsync(cancellationToken).ConfigureAwait(false);
@@ -27,6 +28,84 @@ internal static class NativeGraphicsSettingsSelfTests
         await TestMalformedInputsFailClosedAsync(cancellationToken).ConfigureAwait(false);
         await TestPostCommitRollbackAsync(cancellationToken).ConfigureAwait(false);
         TestIniRoundTripAndWhitespaceOnlyValue();
+    }
+
+    private static async Task TestThirdPersonPitchLockAsync(
+        CancellationToken cancellationToken)
+    {
+        const string originalText =
+            "[Defaults]\r\nShadows=FALSE\r\nMultiPassLighting=FALSE\r\n"
+            + "PostEffects=FALSE\r\nBloom=FALSE\r\n"
+            + "[Options]\r\nShadowClipPlane=40\r\nMouseShiftPitch=0\r\n"
+            + "MouseShiftPitchSpring=0\r\n";
+        await using var fixture = await NativeGraphicsFixture.CreateAsync(
+                Encoding.UTF8.GetBytes(originalText),
+                cancellationToken)
+            .ConfigureAwait(false);
+        var service = fixture.CreateService();
+
+        var plan = await service.PlanAsync(
+                fixture.Paths,
+                NativeGraphicsPreset.Balanced,
+                thirdPersonPitchLockEnabled: true,
+                cancellationToken)
+            .ConfigureAwait(false);
+        Assert(
+            plan.Changes.Any(change =>
+                change.Key == "MouseShiftPitch" && change.PlannedValue == "1"),
+            "camera pitch lock previews Shift-only pitch");
+        Assert(
+            plan.Changes.Any(change =>
+                change.Key == "MouseShiftPitchSpring" && change.PlannedValue == "1"),
+            "camera pitch lock previews level-on-release");
+
+        var applied = await service.ApplyAsync(
+                fixture.Paths,
+                NativeGraphicsPreset.Balanced,
+                thirdPersonPitchLockEnabled: true,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        Assert(applied.Status.ThirdPersonPitchLockEnabled, "camera pitch lock status");
+        var appliedText = await fixture.ReadSettingsTextAsync(cancellationToken)
+            .ConfigureAwait(false);
+        AssertContains(appliedText, "MouseShiftPitch=1", "Shift pitch enabled");
+        AssertContains(appliedText, "MouseShiftPitchSpring=1", "pitch spring enabled");
+
+        var disabled = await service.ApplyAsync(
+                fixture.Paths,
+                NativeGraphicsPreset.Balanced,
+                thirdPersonPitchLockEnabled: false,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        Assert(!disabled.Status.ThirdPersonPitchLockEnabled, "camera pitch lock disabled status");
+        var disabledText = await fixture.ReadSettingsTextAsync(cancellationToken)
+            .ConfigureAwait(false);
+        AssertContains(disabledText, "MouseShiftPitch=0", "Shift pitch baseline restored");
+        AssertContains(
+            disabledText,
+            "MouseShiftPitchSpring=0",
+            "pitch spring baseline restored");
+        await service.RestoreAsync(fixture.Paths, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        AssertSequenceEqual(
+            Encoding.UTF8.GetBytes(originalText),
+            await File.ReadAllBytesAsync(fixture.SettingsPath, cancellationToken)
+                .ConfigureAwait(false),
+            "full restore returns exact original graphics and camera values");
+
+        var cameraUiPath = Path.Combine(
+            fixture.Paths.InstallPath,
+            "uifiles",
+            "default",
+            "EQUI_OptionsWindow.xml");
+        File.Delete(cameraUiPath);
+        var unavailable = await service.PlanAsync(
+                fixture.Paths,
+                NativeGraphicsPreset.Balanced,
+                thirdPersonPitchLockEnabled: true,
+                cancellationToken)
+            .ConfigureAwait(false);
+        Assert(!unavailable.Status.CanApply, "missing camera controls fail closed");
     }
 
     private static async Task TestCinematicBloomToggleAsync(CancellationToken cancellationToken)
@@ -234,6 +313,8 @@ internal static class NativeGraphicsSettingsSelfTests
         RemoveSetting(manifest["appliedSettings"]!.AsArray(), "Bloom");
         RemoveSetting(manifest["baselineSettings"]!.AsArray(), "ShadowClipPlane");
         RemoveSetting(manifest["appliedSettings"]!.AsArray(), "ShadowClipPlane");
+        RemoveSetting(manifest["baselineSettings"]!.AsArray(), "MouseShiftPitch");
+        RemoveSetting(manifest["baselineSettings"]!.AsArray(), "MouseShiftPitchSpring");
         manifest["appliedLength"] = fingerprint.Length;
         manifest["appliedSha256"] = fingerprint.Sha256;
         await File.WriteAllTextAsync(
@@ -244,9 +325,12 @@ internal static class NativeGraphicsSettingsSelfTests
 
         static void RemoveSetting(JsonArray settings, string key)
         {
-            var node = settings.Single(item => item!.AsObject()["key"]!.GetValue<string>()
+            var node = settings.FirstOrDefault(item => item!.AsObject()["key"]!.GetValue<string>()
                 .Equals(key, StringComparison.OrdinalIgnoreCase));
-            settings.Remove(node);
+            if (node is not null)
+            {
+                settings.Remove(node);
+            }
         }
     }
 
@@ -279,6 +363,14 @@ internal static class NativeGraphicsSettingsSelfTests
                 "ShadowClipPlane",
                 StringComparison.OrdinalIgnoreCase));
         manifest["baselineSettings"]!.AsArray().Remove(shadowBaseline);
+        foreach (var cameraKey in new[] { "MouseShiftPitch", "MouseShiftPitchSpring" })
+        {
+            var cameraBaseline = manifest["baselineSettings"]!.AsArray()
+                .First(node => node!.AsObject()["key"]!.GetValue<string>().Equals(
+                    cameraKey,
+                    StringComparison.OrdinalIgnoreCase));
+            manifest["baselineSettings"]!.AsArray().Remove(cameraBaseline);
+        }
         await File.WriteAllTextAsync(
                 balanced.TransactionManifestPath,
                 manifest.ToJsonString(new JsonSerializerOptions { WriteIndented = true }),
@@ -1269,7 +1361,9 @@ internal static class NativeGraphicsSettingsSelfTests
             "fake renderer payload: Shadows: Stencil Available; "
             + "MPL: Available; Render: Post Effects Available";
         private const string CapabilityExecutable =
-            "fake EQL executable payload: ShadowClipPlane";
+            "fake EQL executable payload: ShadowClipPlane MouseShiftPitch MouseShiftPitchSpring";
+        private const string CameraCapabilityXml =
+            "<Screen>OMP_LegendsCameraShiftPitch OMP_LegendsCameraShiftPitchSpring</Screen>";
 
         private NativeGraphicsFixture(
             string root,
@@ -1332,6 +1426,15 @@ internal static class NativeGraphicsSettingsSelfTests
                 "EQUI_AdvancedDisplayOptionsWindow.xml");
             Directory.CreateDirectory(Path.GetDirectoryName(uiPath)!);
             await File.WriteAllTextAsync(uiPath, CapabilityXml, cancellationToken)
+                .ConfigureAwait(false);
+            await File.WriteAllTextAsync(
+                    Path.Combine(
+                        Paths.InstallPath,
+                        "uifiles",
+                        "default",
+                        "EQUI_OptionsWindow.xml"),
+                    CameraCapabilityXml,
+                    cancellationToken)
                 .ConfigureAwait(false);
             await File.WriteAllBytesAsync(
                     GraphicsDllPath,

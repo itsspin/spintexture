@@ -454,7 +454,7 @@ public sealed class TexturePackWorkflow
             baselineReport,
             baseline.Options.Scope,
             baselineArtifactPaths);
-        var isExactCelestialSafetyRepair = !isManualTextureRevision
+        var isExactOriginalSafetyRepair = !isManualTextureRevision
             && isTargetedSafetyRepair
             && missingRepairRules.Count != 0
             && missingRepairRules.All(ruleId =>
@@ -463,17 +463,20 @@ public sealed class TexturePackWorkflow
                     StringComparison.Ordinal)
                 || ruleId.Equals(
                     TextureProcessingPipeline.NativeSkyResourceSafetyRuleId,
+                    StringComparison.Ordinal)
+                || ruleId.Equals(
+                    TextureProcessingPipeline.LegacyTranslucentMaterialSafetyRuleId,
                     StringComparison.Ordinal));
 
         if (baseline.Options.Scope == AssetScope.AllSafeTextures
-            && !isExactCelestialSafetyRepair)
+            && !isExactOriginalSafetyRepair)
         {
             throw new InvalidOperationException(
                 "Legacy All Safe packs can mix PFS and loose files and may have been built from managed enhanced sources. Their source provenance must be repaired before a safe mixed-artifact upgrade can be offered; the selected pack was left unchanged.");
         }
 
         if (baseline.Options.Scope != AssetScope.SpellEffectsOnly
-            && !isExactCelestialSafetyRepair
+            && !isExactOriginalSafetyRepair
             && baseline.Entries.Any(entry =>
                 !EverQuestInstall.IsPfsArchiveExtension(
                     Path.GetExtension(entry.RelativeInstallPath))))
@@ -542,12 +545,14 @@ public sealed class TexturePackWorkflow
             activeInstallDirectory = Path.GetDirectoryName(activeInstallPath)!;
         }
 
-        if (isExactCelestialSafetyRepair)
+        if (isExactOriginalSafetyRepair)
         {
             return await RepairCelestialSafetyPackAsync(
                     paths,
                     baselineInfo,
                     baselineReport,
+                    tools,
+                    missingRepairRules,
                     activeInstall,
                     activeInstallDirectory,
                     repairStartedUtc,
@@ -830,16 +835,18 @@ public sealed class TexturePackWorkflow
     }
 
     /// <summary>
-    /// Advances a verified completed pack through a celestial-only safety
+    /// Advances a verified completed pack through an original-content safety
     /// revision without invoking the AI pipeline or recompressing unaffected
-    /// PFS archives. Every ordinary payload is exact-reused; protected sky and
-    /// loose celestial artifacts are restored from verified original bytes and
-    /// deliberately omitted from the replacement manifest.
+    /// PFS members. Ordinary payloads are exact-reused; protected sky and loose
+    /// celestial artifacts are restored from verified originals and omitted,
+    /// while legacy translucent WLD material frames are restored in-place.
     /// </summary>
     private async Task<TexturePackBuildResult> RepairCelestialSafetyPackAsync(
         ProjectPaths paths,
         StagedPackInfo baselineInfo,
         TextureBuildReport? baselineReport,
+        ExternalToolPaths tools,
+        IReadOnlyList<string> missingRepairRules,
         InstallManifest? activeInstall,
         string? activeInstallDirectory,
         DateTimeOffset repairStartedUtc,
@@ -871,7 +878,40 @@ public sealed class TexturePackWorkflow
         }
 
         var counter = new TextureBuildCounter();
+        var repairLegacyTranslucentMaterials = missingRepairRules.Contains(
+            TextureProcessingPipeline.LegacyTranslucentMaterialSafetyRuleId,
+            StringComparer.Ordinal);
+        var reuseArchivePaths = baselineInfo.Artifacts
+            .Where(artifact => EverQuestInstall.IsPfsArchiveExtension(
+                Path.GetExtension(artifact.CanonicalRelativeInstallPath)))
+            .ToDictionary(
+                artifact => artifact.CanonicalRelativeInstallPath,
+                artifact => artifact.PayloadPath,
+                StringComparer.OrdinalIgnoreCase);
+        var reuseArchiveFingerprints = baselineInfo.Artifacts
+            .Where(artifact => EverQuestInstall.IsPfsArchiveExtension(
+                Path.GetExtension(artifact.CanonicalRelativeInstallPath)))
+            .ToDictionary(
+                artifact => artifact.CanonicalRelativeInstallPath,
+                artifact => new StagedPackFileFingerprint(
+                    artifact.Entry.StagedLength,
+                    artifact.Entry.StagedSha256),
+                StringComparer.OrdinalIgnoreCase);
+        var translucentMaterialBuilder = repairLegacyTranslucentMaterials
+            ? new PfsTextureArchiveBuilder(
+                new NativeTextureProcessor(tools),
+                counter,
+                progress,
+                previewCollector: null,
+                filterCharacterEquipmentEntries: false,
+                retryUnchangedEntries: false,
+                rebuildFromReuseArchive: true,
+                reuseArchivePaths: reuseArchivePaths,
+                reuseArchiveFingerprints: reuseArchiveFingerprints)
+            : null;
         var items = new List<StagedBuildItem>(baselineInfo.Artifacts.Count);
+        var exactReusedArtifacts = 0;
+        var safetyUpgradedArtifacts = 0;
         for (var index = 0; index < baselineInfo.Artifacts.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -888,7 +928,14 @@ public sealed class TexturePackWorkflow
                     cancellationToken)
                 .ConfigureAwait(false);
             var restoredToOriginal = CanOmitSourceIdenticalSafetyArtifact(relativePath);
-            var builder = new LooseTextureSafetyRepairBuilder(
+            var pfsTranslucentRepair = translucentMaterialBuilder is not null
+                && !restoredToOriginal
+                && await ContainsLegacyTranslucentMaterialAsync(
+                    sourcePath,
+                    cancellationToken).ConfigureAwait(false);
+            IStagedArtifactBuilder builder = pfsTranslucentRepair
+                ? translucentMaterialBuilder!
+                : new LooseTextureSafetyRepairBuilder(
                 artifact.PayloadPath,
                 entry.StagedLength,
                 entry.StagedSha256,
@@ -899,13 +946,27 @@ public sealed class TexturePackWorkflow
                 PathGuard.SamePath(sourcePath, livePath) ? null : sourcePath,
                 entry.SourceLength,
                 entry.SourceSha256,
-                ExpectedStagedLength: restoredToOriginal ? null : entry.StagedLength,
-                ExpectedStagedSha256: restoredToOriginal ? null : entry.StagedSha256,
+                ExpectedStagedLength: restoredToOriginal || pfsTranslucentRepair
+                    ? null
+                    : entry.StagedLength,
+                ExpectedStagedSha256: restoredToOriginal || pfsTranslucentRepair
+                    ? null
+                    : entry.StagedSha256,
                 AllowSourceIdenticalOmission: restoredToOriginal));
+            if (restoredToOriginal || pfsTranslucentRepair)
+            {
+                safetyUpgradedArtifacts++;
+            }
+            else
+            {
+                exactReusedArtifacts++;
+            }
             progress?.Report(new ProgressUpdate(
                 "Safety repair plan",
                 restoredToOriginal
                     ? "Restoring protected sky/celestial bytes from the verified original."
+                    : pfsTranslucentRepair
+                    ? "Restoring legacy water/translucent material frames while exact-reusing unaffected enhanced archive members."
                     : "Exact-reusing an unaffected completed artifact.",
                 index + 1,
                 baselineInfo.Artifacts.Count,
@@ -942,7 +1003,7 @@ public sealed class TexturePackWorkflow
 
         var statistics = counter.Snapshot();
         counter.Warn(
-            $"Celestial safety repair exact-reused {statistics.ReusedTextures:N0} unaffected artifact(s) and restored protected sky/celestial artifacts from verified originals without AI processing or recompression.");
+            $"Safety repair exact-reused {exactReusedArtifacts:N0} unaffected artifact(s) and upgraded {safetyUpgradedArtifacts:N0} artifact(s) by restoring protected sky/celestial or legacy translucent-material content from verified originals without AI processing.");
         statistics = counter.Snapshot();
         var completedUtc = DateTimeOffset.UtcNow;
         var artifactPaths = baselineInfo.Artifacts
@@ -964,8 +1025,8 @@ public sealed class TexturePackWorkflow
             IsCutoutMipRepair = false,
             BaselineBuildId = baseline.BuildId,
             BaselineTexturePipelineRevision = baselineReport?.TexturePipelineRevision ?? 0,
-            ReusedArtifacts = statistics.ReusedTextures,
-            SafetyUpgradedArtifacts = baselineInfo.Artifacts.Count - statistics.ReusedTextures,
+            ReusedArtifacts = exactReusedArtifacts,
+            SafetyUpgradedArtifacts = safetyUpgradedArtifacts,
             TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
             AppliedRepairRuleIds = TextureProcessingPipeline.GetCurrentRepairRuleIds(
                 baseline.Options.Scope,
@@ -979,6 +1040,46 @@ public sealed class TexturePackWorkflow
             reportPath,
             ApplyResult: null,
             PreviewManifestPath: null);
+    }
+
+    private static async Task<bool> ContainsLegacyTranslucentMaterialAsync(
+        string archivePath,
+        CancellationToken cancellationToken)
+    {
+        if (!EverQuestInstall.IsPfsArchiveExtension(Path.GetExtension(archivePath)))
+        {
+            return false;
+        }
+
+        try
+        {
+            await using var archive = await PfsArchive.OpenAsync(
+                archivePath,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            foreach (var wldEntry in archive.Entries.Where(entry =>
+                         entry.Name.EndsWith(".wld", StringComparison.OrdinalIgnoreCase)))
+            {
+                var payload = await archive.ReadEntryAsync(wldEntry.Name, cancellationToken)
+                    .ConfigureAwait(false);
+                if (LegacyTranslucentMaterialSafetyPolicy
+                    .FindProtectedTextureNames(payload).Count != 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        catch (Exception exception) when (exception is PfsArchiveException
+                                               or InvalidDataException
+                                               or IOException)
+        {
+            // This optimized original-safety path may also carry synthetic or
+            // non-PFS fixtures with a legacy extension. Leave them exact rather
+            // than guessing at material ownership. Normal build validation still
+            // rejects unreadable game archives before enhancement.
+            return false;
+        }
     }
 
     /// <summary>

@@ -9,13 +9,15 @@ namespace SpinTexture.Core.Services;
 /// 4x4. Revision 3 retains only the enhanced top level for alpha-tested
 /// cutouts because the legacy renderer can discard generated soft-alpha levels
 /// based on view angle. Revision 4 adds the legacy celestial/sky safety policy.
-/// Revision 5 closes the native Resources/sky atlas boundary. Older
+/// Revision 5 closes the native Resources/sky atlas boundary. Revision 6
+/// preserves the exact bitmap sets referenced by legacy semi-transparent WLD
+/// materials so water and glass retain their authored blending. Older
 /// packs can advance through these independent safety rules without rerunning
 /// unaffected successfully enhanced textures.
 /// </summary>
 public static class TextureProcessingPipeline
 {
-    public const int CurrentRevision = 5;
+    public const int CurrentRevision = 6;
     public const string CharacterEquipmentCoverageRuleId =
         "character-equipment-coverage-v1";
     public const string CutoutMipSafetyRuleId =
@@ -24,6 +26,8 @@ public static class TextureProcessingPipeline
         "celestial-sky-originals-v4";
     public const string NativeSkyResourceSafetyRuleId =
         "native-sky-resources-originals-v5";
+    public const string LegacyTranslucentMaterialSafetyRuleId =
+        "legacy-translucent-materials-originals-v6";
 
     public static bool RequiresRepair(
         TextureBuildReport? report,
@@ -164,7 +168,7 @@ public static class TextureProcessingPipeline
         int revision,
         IEnumerable<string>? artifactPaths)
     {
-        var rules = new List<string>(4);
+        var rules = new List<string>(5);
         if (revision >= 1
             && scope is AssetScope.CharactersAndEquipmentOnly
                 or AssetScope.WorldCharactersAndEquipment)
@@ -212,6 +216,14 @@ public static class TextureProcessingPipeline
             // those renderer-owned files, regardless of the broad scope that
             // originally discovered it.
             rules.Add(NativeSkyResourceSafetyRuleId);
+        }
+
+        if (revision >= 6
+            && scope is AssetScope.WorldCharactersAndEquipment
+                or AssetScope.WorldOnly
+                or AssetScope.SelectedZone)
+        {
+            rules.Add(LegacyTranslucentMaterialSafetyRuleId);
         }
 
         return rules.ToArray();

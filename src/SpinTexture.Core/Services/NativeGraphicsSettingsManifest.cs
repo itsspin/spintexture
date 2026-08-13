@@ -29,9 +29,11 @@ internal sealed record NativeGraphicsSettingsManifest(
     string AppliedSha256,
     IReadOnlyList<NativeGraphicsStoredSetting> BaselineSettings,
     IReadOnlyList<NativeGraphicsStoredSetting> AppliedSettings,
-    IReadOnlyList<NativeGraphicsStoredSetting>? PreApplySettings = null)
+    IReadOnlyList<NativeGraphicsStoredSetting>? PreApplySettings = null,
+    bool ThirdPersonPitchLockEnabled = false)
 {
     public const int LegacySchemaVersion = 1;
     public const int LightingOnlySchemaVersion = 2;
-    public const int CurrentSchemaVersion = 3;
+    public const int GraphicsOnlySchemaVersion = 3;
+    public const int CurrentSchemaVersion = 4;
 }

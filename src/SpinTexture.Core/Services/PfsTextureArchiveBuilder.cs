@@ -167,6 +167,16 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         var replacements = new List<PfsArchiveReplacement>();
         var expectedOutputs = new Dictionary<string, ExpectedTexture>(StringComparer.OrdinalIgnoreCase);
         var pendingTextures = new List<PendingTexture>();
+        var protectedLegacyTranslucentTextures = new HashSet<string>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var wldEntry in source.Entries.Where(entry =>
+                     entry.Name.EndsWith(".wld", StringComparison.OrdinalIgnoreCase)))
+        {
+            var wldPayload = await source.ReadEntryAsync(wldEntry.Name, cancellationToken)
+                .ConfigureAwait(false);
+            protectedLegacyTranslucentTextures.UnionWith(
+                LegacyTranslucentMaterialSafetyPolicy.FindProtectedTextureNames(wldPayload));
+        }
         var textureEntries = source.Entries
             .Where(entry => entry.IsTexture
                 && (rebuildFromReuseArchive
@@ -236,6 +246,29 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                     // Even an explicit Reprocess override cannot change their
                     // dimensions, palette, color key, or sprite border.
                     counter.Preserve(celestialPreservedReason);
+                    var restored = await RestoreOriginalIfBaselineChangedAsync(
+                        reuseArchive,
+                        entry,
+                        sourceTexturePath,
+                        context.WorkingDirectory,
+                        index,
+                        replacements,
+                        enhancedTexturePaths,
+                        cancellationToken).ConfigureAwait(false);
+                    if (!restored)
+                    {
+                        TryDeleteTemporaryFile(sourceTexturePath);
+                    }
+
+                    continue;
+                }
+
+                if (protectedLegacyTranslucentTextures.Contains(entry.Name))
+                {
+                    // WLD material flags, animation frames, and bitmap sizes
+                    // form one blend contract. Preserve the verified original
+                    // even when an explicit Reprocess override is present.
+                    counter.Preserve(LegacyTranslucentMaterialSafetyPolicy.PreservedReason);
                     var restored = await RestoreOriginalIfBaselineChangedAsync(
                         reuseArchive,
                         entry,

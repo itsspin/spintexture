@@ -17,7 +17,8 @@ public sealed record NativeGraphicsUiStatus(
     bool NeedsAttention,
     bool CanApply,
     bool CanRestore,
-    NativeGraphicsUiPreset? AppliedPreset = null);
+    NativeGraphicsUiPreset? AppliedPreset = null,
+    bool ThirdPersonPitchLockEnabled = false);
 
 public sealed record NativeGraphicsUiSetting(
     string Section,
@@ -77,6 +78,8 @@ internal static class NativeGraphicsUiText
         "PostEffects" => "Post effects",
         "Bloom" => "Bloom lighting",
         "ShadowClipPlane" => "Shadow distance",
+        "MouseShiftPitch" => "Shift-only character pitch",
+        "MouseShiftPitchSpring" => "Return character pitch to level",
         _ => key
     };
 
@@ -91,6 +94,16 @@ internal static class NativeGraphicsUiText
         if (value.Equals("FALSE", StringComparison.OrdinalIgnoreCase))
         {
             return "Off";
+        }
+
+        if (key is "MouseShiftPitch" or "MouseShiftPitchSpring")
+        {
+            return value.Trim() switch
+            {
+                "1" => "On",
+                "0" => "Off",
+                _ => value
+            };
         }
 
         if (value.Equals("(not set)", StringComparison.OrdinalIgnoreCase))
@@ -113,11 +126,13 @@ public interface INativeGraphicsService
     Task<NativeGraphicsUiPlan> PlanAsync(
         string installPath,
         NativeGraphicsUiPreset preset,
+        bool thirdPersonPitchLockEnabled,
         CancellationToken cancellationToken);
 
     Task ApplyAsync(
         string installPath,
         NativeGraphicsUiPreset preset,
+        bool thirdPersonPitchLockEnabled,
         IProgress<string>? progress,
         CancellationToken cancellationToken);
 
