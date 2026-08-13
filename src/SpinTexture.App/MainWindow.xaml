@@ -654,7 +654,7 @@
                         <StackPanel>
                             <TextBlock Text="03 / ENHANCEMENT PROFILE" Style="{StaticResource EyebrowTextStyle}" />
                             <TextBlock Text="Keep the era. Recover the detail." Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,4" />
-                            <TextBlock Text="Choose the art direction first. Every route keeps the same alpha, format, mip, fidelity, and archive safety gates."
+                            <TextBlock Text="Choose the art direction first. Every route keeps format, alpha, mip, and archive safety; protected assets remain original."
                                        Style="{StaticResource CaptionStyle}" />
 
                             <ListBox Margin="0,17,0,0"
@@ -705,6 +705,42 @@
                                     </DataTemplate>
                                 </ListBox.ItemTemplate>
                             </ListBox>
+
+                            <Border Margin="0,14,0,0" Padding="13" CornerRadius="7"
+                                    Background="#17131A" BorderBrush="#6A3A25" BorderThickness="1">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsGraphicPaintedSelected}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="220" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Margin="0,0,14,0">
+                                        <TextBlock Text="PAINTED THEME" Style="{StaticResource FieldLabelStyle}" />
+                                        <ComboBox Margin="0,6,0,0"
+                                                  ItemsSource="{Binding PaintedThemeOptions}"
+                                                  SelectedItem="{Binding SelectedPaintedThemeOption}"
+                                                  DisplayMemberPath="Name"
+                                                  AutomationProperties.Name="Graphic Painted Fantasy theme" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding SelectedPaintedThemeOption.Name}"
+                                                   FontSize="12" FontWeight="SemiBold"
+                                                   Foreground="{StaticResource PrimaryTextBrush}" />
+                                        <TextBlock Text="{Binding SelectedPaintedThemeOption.Description}"
+                                                   Margin="0,5,0,0" Style="{StaticResource CaptionStyle}"
+                                                   TextWrapping="Wrap" LineHeight="17" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
 
                             <Border Margin="0,14,0,0" Padding="13" CornerRadius="7" Background="#0D1117"
                                     BorderBrush="#343B46" BorderThickness="1">
@@ -770,7 +806,7 @@
                                         </Border>
                                     </Grid>
                                     <TextBlock Grid.Row="2" Margin="1,8,1,0" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap"
-                                               Text="This pair demonstrates the recommended default only. Illustrated, Rustic Painted, and Material Detail previews are generated from your own selected-zone build so SpinTexture never substitutes a marketing mockup for actual output." />
+                                               Text="This pair demonstrates the recommended default only. Graphic Painted Fantasy, Rustic Painted, and Material Detail previews are generated from your own selected-zone build so SpinTexture never substitutes a marketing mockup for actual output." />
                                 </Grid>
                             </Border>
                         </StackPanel>
@@ -785,8 +821,8 @@
                         <Border Grid.Column="0" Style="{StaticResource CardStyle}" Margin="0,0,7,0">
                             <StackPanel>
                                 <TextBlock Text="04 / TEXTURE CEILING" Style="{StaticResource EyebrowTextStyle}" />
-                                <TextBlock Text="Maximum edge size" Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,4" />
-                                <TextBlock Text="A ceiling prevents tiny UI art and distant props from ballooning unnecessarily."
+                                <TextBlock Text="Upscale ceiling (longest edge)" Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,4" />
+                                <TextBlock Text="This is a size limit, not a target. SpinTexture performs one meaningful up-to-4x restoration pass and preserves aspect ratio."
                                            Style="{StaticResource CaptionStyle}" />
                                 <ListBox Margin="0,16,0,0"
                                          Background="Transparent"
@@ -811,10 +847,12 @@
                                         </DataTemplate>
                                     </ListBox.ItemTemplate>
                                 </ListBox>
+                                <TextBlock Margin="2,10,2,0" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap"
+                                           Text="1,024 saves space  •  2,048 is recommended  •  4,096 helps only when the source is over 512 px. Sources at 512 px or below usually produce the same top level at 2K and 4K." />
                                 <CheckBox Margin="2,15,0,0" IsChecked="{Binding GenerateMipMaps}">
                                     <StackPanel>
-                                        <TextBlock Text="Generate full mip chains" FontWeight="SemiBold" />
-                                        <TextBlock Text="Reduces shimmer at distance; recommended." Style="{StaticResource CaptionStyle}" Margin="0,3,0,0" />
+                                        <TextBlock Text="Generate DDS mip chains (recommended)" FontWeight="SemiBold" />
+                                        <TextBlock Text="Separate from upscale size. Smaller DDS levels reduce distance shimmer; alpha cutouts stay top-level only for legacy-renderer safety." Style="{StaticResource CaptionStyle}" Margin="0,3,0,0" TextWrapping="Wrap" />
                                     </StackPanel>
                                 </CheckBox>
                             </StackPanel>

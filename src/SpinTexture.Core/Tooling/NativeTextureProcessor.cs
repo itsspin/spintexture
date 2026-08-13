@@ -1002,25 +1002,39 @@ public sealed class NativeTextureProcessor
         }
 
         var fidelity = CalculateFidelityMetrics(job.Decoded, cropped);
-        var anchored = cropped.AnchorVisibleChannelMeansFrom(job.Decoded);
-        var anchoredFidelity = CalculateFidelityMetrics(job.Decoded, anchored.Image);
-        var anchorReducesError =
-            anchoredFidelity.RoundTripMeanSquaredError < fidelity.RoundTripMeanSquaredError
-            && anchoredFidelity.MeanLuminanceDrift <= fidelity.MeanLuminanceDrift
-            && anchoredFidelity.MaximumMeanChannelDrift <= fidelity.MaximumMeanChannelDrift;
-        var anchorRepairsDrift =
-            (fidelity.MeanLuminanceDrift > 6 || fidelity.MaximumMeanChannelDrift > 12)
-            && anchoredFidelity.MeanLuminanceDrift <= 6
-            && anchoredFidelity.MaximumMeanChannelDrift <= 12
-            && anchoredFidelity.RoundTripLuminancePsnr >= 27.5;
-        if (anchorReducesError || anchorRepairsDrift)
+        if (key.WorkerPreset is not (TexturePreset.Illustrated or TexturePreset.RusticPainted))
         {
-            cropped = anchored.Image;
-            fidelity = anchoredFidelity;
+            var anchored = cropped.AnchorVisibleChannelMeansFrom(job.Decoded);
+            var anchoredFidelity = CalculateFidelityMetrics(job.Decoded, anchored.Image);
+            var anchorReducesError =
+                anchoredFidelity.RoundTripMeanSquaredError < fidelity.RoundTripMeanSquaredError
+                && anchoredFidelity.MeanLuminanceDrift <= fidelity.MeanLuminanceDrift
+                && anchoredFidelity.MaximumMeanChannelDrift <= fidelity.MaximumMeanChannelDrift;
+            var anchorRepairsDrift =
+                (fidelity.MeanLuminanceDrift > 6 || fidelity.MaximumMeanChannelDrift > 12)
+                && anchoredFidelity.MeanLuminanceDrift <= 6
+                && anchoredFidelity.MaximumMeanChannelDrift <= 12
+                && anchoredFidelity.RoundTripLuminancePsnr >= 27.5;
+            if (anchorReducesError || anchorRepairsDrift)
+            {
+                cropped = anchored.Image;
+                fidelity = anchoredFidelity;
+            }
         }
 
         ValidateNeuralOutputForPreset(key.WorkerPreset, fidelity);
-        if (key.WorkerPreset == TexturePreset.RusticPainted)
+        if (key.WorkerPreset == TexturePreset.Illustrated)
+        {
+            var painted = cropped.ApplyGraphicPaintedFinish(
+                GetGraphicPaintedStrength(job.Request),
+                job.Request.WrapEdges);
+            painted = painted.ApplyPaintedTheme(
+                job.Request.Options.PaintedTheme,
+                GetPaintedThemeStrength(job.Request));
+            ValidateGraphicPaintedOutput(CalculateFidelityMetrics(job.Decoded, painted));
+            cropped = painted;
+        }
+        else if (key.WorkerPreset == TexturePreset.RusticPainted)
         {
             var painted = cropped.ApplyRusticPaintedGrade(
                 GetRusticPaintedStrength(job.Request));
@@ -1069,9 +1083,10 @@ public sealed class NativeTextureProcessor
         return key.WorkerPreset switch
         {
             TexturePreset.MaximumDetail => "Batched Real-ESRGAN maximum-detail reconstruction with TTA",
-            TexturePreset.Illustrated => "Batched Real-ESRGAN illustrated reconstruction",
+            TexturePreset.Illustrated =>
+                $"Batched Real-ESRGAN illustrated reconstruction with {FormatPaintedTheme(job.Request.Options.PaintedTheme)} finishing",
             TexturePreset.RusticPainted =>
-                "Batched illustrated reconstruction with bounded rustic painted grading",
+                "Batched graphic painted reconstruction with bounded rustic grading",
             TexturePreset.Faithful when job.EffectivePreset != TexturePreset.Faithful =>
                 "Batched faithful Real-ESRNet reconstruction (fidelity fallback)",
             _ => "Batched Real-ESRNet faithful color restoration with seam-safe border"
@@ -1269,7 +1284,17 @@ public sealed class NativeTextureProcessor
         // users selected this profile to see. Alpha is still restored separately
         // in RunNeuralColorPassAsync, including cutout coverage preservation.
         var finalImage = primary.Image;
-        if (effectivePreset == TexturePreset.RusticPainted)
+        if (effectivePreset == TexturePreset.Illustrated)
+        {
+            finalImage = finalImage.ApplyGraphicPaintedFinish(
+                GetGraphicPaintedStrength(request),
+                request.WrapEdges);
+            finalImage = finalImage.ApplyPaintedTheme(
+                request.Options.PaintedTheme,
+                GetPaintedThemeStrength(request));
+            ValidateGraphicPaintedOutput(CalculateFidelityMetrics(decoded, finalImage));
+        }
+        else if (effectivePreset == TexturePreset.RusticPainted)
         {
             finalImage = finalImage.ApplyRusticPaintedGrade(
                 GetRusticPaintedStrength(request));
@@ -1301,9 +1326,9 @@ public sealed class NativeTextureProcessor
             TexturePreset.MaximumDetail =>
                 "Real-ESRGAN maximum-detail reconstruction with TTA",
             TexturePreset.Illustrated =>
-                "Real-ESRGAN illustrated reconstruction",
+                $"Real-ESRGAN illustrated reconstruction with {FormatPaintedTheme(request.Options.PaintedTheme)} finishing",
             TexturePreset.RusticPainted =>
-                "Real-ESRGAN illustrated reconstruction with bounded rustic painted grading",
+                "Real-ESRGAN graphic painted reconstruction with bounded rustic grading",
             _ =>
                 "Real-ESRNet faithful color restoration with wrapped border"
         };
@@ -1418,7 +1443,13 @@ public sealed class NativeTextureProcessor
         TexturePreset preset,
         TextureFidelityMetrics fidelity)
     {
-        if (preset is TexturePreset.Illustrated or TexturePreset.RusticPainted)
+        if (preset == TexturePreset.Illustrated)
+        {
+            ValidateGraphicPaintedOutput(fidelity);
+            return;
+        }
+
+        if (preset == TexturePreset.RusticPainted)
         {
             ValidateStylizedOutput(fidelity);
             return;
@@ -1495,6 +1526,58 @@ public sealed class NativeTextureProcessor
         }
     }
 
+    private static void ValidateGraphicPaintedOutput(TextureFidelityMetrics fidelity)
+    {
+        if (fidelity.SourceStatistics.Samples == 0)
+        {
+            return;
+        }
+
+        if (fidelity.EnhancedStatistics.Samples == 0
+            || fidelity.MeanLuminanceDrift > 10
+            || fidelity.MaximumMeanChannelDrift > 20
+            // Graphic abstraction deliberately reorganizes fine texels, so a
+            // faithful-mode PSNR floor rejects healthy illustrated output. Keep
+            // a low catastrophic floor and require the coarse scene layout to
+            // remain strongly correlated instead.
+            || fidelity.RoundTripLuminancePsnr < 12.5
+            || fidelity.CoarseLuminanceCorrelation < 0.72
+            || (fidelity.SourceEdgeEnergy >= 0.5
+                && fidelity.EdgeEnergyRatio is < 0.18 or > 2.25)
+            || fidelity.ExtremeLuminanceGrowth > 0.02)
+        {
+            throw new InvalidDataException(
+                "The graphic-painted output exceeded its bounded fidelity limits "
+                + $"(luma {fidelity.MeanLuminanceDrift:0.00}, "
+                + $"channel {fidelity.MaximumMeanChannelDrift:0.00}, "
+                + $"PSNR {fidelity.RoundTripLuminancePsnr:0.00} dB, "
+                + $"coarse structure {fidelity.CoarseLuminanceCorrelation:0.000}, "
+                + $"edge {fidelity.EdgeEnergyRatio:0.00}x, "
+                + $"clipping growth {fidelity.ExtremeLuminanceGrowth:P1}).");
+        }
+    }
+
+    private static double GetGraphicPaintedStrength(NativeTextureProcessRequest request)
+    {
+        var strength = request.Options.Scope switch
+        {
+            // Animated effects benefit from cleaner shapes, but retaining their
+            // timing silhouettes matters more than strong material flattening.
+            AssetScope.SpellEffectsOnly => 0.48,
+            AssetScope.CharactersAndEquipmentOnly => 0.84,
+            AssetScope.WorldCharactersAndEquipment => 0.90,
+            AssetScope.AllSafeTextures => 0.90,
+            _ => 0.94
+        };
+
+        if (request.Classification.Kind == TextureKind.Cutout)
+        {
+            strength *= 0.72;
+        }
+
+        return strength;
+    }
+
     private static double GetRusticPaintedStrength(NativeTextureProcessRequest request)
     {
         var strength = request.Options.Scope switch
@@ -1513,6 +1596,35 @@ public sealed class NativeTextureProcessor
 
         return strength;
     }
+
+    private static double GetPaintedThemeStrength(NativeTextureProcessRequest request)
+    {
+        var strength = request.Options.Scope switch
+        {
+            AssetScope.SpellEffectsOnly => 0.24,
+            AssetScope.CharactersAndEquipmentOnly => 0.52,
+            AssetScope.WorldCharactersAndEquipment => 0.58,
+            AssetScope.AllSafeTextures => 0.55,
+            _ => 0.62
+        };
+
+        if (request.Classification.Kind == TextureKind.Cutout)
+        {
+            strength *= 0.62;
+        }
+
+        return strength;
+    }
+
+    private static string FormatPaintedTheme(PaintedTheme theme) => theme switch
+    {
+        PaintedTheme.ClassicPainted => "classic graphic-painted",
+        PaintedTheme.LightStorybook => "light storybook",
+        PaintedTheme.DarkGothic => "dark gothic",
+        PaintedTheme.ComicInk => "comic ink",
+        _ => throw new InvalidDataException(
+            "A concrete painted theme was not resolved before native processing.")
+    };
 
     private static TextureFidelityMetrics CalculateFidelityMetrics(
         TgaPixelBuffer source,
@@ -1624,6 +1736,12 @@ public sealed class NativeTextureProcessor
             Math.Max(
                 Math.Abs(enhancedStatistics.MeanGreen - sourceStatistics.MeanGreen),
                 Math.Abs(enhancedStatistics.MeanBlue - sourceStatistics.MeanBlue)));
+        var coarseLuminanceCorrelation = CalculateCoarseLuminanceCorrelation(
+            sourceLuminance,
+            reducedLuminance,
+            visible,
+            source.Width,
+            source.Height);
 
         return new TextureFidelityMetrics(
             sourceStatistics,
@@ -1632,12 +1750,94 @@ public sealed class NativeTextureProcessor
             maximumChannelDrift,
             meanSquaredError,
             psnr,
+            coarseLuminanceCorrelation,
             meanSourceEdge,
             edgeRatio,
             Math.Max(
                 0,
                 enhancedStatistics.ExtremeLuminanceFraction
                 - sourceStatistics.ExtremeLuminanceFraction));
+    }
+
+    private static double CalculateCoarseLuminanceCorrelation(
+        double[] source,
+        double[] enhanced,
+        bool[] visible,
+        int width,
+        int height)
+    {
+        const int maximumGrid = 8;
+        var columns = Math.Min(maximumGrid, width);
+        var rows = Math.Min(maximumGrid, height);
+        var sourceCells = new List<double>(checked(columns * rows));
+        var enhancedCells = new List<double>(checked(columns * rows));
+        for (var cellY = 0; cellY < rows; cellY++)
+        {
+            var top = (cellY * height) / rows;
+            var bottom = ((cellY + 1) * height) / rows;
+            for (var cellX = 0; cellX < columns; cellX++)
+            {
+                var left = (cellX * width) / columns;
+                var right = ((cellX + 1) * width) / columns;
+                double sourceSum = 0;
+                double enhancedSum = 0;
+                var samples = 0;
+                for (var y = top; y < bottom; y++)
+                {
+                    for (var x = left; x < right; x++)
+                    {
+                        var index = (y * width) + x;
+                        if (!visible[index])
+                        {
+                            continue;
+                        }
+
+                        sourceSum += source[index];
+                        enhancedSum += enhanced[index];
+                        samples++;
+                    }
+                }
+
+                if (samples > 0)
+                {
+                    sourceCells.Add(sourceSum / samples);
+                    enhancedCells.Add(enhancedSum / samples);
+                }
+            }
+        }
+
+        if (sourceCells.Count < 2)
+        {
+            return 1;
+        }
+
+        var sourceMean = sourceCells.Average();
+        var enhancedMean = enhancedCells.Average();
+        double covariance = 0;
+        double sourceVariance = 0;
+        double enhancedVariance = 0;
+        for (var index = 0; index < sourceCells.Count; index++)
+        {
+            var sourceDelta = sourceCells[index] - sourceMean;
+            var enhancedDelta = enhancedCells[index] - enhancedMean;
+            covariance += sourceDelta * enhancedDelta;
+            sourceVariance += sourceDelta * sourceDelta;
+            enhancedVariance += enhancedDelta * enhancedDelta;
+        }
+
+        if (sourceVariance < 0.001)
+        {
+            // A source with no coarse spatial structure cannot meaningfully be
+            // correlated; its palette, clipping and PSNR gates remain active.
+            return 1;
+        }
+
+        if (enhancedVariance < 0.001)
+        {
+            return 0;
+        }
+
+        return covariance / Math.Sqrt(sourceVariance * enhancedVariance);
     }
 
     private static double Luminance(ReadOnlySpan<byte> rgba, int offset) =>
@@ -1879,6 +2079,15 @@ public sealed class NativeTextureProcessor
         {
             throw new ArgumentOutOfRangeException(nameof(request.WrapPadding));
         }
+
+        if (!Enum.IsDefined(request.Options.PaintedTheme)
+            || request.Options.PaintedTheme == PaintedTheme.ZoneAware
+            || (request.Options.Preset != TexturePreset.Illustrated
+                && request.Options.PaintedTheme != PaintedTheme.ClassicPainted))
+        {
+            throw new InvalidDataException(
+                "Native texture processing requires one concrete painted theme for Graphic Painted Fantasy only.");
+        }
     }
 
     private static string CreateDirectory(string parent, string name)
@@ -2103,6 +2312,7 @@ public sealed class NativeTextureProcessor
         double MaximumMeanChannelDrift,
         double RoundTripMeanSquaredError,
         double RoundTripLuminancePsnr,
+        double CoarseLuminanceCorrelation,
         double SourceEdgeEnergy,
         double EdgeEnergyRatio,
         double ExtremeLuminanceGrowth);

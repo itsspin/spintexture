@@ -24,6 +24,15 @@ public sealed record ScopeOptionViewModel(
     public override string ToString() => Name;
 }
 
+public sealed record PaintedThemeOptionViewModel(
+    PaintedTheme Value,
+    string Name,
+    string Description,
+    bool IsRecommended = false)
+{
+    public override string ToString() => Name;
+}
+
 public sealed record LogEntryViewModel(
     string Timestamp,
     string Level,

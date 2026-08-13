@@ -18,7 +18,92 @@ internal static class ControlTextureAndIndexedBmpSelfTests
         await TestInvisibleManControlTextureIsPreservedAsync(cancellationToken).ConfigureAwait(false);
         await TestFreshCharacterBuildEnhancesEligibleIndexedBitmapAsync(cancellationToken)
             .ConfigureAwait(false);
+        TestPaintedPresetRouting();
         TestRichIndexedBitmapRoundTrip();
+    }
+
+    private static void TestPaintedPresetRouting()
+    {
+        var indexed = new TextureMetadata(
+            TextureFileFormat.Bmp,
+            "BI_RGB",
+            64,
+            64,
+            1,
+            8,
+            TextureAlphaStatus.None,
+            IsCompressed: false,
+            IsTopDown: false,
+            IsCubeMap: false,
+            IsVolumeTexture: false,
+            1,
+            null,
+            UsesDx10Header: false);
+        var illustrated = new UpscaleOptions(
+            TexturePreset.Illustrated,
+            AssetScope.WorldOnly,
+            MaximumDimension: 2048,
+            GenerateMipMaps: true,
+            InstallAfterBuild: false,
+            SelectedZone: null);
+
+        AssertEqual(
+            TexturePreset.Illustrated,
+            PfsTextureArchiveBuilder.ResolveColorProcessingOptions(
+                illustrated,
+                indexed,
+                "brick01.bmp",
+                allowExplicitEffectArt: false).Preset,
+            "painted indexed world art must not be silently redirected to Texture HD");
+        AssertEqual(
+            TexturePreset.RusticPainted,
+            PfsTextureArchiveBuilder.ResolveColorProcessingOptions(
+                illustrated with { Preset = TexturePreset.RusticPainted },
+                indexed,
+                "armor0401.bmp",
+                allowExplicitEffectArt: false).Preset,
+            "rustic indexed armor art must reach the painted model");
+        AssertEqual(
+            TexturePreset.ClassicHd,
+            PfsTextureArchiveBuilder.ResolveColorProcessingOptions(
+                illustrated with { Preset = TexturePreset.MaximumDetail },
+                indexed,
+                "armor0401.bmp",
+                allowExplicitEffectArt: false).Preset,
+            "non-painted indexed art should retain the palette-stable Texture HD route");
+        AssertEqual(
+            TexturePreset.ClassicHd,
+            PfsTextureArchiveBuilder.ResolveColorProcessingOptions(
+                illustrated,
+                indexed,
+                "water01.bmp",
+                allowExplicitEffectArt: false).Preset,
+            "animated indexed materials must retain the conservative route");
+
+        var ordinaryColor = indexed with
+        {
+            FileFormat = TextureFileFormat.Dds,
+            PayloadFormat = "DXT1",
+            BitsPerPixel = 4,
+            IsCompressed = true,
+            TexconvFormat = "BC1_UNORM"
+        };
+        AssertEqual(
+            TexturePreset.Illustrated,
+            PfsTextureArchiveBuilder.ResolveColorProcessingOptions(
+                illustrated,
+                ordinaryColor,
+                "fresgn01.dds",
+                allowExplicitEffectArt: false).Preset,
+            "explicit painted signs should retain the selected art direction");
+        AssertEqual(
+            TexturePreset.Faithful,
+            PfsTextureArchiveBuilder.ResolveColorProcessingOptions(
+                illustrated,
+                ordinaryColor,
+                "fire01.dds",
+                allowExplicitEffectArt: false).Preset,
+            "animated material sequences should remain faithful outside the explicit effect scope");
     }
 
     private static async Task TestFreshCharacterBuildEnhancesEligibleIndexedBitmapAsync(

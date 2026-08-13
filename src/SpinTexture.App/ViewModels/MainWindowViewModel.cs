@@ -30,6 +30,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private bool _generateMipMaps = true;
     private ScanSummary? _scanSummary;
     private PresetOptionViewModel _selectedPresetOption;
+    private PaintedThemeOptionViewModel _selectedPaintedThemeOption;
     private ScopeOptionViewModel _selectedScopeOption;
     private string? _selectedZone;
     private int _selectedMaximumDimension = 2048;
@@ -110,13 +111,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 "Slowest route; eight-view TTA performs substantially more GPU work"),
             new PresetOptionViewModel(
                 TexturePreset.Illustrated,
-                "Illustrated / Clean Painted",
-                "STYLIZED / CLEAN SHAPES",
-                "Uses the official illustrated Real-ESRGAN model for flatter painted detail and cleaner shapes.",
-                "Stylizes texture art; it does not add toon outlines to 3D geometry",
-                "Real-ESRGAN x4plus-anime",
-                "Cleaner painted forms and less photographic surface noise",
-                "Moderate route; faithful fallback protected"),
+                "Graphic Painted Fantasy",
+                "STYLIZED / BOLD PAINTED PLANES",
+                "Reinterprets safe texture art with stronger painted color planes, graphic contrast, and clean silhouettes.",
+                "A visible hand-painted art direction without changing models, geometry, or lighting",
+                "Illustrated reconstruction + SpinTexture graphic-paint finish",
+                "Bold color grouping, readable shapes, and reduced photographic noise",
+                "Moderate route; asset-aware safety and faithful fallback"),
             new PresetOptionViewModel(
                 TexturePreset.RusticPainted,
                 "Rustic Painted Fantasy",
@@ -125,7 +126,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 "Muted stone, wood, foliage, cloth, and armor without replacing the original composition",
                 "Real-ESRGAN x4plus-anime + SpinTexture painted grade",
                 "Warm shadows, olive greens, restrained saturation, and subtle painted tone planes",
-                "Moderate route; stylized fidelity gate and faithful fallback")
+                "Earthier and more subdued than Graphic Painted Fantasy; protected by stylized fidelity checks")
         ];
 
         ScopeOptions =
@@ -144,8 +145,34 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             new ScopeOptionViewModel(AssetScope.AllSafeTextures, "All safe textures", "Every classified texture that is safe to transform.")
         ];
 
+        PaintedThemeOptions =
+        [
+            new PaintedThemeOptionViewModel(
+                PaintedTheme.ZoneAware,
+                "Follow each zone",
+                "Applies a restrained reviewed mood per zone archive. Neriak receives darker material and shadow shaping while its original bright magic, signs, metals, and accent colors remain vivid. Unknown zones stay balanced; this is a built-in map, not generative lore AI.",
+                IsRecommended: true),
+            new PaintedThemeOptionViewModel(
+                PaintedTheme.ClassicPainted,
+                "Classic painted",
+                "Balanced graphic fantasy color, painted planes, and clean silhouettes without an extra bright or dark palette bias."),
+            new PaintedThemeOptionViewModel(
+                PaintedTheme.LightStorybook,
+                "Light storybook",
+                "Warmer highlights, inviting color separation, and a softer illustrated-fantasy presentation."),
+            new PaintedThemeOptionViewModel(
+                PaintedTheme.DarkGothic,
+                "Dark gothic",
+                "Deeper material shadows and moodier fantasy color while protecting the source palette's vivid and bright accents."),
+            new PaintedThemeOptionViewModel(
+                PaintedTheme.ComicInk,
+                "Comic ink",
+                "Stronger graphic contrast and dark texture accents for the boldest illustrated result. It does not outline 3D geometry.")
+        ];
+
         TextureCaps = [1024, 2048, 4096];
         _selectedPresetOption = PresetOptions.Single(option => option.Value == TexturePreset.ClassicHd);
+        _selectedPaintedThemeOption = PaintedThemeOptions.Single(option => option.Value == PaintedTheme.ZoneAware);
         _selectedScopeOption = ScopeOptions.Single(option => option.Value == AssetScope.WorldOnly);
         var rememberedInstall = _preferences.Read().LastInstallPath;
         if (!string.IsNullOrWhiteSpace(rememberedInstall)
@@ -181,6 +208,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     }
 
     public IReadOnlyList<PresetOptionViewModel> PresetOptions { get; }
+    public IReadOnlyList<PaintedThemeOptionViewModel> PaintedThemeOptions { get; }
     public IReadOnlyList<ScopeOptionViewModel> ScopeOptions { get; }
     public IReadOnlyList<int> TextureCaps { get; }
     public ObservableCollection<string> Zones { get; } = [];
@@ -358,10 +386,26 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (value is not null && SetProperty(ref _selectedPresetOption, value))
             {
+                OnPropertyChanged(nameof(IsGraphicPaintedSelected));
                 UpdateEstimate();
             }
         }
     }
+
+    public PaintedThemeOptionViewModel SelectedPaintedThemeOption
+    {
+        get => _selectedPaintedThemeOption;
+        set
+        {
+            if (value is not null && SetProperty(ref _selectedPaintedThemeOption, value))
+            {
+                UpdateEstimate();
+            }
+        }
+    }
+
+    public bool IsGraphicPaintedSelected =>
+        SelectedPresetOption.Value == TexturePreset.Illustrated;
 
     public ScopeOptionViewModel SelectedScopeOption
     {
@@ -627,6 +671,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             {
                 SelectedPresetOption = PresetOptions.Single(option =>
                     option.Value == recovery.Options.Preset);
+                SelectedPaintedThemeOption = PaintedThemeOptions.Single(option =>
+                    option.Value == recovery.Options.PaintedTheme);
                 SelectedScopeOption = ScopeOptions.Single(option =>
                     option.Value == recovery.Options.Scope);
                 SelectedMaximumDimension = recovery.Options.MaximumDimension;
@@ -707,7 +753,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 SelectedMaximumDimension,
                 GenerateMipMaps,
                 InstallAfterBuild: false,
-                IsSelectedZoneScope ? SelectedZone : null);
+                IsSelectedZoneScope ? SelectedZone : null,
+                PaintedTheme: EffectivePaintedTheme);
 
             TexturePackBuildResult result = await _workflow.BuildAsync(
                 InstallPath,
@@ -1351,7 +1398,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             SelectedMaximumDimension,
             GenerateMipMaps,
             InstallAfterBuild: false,
-            IsSelectedZoneScope ? SelectedZone : null);
+            IsSelectedZoneScope ? SelectedZone : null,
+            PaintedTheme: EffectivePaintedTheme);
         if (TryUpdateEstimateFromHistory(estimateOptions))
         {
             return;
@@ -1490,6 +1538,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             : "Calibrated from the output size and archive count of your latest matching staged pack.";
         return true;
     }
+
+    private PaintedTheme EffectivePaintedTheme => IsGraphicPaintedSelected
+        ? SelectedPaintedThemeOption.Value
+        : PaintedTheme.ClassicPainted;
 
     private void AddLog(string level, string message)
     {

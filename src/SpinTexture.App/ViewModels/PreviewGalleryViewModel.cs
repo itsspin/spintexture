@@ -72,7 +72,7 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
         new("Redo: Original Clarity", TextureOverrideAction.Reprocess, TexturePreset.Faithful),
         new("Redo: Texture HD", TextureOverrideAction.Reprocess, TexturePreset.ClassicHd),
         new("Redo: Material Detail", TextureOverrideAction.Reprocess, TexturePreset.MaximumDetail),
-        new("Redo: Illustrated / Clean Painted", TextureOverrideAction.Reprocess, TexturePreset.Illustrated),
+        new("Redo: Graphic Painted Fantasy", TextureOverrideAction.Reprocess, TexturePreset.Illustrated),
         new("Redo: Rustic Painted Fantasy", TextureOverrideAction.Reprocess, TexturePreset.RusticPainted)
     ];
     public bool CanApplyChoices { get; }

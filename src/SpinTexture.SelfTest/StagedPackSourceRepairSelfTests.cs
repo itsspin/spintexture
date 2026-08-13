@@ -117,7 +117,8 @@ internal static class StagedPackSourceRepairSelfTests
                         new Dictionary<string, int>(),
                         []))
                     {
-                        TexturePipelineRevision = 3
+                        TexturePipelineRevision = 3,
+                        PaintedProfileRevision = TextureBuildReport.CurrentPaintedProfileRevision
                     },
                     cancellationToken: cancellationToken).ConfigureAwait(false);
             }
@@ -194,6 +195,10 @@ internal static class StagedPackSourceRepairSelfTests
                 TextureProcessingPipeline.CurrentRevision,
                 repaired.Report.TexturePipelineRevision,
                 "combined pipeline revision");
+            AssertEqual(
+                TextureBuildReport.CurrentPaintedProfileRevision,
+                repaired.Report.PaintedProfileRevision,
+                "combined source/safety repair must preserve baseline visual-profile provenance");
             AssertSequenceEqual(
                 baselineOutputs["clean.s3d"],
                 await File.ReadAllBytesAsync(
@@ -465,11 +470,12 @@ internal static class StagedPackSourceRepairSelfTests
             }
 
             var options = new UpscaleOptions(
-                TexturePreset.MaximumDetail,
-                AssetScope.WorldOnly,
+                TexturePreset.Illustrated,
+                AssetScope.WorldCharactersAndEquipment,
                 2048,
                 GenerateMipMaps: true,
-                InstallAfterBuild: false);
+                InstallAfterBuild: false,
+                PaintedTheme: PaintedTheme.DarkGothic);
             var baselineManifestPath = Path.Combine(baselineDirectory, "manifest.json");
             await new ManifestStore().WriteBuildManifestAsync(
                     baselineManifestPath,
@@ -563,6 +569,14 @@ internal static class StagedPackSourceRepairSelfTests
                 async (context, token) =>
                 {
                     rebuiltPaths.Add(context.RelativeInstallPath);
+                    AssertEqual(
+                        TexturePreset.Illustrated,
+                        context.Options.Preset,
+                        "source-repair rebuild must retain painted preset");
+                    AssertEqual(
+                        PaintedTheme.DarkGothic,
+                        context.Options.PaintedTheme,
+                        "source-repair rebuild must retain painted theme");
                     var sourceBytes = await File.ReadAllBytesAsync(context.SourcePath, token)
                         .ConfigureAwait(false);
                     var marker = System.Text.Encoding.UTF8.GetBytes(
@@ -636,6 +650,10 @@ internal static class StagedPackSourceRepairSelfTests
                 "only contaminated archives may enter the rebuild builder");
 
             var repairedManifest = repaired.StagedBuild.Manifest;
+            AssertEqual(
+                options,
+                repairedManifest.Options,
+                "source repair manifest must preserve complete painted options");
             foreach (var relativePath in relativePaths)
             {
                 var entry = repairedManifest.Entries.Single(candidate =>
