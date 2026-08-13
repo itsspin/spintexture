@@ -18,8 +18,6 @@ public sealed class NativeGraphicsSettingsService
     private const string OriginalBackupFileName = "eqclient.original.ini";
     private const string AdvancedOptionsRelativePath =
         "uifiles\\default\\EQUI_AdvancedDisplayOptionsWindow.xml";
-    private const string OptionsRelativePath =
-        "uifiles\\default\\EQUI_OptionsWindow.xml";
     private const string GraphicsDllRelativePath = "EQGraphics.dll";
     private const string GameExecutableRelativePath = "eqgame.exe";
     private const string MaximumShadowClipPlane = "100";
@@ -37,17 +35,10 @@ public sealed class NativeGraphicsSettingsService
         new("Defaults", "Bloom")
     ];
 
-    private static readonly ManagedSetting[] GraphicsOnlyManagedSettings =
+    private static readonly ManagedSetting[] ManagedSettings =
     [
         .. LightingOnlyManagedSettings,
         new("Options", "ShadowClipPlane")
-    ];
-
-    private static readonly ManagedSetting[] ManagedSettings =
-    [
-        .. GraphicsOnlyManagedSettings,
-        new("Options", "MouseShiftPitch"),
-        new("Options", "MouseShiftPitchSpring")
     ];
 
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
@@ -204,11 +195,7 @@ public sealed class NativeGraphicsSettingsService
                 active.ManifestPath,
                 currentValues,
                 summary,
-                HasVerifiedRestorePoint: true,
-                ThirdPersonPitchLockEnabled:
-                    manifest.SchemaVersion == NativeGraphicsSettingsManifest.CurrentSchemaVersion
-                        ? manifest.ThirdPersonPitchLockEnabled
-                        : IsThirdPersonPitchLockEnabled(document));
+                HasVerifiedRestorePoint: true);
         }
 
         var capabilityError = await CheckCapabilityAsync(paths, cancellationToken).ConfigureAwait(false);
@@ -229,24 +216,12 @@ public sealed class NativeGraphicsSettingsService
             null,
             null,
             currentValues,
-            "No SpinTexture native graphics preset is active. The current EQL settings remain unmanaged and unchanged by SpinTexture.",
-            ThirdPersonPitchLockEnabled: IsThirdPersonPitchLockEnabled(document));
+            "No SpinTexture native graphics preset is active. The current EQL settings remain unmanaged and unchanged by SpinTexture.");
     }
 
     public async Task<NativeGraphicsSettingsPlan> PlanAsync(
         ProjectPaths paths,
         NativeGraphicsPreset preset,
-        CancellationToken cancellationToken = default)
-        => await PlanAsync(
-            paths,
-            preset,
-            thirdPersonPitchLockEnabled: false,
-            cancellationToken).ConfigureAwait(false);
-
-    public async Task<NativeGraphicsSettingsPlan> PlanAsync(
-        ProjectPaths paths,
-        NativeGraphicsPreset preset,
-        bool thirdPersonPitchLockEnabled,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -256,10 +231,7 @@ public sealed class NativeGraphicsSettingsService
         }
 
         var status = await InspectAsync(paths, cancellationToken).ConfigureAwait(false);
-        var capabilityError = await CheckCapabilityAsync(paths, cancellationToken).ConfigureAwait(false)
-            ?? (thirdPersonPitchLockEnabled
-                ? await CheckCameraPitchCapabilityAsync(paths, cancellationToken).ConfigureAwait(false)
-                : null);
+        var capabilityError = await CheckCapabilityAsync(paths, cancellationToken).ConfigureAwait(false);
         if (capabilityError is not null)
         {
             status = status with
@@ -275,8 +247,7 @@ public sealed class NativeGraphicsSettingsService
                 preset,
                 status,
                 [],
-                status.Summary,
-                thirdPersonPitchLockEnabled);
+                status.Summary);
         }
 
         var document = await ReadDocumentAsync(status.SettingsPath, cancellationToken).ConfigureAwait(false);
@@ -286,11 +257,7 @@ public sealed class NativeGraphicsSettingsService
             : BuildCurrentBaseline(active.Manifest, document);
         EnsureCompleteBaseline(baseline, ManagedSettings);
 
-        var desired = BuildDesiredSettings(
-            preset,
-            baseline,
-            ManagedSettings,
-            thirdPersonPitchLockEnabled);
+        var desired = BuildDesiredSettings(preset, baseline, ManagedSettings);
         var changes = new List<NativeGraphicsSettingChange>();
         foreach (var setting in ManagedSettings)
         {
@@ -325,33 +292,12 @@ public sealed class NativeGraphicsSettingsService
         var summary = changes.Count == 0
             ? $"The {GetPresetDisplayName(preset)} native preset already matches eqclient.ini. {distanceSummary}{bloomSummary}"
             : $"{changes.Count:N0} native EQL setting change(s) are planned. {distanceSummary}{bloomSummary}";
-        summary += thirdPersonPitchLockEnabled
-            ? " Third-person pitch lock is enabled: character pitch changes only while Shift is held and returns level on release."
-            : " Third-person pitch lock remains at its pre-SpinTexture values.";
-        return new NativeGraphicsSettingsPlan(
-            preset,
-            status,
-            changes,
-            summary,
-            thirdPersonPitchLockEnabled);
+        return new NativeGraphicsSettingsPlan(preset, status, changes, summary);
     }
 
     public async Task<NativeGraphicsApplyResult> ApplyAsync(
         ProjectPaths paths,
         NativeGraphicsPreset preset,
-        IProgress<ProgressUpdate>? progress = null,
-        CancellationToken cancellationToken = default)
-        => await ApplyAsync(
-            paths,
-            preset,
-            thirdPersonPitchLockEnabled: false,
-            progress,
-            cancellationToken).ConfigureAwait(false);
-
-    public async Task<NativeGraphicsApplyResult> ApplyAsync(
-        ProjectPaths paths,
-        NativeGraphicsPreset preset,
-        bool thirdPersonPitchLockEnabled,
         IProgress<ProgressUpdate>? progress = null,
         CancellationToken cancellationToken = default)
     {
@@ -365,11 +311,7 @@ public sealed class NativeGraphicsSettingsService
             "Verifying client capability and current settings.",
             0,
             3));
-        var plan = await PlanAsync(
-            paths,
-            preset,
-            thirdPersonPitchLockEnabled,
-            cancellationToken).ConfigureAwait(false);
+        var plan = await PlanAsync(paths, preset, cancellationToken).ConfigureAwait(false);
         if (!plan.Status.CanApply)
         {
             throw new InvalidOperationException(plan.Status.Summary);
@@ -426,9 +368,6 @@ public sealed class NativeGraphicsSettingsService
         }
 
         var capabilityError = await CheckCapabilityAsync(paths, cancellationToken).ConfigureAwait(false);
-        capabilityError ??= thirdPersonPitchLockEnabled
-            ? await CheckCameraPitchCapabilityAsync(paths, cancellationToken).ConfigureAwait(false)
-            : null;
         if (capabilityError is not null)
         {
             throw new InvalidOperationException(capabilityError);
@@ -480,11 +419,7 @@ public sealed class NativeGraphicsSettingsService
         }
 
         EnsureCompleteBaseline(baseline, ManagedSettings);
-        var desired = BuildDesiredSettings(
-            preset,
-            baseline,
-            ManagedSettings,
-            thirdPersonPitchLockEnabled);
+        var desired = BuildDesiredSettings(preset, baseline, ManagedSettings);
         var enhancedDocument = currentDocument.Clone();
         foreach (var setting in ManagedSettings)
         {
@@ -512,8 +447,7 @@ public sealed class NativeGraphicsSettingsService
             var previouslyAppliedDesired = BuildDesiredSettings(
                 previousManifest.Preset,
                 baseline,
-                ManagedSettings,
-                previousManifest.ThirdPersonPitchLockEnabled);
+                ManagedSettings);
             foreach (var setting in ManagedSettings)
             {
                 var target = FindStored(previouslyAppliedDesired, setting);
@@ -548,8 +482,7 @@ public sealed class NativeGraphicsSettingsService
             enhancedFingerprint.Sha256,
             baseline,
             appliedSettings,
-            CaptureStoredValues(currentDocument),
-            thirdPersonPitchLockEnabled);
+            CaptureStoredValues(currentDocument));
 
         var pendingPath = PathGuard.ResolveUnderRoot(
             transactionDirectory,
@@ -680,8 +613,7 @@ public sealed class NativeGraphicsSettingsService
             var intendedSettings = BuildDesiredSettings(
                 manifest.Preset,
                 manifest.BaselineSettings,
-                manifestManagedSettings,
-                manifest.ThirdPersonPitchLockEnabled);
+                manifestManagedSettings);
             foreach (var setting in manifestManagedSettings)
             {
                 var baseline = FindStored(manifest.BaselineSettings, setting);
@@ -758,8 +690,7 @@ public sealed class NativeGraphicsSettingsService
         var originalDesired = BuildDesiredSettings(
             manifest.Preset,
             manifest.BaselineSettings,
-            manifestManagedSettings,
-            manifest.ThirdPersonPitchLockEnabled);
+            manifestManagedSettings);
         foreach (var setting in manifestManagedSettings)
         {
             var target = FindStored(originalDesired, setting);
@@ -1060,62 +991,10 @@ public sealed class NativeGraphicsSettingsService
         return null;
     }
 
-    private static async Task<string?> CheckCameraPitchCapabilityAsync(
-        ProjectPaths paths,
-        CancellationToken cancellationToken)
-    {
-        string optionsPath;
-        string gameExecutablePath;
-        try
-        {
-            optionsPath = PathGuard.ResolveUnderRoot(paths.InstallPath, OptionsRelativePath);
-            gameExecutablePath = PathGuard.ResolveUnderRoot(
-                paths.InstallPath,
-                GameExecutableRelativePath);
-        }
-        catch (InvalidDataException exception)
-        {
-            return exception.Message;
-        }
-
-        if (!File.Exists(optionsPath) || !File.Exists(gameExecutablePath))
-        {
-            return "This client does not include the native Legends camera-pitch controls required for third-person pitch lock.";
-        }
-
-        try
-        {
-            var optionsXml = await File.ReadAllTextAsync(optionsPath, cancellationToken)
-                .ConfigureAwait(false);
-            if (!optionsXml.Contains("OMP_LegendsCameraShiftPitch", StringComparison.Ordinal)
-                || !optionsXml.Contains(
-                    "OMP_LegendsCameraShiftPitchSpring",
-                    StringComparison.Ordinal))
-            {
-                return "This client build does not expose both supported Legends camera-pitch controls.";
-            }
-
-            var gameBytes = await File.ReadAllBytesAsync(gameExecutablePath, cancellationToken)
-                .ConfigureAwait(false);
-            if (!ContainsAscii(gameBytes, "MouseShiftPitch")
-                || !ContainsAscii(gameBytes, "MouseShiftPitchSpring"))
-            {
-                return "This EQL executable does not advertise both native camera-pitch settings expected by SpinTexture.";
-            }
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            return $"The native EQL camera-pitch controls could not be verified: {exception.Message}";
-        }
-
-        return null;
-    }
-
     private static IReadOnlyList<NativeGraphicsStoredSetting> BuildDesiredSettings(
         NativeGraphicsPreset preset,
         IReadOnlyList<NativeGraphicsStoredSetting> baseline,
-        IReadOnlyList<ManagedSetting> managedSettings,
-        bool thirdPersonPitchLockEnabled = false)
+        IReadOnlyList<ManagedSetting> managedSettings)
     {
         var desired = baseline.Select(value => value with { }).ToList();
         SetStored(desired, "Defaults", "Shadows", true, "TRUE");
@@ -1153,30 +1032,7 @@ public sealed class NativeGraphicsSettingsService
             }
         }
 
-        if (thirdPersonPitchLockEnabled)
-        {
-            if (managedSettings.Any(setting => SameSetting(
-                    setting.Section,
-                    setting.Key,
-                    "Options",
-                    "MouseShiftPitch")))
-            {
-                SetStored(desired, "Options", "MouseShiftPitch", true, "1");
-                SetStored(desired, "Options", "MouseShiftPitchSpring", true, "1");
-            }
-        }
-
         return desired;
-    }
-
-    private static bool IsThirdPersonPitchLockEnabled(NativeGraphicsIniDocument document)
-    {
-        var shiftPitch = document.Get("Options", "MouseShiftPitch");
-        var shiftPitchSpring = document.Get("Options", "MouseShiftPitchSpring");
-        return shiftPitch.Exists
-            && shiftPitchSpring.Exists
-            && NormalizeBoolean(shiftPitch.Value) == true
-            && NormalizeBoolean(shiftPitchSpring.Value) == true;
     }
 
     private static string GetPresetDisplayName(NativeGraphicsPreset preset) => preset switch
@@ -1275,11 +1131,6 @@ public sealed class NativeGraphicsSettingsService
             return ManagedSettings;
         }
 
-        if (manifest.SchemaVersion == NativeGraphicsSettingsManifest.GraphicsOnlySchemaVersion)
-        {
-            return GraphicsOnlyManagedSettings;
-        }
-
         if (manifest.SchemaVersion == NativeGraphicsSettingsManifest.LightingOnlySchemaVersion)
         {
             return LightingOnlyManagedSettings;
@@ -1362,9 +1213,7 @@ public sealed class NativeGraphicsSettingsService
             return;
         }
 
-        if (manifest.SchemaVersion is not (
-                NativeGraphicsSettingsManifest.GraphicsOnlySchemaVersion
-                or NativeGraphicsSettingsManifest.CurrentSchemaVersion)
+        if (manifest.SchemaVersion != NativeGraphicsSettingsManifest.CurrentSchemaVersion
             || manifest.State is not (
                 NativeGraphicsTransactionState.Preparing
                 or NativeGraphicsTransactionState.RecoveryRequired))
@@ -1373,9 +1222,7 @@ public sealed class NativeGraphicsSettingsService
                 "The native graphics transaction contains unexpected pre-apply recovery metadata.");
         }
 
-        EnsureCompleteBaseline(
-            manifest.PreApplySettings,
-            GetManagedSettingsForManifest(manifest));
+        EnsureCompleteBaseline(manifest.PreApplySettings, ManagedSettings);
     }
 
     private static void EnsureValidStoredValues(
@@ -1589,7 +1436,6 @@ public sealed class NativeGraphicsSettingsService
         if (manifest.SchemaVersion is not (
             NativeGraphicsSettingsManifest.LegacySchemaVersion
             or NativeGraphicsSettingsManifest.LightingOnlySchemaVersion
-            or NativeGraphicsSettingsManifest.GraphicsOnlySchemaVersion
             or NativeGraphicsSettingsManifest.CurrentSchemaVersion))
         {
             return $"Unsupported native graphics transaction schema {manifest.SchemaVersion}.";
@@ -1670,8 +1516,7 @@ public sealed class NativeGraphicsSettingsService
                 BuildDesiredSettings(
                     manifest.Preset,
                     manifest.BaselineSettings,
-                    managedSettings,
-                    manifest.ThirdPersonPitchLockEnabled),
+                    managedSettings),
                 managedSettings);
             if (manifest.AppliedSettings.Count != expectedApplied.Count
                 || manifest.AppliedSettings.Any(value => !IsValidStoredSetting(value))
@@ -1789,7 +1634,6 @@ public sealed class NativeGraphicsSettingsService
         if (manifest.SchemaVersion is not (
             NativeGraphicsSettingsManifest.LegacySchemaVersion
             or NativeGraphicsSettingsManifest.LightingOnlySchemaVersion
-            or NativeGraphicsSettingsManifest.GraphicsOnlySchemaVersion
             or NativeGraphicsSettingsManifest.CurrentSchemaVersion))
         {
             throw new InvalidDataException(

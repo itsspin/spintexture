@@ -42,8 +42,7 @@ public sealed record NativeGraphicsSettingsStatus(
     string? ActiveTransactionManifestPath,
     IReadOnlyList<NativeGraphicsSettingValue> ManagedValues,
     string Summary,
-    bool HasVerifiedRestorePoint = false,
-    bool ThirdPersonPitchLockEnabled = false)
+    bool HasVerifiedRestorePoint = false)
 {
     public bool CanApply => State is NativeGraphicsSettingsState.Original
         or NativeGraphicsSettingsState.Applied;
@@ -57,8 +56,7 @@ public sealed record NativeGraphicsSettingsPlan(
     NativeGraphicsPreset Preset,
     NativeGraphicsSettingsStatus Status,
     IReadOnlyList<NativeGraphicsSettingChange> Changes,
-    string Summary,
-    bool ThirdPersonPitchLockEnabled = false)
+    string Summary)
 {
     public const string RemovedValue = "(remove; originally absent)";
     public bool HasChanges => Changes.Count != 0;
