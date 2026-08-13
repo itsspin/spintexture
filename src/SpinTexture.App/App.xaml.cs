@@ -328,6 +328,7 @@ public partial class App : Application
         public Task<NativeGraphicsUiPlan> PlanAsync(
             string installPath,
             NativeGraphicsUiPreset preset,
+            bool thirdPersonPitchLockEnabled,
             CancellationToken cancellationToken)
         {
             var changes = preset switch
@@ -357,6 +358,7 @@ public partial class App : Application
         public Task ApplyAsync(
             string installPath,
             NativeGraphicsUiPreset preset,
+            bool thirdPersonPitchLockEnabled,
             IProgress<string>? progress,
             CancellationToken cancellationToken) => Task.CompletedTask;
 

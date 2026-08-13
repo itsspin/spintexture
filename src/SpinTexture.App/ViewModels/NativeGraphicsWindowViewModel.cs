@@ -20,6 +20,7 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
     private string statusText = "No changes have been made.";
     private bool isError;
     private bool isBloomEnabled;
+    private bool isThirdPersonPitchLockEnabled;
 
     public NativeGraphicsWindowViewModel(string installPath, INativeGraphicsService service)
     {
@@ -31,6 +32,7 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
         ApplyCommand = new AsyncRelayCommand(ApplyAsync, CanApply);
         RestoreCommand = new AsyncRelayCommand(RestoreAsync, () => !IsBusy && CanRestore);
         BloomChangedCommand = new AsyncRelayCommand(UpdateBloomChoiceAsync, () => !IsBusy && IsCinematicSelected);
+        CameraChangedCommand = new AsyncRelayCommand(UpdateCameraChoiceAsync, () => !IsBusy);
         CancelCommand = new RelayCommand(_ => Cancel(), _ => IsBusy);
     }
 
@@ -83,6 +85,22 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
     public string BloomChoiceText => IsBloomEnabled
         ? "Bloom on. Brighter glow, with a higher chance of halos around sun, moon, and star sprites."
         : "Bloom off. Recommended for clean skies while keeping Cinematic lighting and maximum shadows.";
+
+    public bool IsThirdPersonPitchLockEnabled
+    {
+        get => isThirdPersonPitchLockEnabled;
+        set
+        {
+            if (SetProperty(ref isThirdPersonPitchLockEnabled, value))
+            {
+                OnPropertyChanged(nameof(CameraChoiceText));
+            }
+        }
+    }
+
+    public string CameraChoiceText => IsThirdPersonPitchLockEnabled
+        ? "On. Third-person character pitch changes only while Shift is held, then returns level when Shift is released."
+        : "Off. EQL keeps the camera and levitation pitch behavior that existed before SpinTexture.";
 
     public bool IsBusy
     {
@@ -182,6 +200,7 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
     public AsyncRelayCommand ApplyCommand { get; }
     public AsyncRelayCommand RestoreCommand { get; }
     public AsyncRelayCommand BloomChangedCommand { get; }
+    public AsyncRelayCommand CameraChangedCommand { get; }
     public RelayCommand CancelCommand { get; }
 
     private async Task RefreshAsync(CancellationToken cancellationToken)
@@ -216,10 +235,12 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
             var balancedTask = service.PlanAsync(
                 installPath,
                 NativeGraphicsUiPreset.Balanced,
+                IsThirdPersonPitchLockEnabled,
                 cancellationToken);
             var cinematicTask = service.PlanAsync(
                 installPath,
                 cinematicPreset,
+                IsThirdPersonPitchLockEnabled,
                 cancellationToken);
             await Task.WhenAll(balancedTask, cinematicTask).ConfigureAwait(true);
 
@@ -262,7 +283,11 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
             var requested = IsBloomEnabled
                 ? NativeGraphicsUiPreset.Cinematic
                 : NativeGraphicsUiPreset.CinematicNoBloom;
-            var plan = await service.PlanAsync(installPath, requested, cancellationToken)
+            var plan = await service.PlanAsync(
+                    installPath,
+                    requested,
+                    IsThirdPersonPitchLockEnabled,
+                    cancellationToken)
                 .ConfigureAwait(true);
             var index = Presets.IndexOf(SelectedPreset!);
             if (index < 0)
@@ -293,6 +318,44 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
         }
     }
 
+    private async Task UpdateCameraChoiceAsync(CancellationToken cancellationToken)
+    {
+        var selected = SelectedPreset?.Preset ?? NativeGraphicsUiPreset.Balanced;
+        IsBusy = true;
+        IsError = false;
+        StatusText = "Updating the supported third-person camera preview. No settings are being changed.";
+        try
+        {
+            var plan = await service.PlanAsync(
+                    installPath,
+                    selected,
+                    IsThirdPersonPitchLockEnabled,
+                    cancellationToken)
+                .ConfigureAwait(true);
+            var index = Presets.IndexOf(SelectedPreset!);
+            if (index >= 0)
+            {
+                Presets[index] = plan;
+            }
+
+            SelectedPreset = plan;
+            StatusText = "Ready. Review the camera comfort and native graphics changes before applying.";
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText = "Camera preview canceled. No settings were changed.";
+            throw;
+        }
+        catch (Exception exception)
+        {
+            ShowError("The camera comfort choice could not be previewed", exception);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
     private async Task ApplyAsync(CancellationToken cancellationToken)
     {
         var preset = SelectedPreset;
@@ -310,6 +373,7 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
             await service.ApplyAsync(
                 installPath,
                 preset.Preset,
+                IsThirdPersonPitchLockEnabled,
                 progress,
                 cancellationToken).ConfigureAwait(true);
             try
@@ -398,7 +462,11 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
         }
 
         var plans = await Task.WhenAll(
-                service.PlanAsync(installPath, NativeGraphicsUiPreset.Balanced, cancellationToken),
+                service.PlanAsync(
+                    installPath,
+                    NativeGraphicsUiPreset.Balanced,
+                    IsThirdPersonPitchLockEnabled,
+                    cancellationToken),
                 service.PlanAsync(
                     installPath,
                     selected is NativeGraphicsUiPreset.Cinematic
@@ -407,6 +475,7 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
                             : IsBloomEnabled
                                 ? NativeGraphicsUiPreset.Cinematic
                                 : NativeGraphicsUiPreset.CinematicNoBloom,
+                    IsThirdPersonPitchLockEnabled,
                     cancellationToken))
             .ConfigureAwait(true);
         Presets.Clear();
@@ -430,6 +499,7 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
         CurrentValues = status.ManagedValues;
         CurrentStateNeedsAttention = status.NeedsAttention;
         CanRestore = status.CanRestore;
+        IsThirdPersonPitchLockEnabled = status.ThirdPersonPitchLockEnabled;
     }
 
     private void ShowError(string context, Exception exception)
@@ -455,6 +525,7 @@ public sealed class NativeGraphicsWindowViewModel : ObservableObject, IDisposabl
         ApplyCommand.RaiseCanExecuteChanged();
         RestoreCommand.RaiseCanExecuteChanged();
         BloomChangedCommand.RaiseCanExecuteChanged();
+        CameraChangedCommand.RaiseCanExecuteChanged();
         CancelCommand.RaiseCanExecuteChanged();
     }
 

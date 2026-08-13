@@ -19,6 +19,10 @@ public static class TexturePipelineSelfTests
         await CutoutMipPolicySelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Cutout compatibility command and integration tests passed.")
             .ConfigureAwait(false);
+        await LegacyTranslucentMaterialSafetySelfTests.RunAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await output.WriteLineAsync("Legacy translucent-material safety tests passed.")
+            .ConfigureAwait(false);
         await WorldCutoutRepairSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Immutable World/zone cutout revision-repair tests passed.")
             .ConfigureAwait(false);
@@ -211,11 +215,11 @@ public static class TexturePipelineSelfTests
                 AssetScope.SelectedZone),
             "a selected-zone pack from before the cutout mip revision should be upgradeable");
         Assert(
-            !TextureProcessingPipeline.RequiresRepair(
+            TextureProcessingPipeline.RequiresRepair(
                 Report(revision: 3),
                 AssetScope.SelectedZone,
                 ["forest.s3d", "forest_obj.s3d"]),
-            "a revision-3 selected-zone pack without sky.s3d should not receive a celestial repair");
+            "an older selected-zone pack should receive the translucent-material safety scan even without sky.s3d");
         Assert(
             TextureProcessingPipeline.RequiresRepair(
                 Report(revision: 3),

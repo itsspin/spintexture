@@ -282,6 +282,32 @@
                     </Grid>
                 </Border>
 
+                <Border Background="#101820" BorderBrush="#2C4658" BorderThickness="1"
+                        CornerRadius="8" Padding="14,11" Margin="0,10,0,0">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock Text="Optional third-person levitation pitch lock"
+                                       Foreground="{StaticResource Text}" FontSize="13" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding CameraChoiceText}" Foreground="{StaticResource Muted}"
+                                       FontSize="11" TextWrapping="Wrap" Margin="0,4,18,0" />
+                            <TextBlock Text="Uses EQL's supported Hold SHIFT pitch control and Reset pitch on release options. It does not hook or alter movement code."
+                                       Foreground="#8CCDF5" FontSize="10" TextWrapping="Wrap"
+                                       Margin="0,5,18,0" />
+                        </StackPanel>
+                        <CheckBox Grid.Column="1" Content="Enable pitch lock"
+                                  IsChecked="{Binding IsThirdPersonPitchLockEnabled, Mode=TwoWay}"
+                                  Command="{Binding CameraChangedCommand}"
+                                  IsEnabled="{Binding IsNotBusy}"
+                                  Foreground="{StaticResource Text}"
+                                  VerticalAlignment="Center"
+                                  AutomationProperties.Name="Enable supported third-person levitation pitch lock" />
+                    </Grid>
+                </Border>
+
                 <Grid Margin="0,22,0,10">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />

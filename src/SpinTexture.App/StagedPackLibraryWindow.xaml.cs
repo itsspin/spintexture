@@ -1382,11 +1382,15 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             var needsCutoutSafety = missingRepairRules.Contains(
                 TextureProcessingPipeline.CutoutMipSafetyRuleId,
                 StringComparer.Ordinal);
+            var needsTranslucentMaterialSafety = missingRepairRules.Contains(
+                TextureProcessingPipeline.LegacyTranslucentMaterialSafetyRuleId,
+                StringComparer.Ordinal);
             RepairReasonText = BuildRepairReasonText(
                 isCharacterScope,
                 IsTargetedSafetyRepairCandidate,
                 needsCelestialSkySafety,
-                needsCutoutSafety);
+                needsCutoutSafety,
+                needsTranslucentMaterialSafety);
             RepairStatusText = CanRepairSourceMismatch
                 ? "Managed source mismatch detected. Repair verifies original-source provenance first, then applies current texture safety fixes in the same immutable replacement."
                 : RepairReasonText;
@@ -1476,8 +1480,18 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             bool isCharacterScope,
             bool isTargetedSafetyRepair,
             bool needsCelestialSkySafety,
-            bool needsCutoutSafety)
+            bool needsCutoutSafety,
+            bool needsTranslucentMaterialSafety)
         {
+            if (isTargetedSafetyRepair && needsTranslucentMaterialSafety)
+            {
+                var additional = needsCelestialSkySafety || needsCutoutSafety
+                    ? " It also applies the missing sky/celestial and cutout compatibility fixes."
+                    : string.Empty;
+                return "A water and translucent-material safety fix is available. Repair restores renderer-coupled animated water, glass, and similar blended textures from verified originals while reusing unaffected enhanced textures."
+                    + additional;
+            }
+
             if (isTargetedSafetyRepair && needsCelestialSkySafety && needsCutoutSafety)
             {
                 return "Current safety fixes are available: restore protected sky, sun, moon, halo, and related celestial assets from verified originals, and regenerate only angle-sensitive enhanced cutouts. Unaffected enhanced textures are reused.";
