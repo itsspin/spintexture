@@ -31,14 +31,12 @@ public sealed class NativeGraphicsServiceAdapter : INativeGraphicsService
     public async Task<NativeGraphicsUiPlan> PlanAsync(
         string installPath,
         NativeGraphicsUiPreset preset,
-        bool thirdPersonPitchLockEnabled,
         CancellationToken cancellationToken)
     {
         var corePreset = MapPreset(preset);
         var plan = await service.PlanAsync(
                 ResolvePaths(installPath),
                 corePreset,
-                thirdPersonPitchLockEnabled,
                 cancellationToken)
             .ConfigureAwait(false);
         var changes = plan.Changes
@@ -67,7 +65,6 @@ public sealed class NativeGraphicsServiceAdapter : INativeGraphicsService
     public async Task ApplyAsync(
         string installPath,
         NativeGraphicsUiPreset preset,
-        bool thirdPersonPitchLockEnabled,
         IProgress<string>? progress,
         CancellationToken cancellationToken)
     {
@@ -80,7 +77,6 @@ public sealed class NativeGraphicsServiceAdapter : INativeGraphicsService
         await service.ApplyAsync(
                 ResolvePaths(installPath),
                 MapPreset(preset),
-                thirdPersonPitchLockEnabled,
                 coreProgress,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -153,8 +149,7 @@ public sealed class NativeGraphicsServiceAdapter : INativeGraphicsService
                 NativeGraphicsPreset.Cinematic => NativeGraphicsUiPreset.Cinematic,
                 NativeGraphicsPreset.CinematicNoBloom => NativeGraphicsUiPreset.CinematicNoBloom,
                 _ => null
-            },
-            status.ThirdPersonPitchLockEnabled);
+            });
     }
 
     private static NativeGraphicsPresentation GetPresentation(NativeGraphicsUiPreset preset) => preset switch
