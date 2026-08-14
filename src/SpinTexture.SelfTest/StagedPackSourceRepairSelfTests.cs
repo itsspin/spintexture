@@ -118,7 +118,7 @@ internal static class StagedPackSourceRepairSelfTests
                         []))
                     {
                         TexturePipelineRevision = 3,
-                        PaintedProfileRevision = TextureBuildReport.CurrentPaintedProfileRevision
+                        PaintedProfileRevision = TextureBuildReport.CurrentIllustratedProfileRevision
                     },
                     cancellationToken: cancellationToken).ConfigureAwait(false);
             }
@@ -196,7 +196,7 @@ internal static class StagedPackSourceRepairSelfTests
                 repaired.Report.TexturePipelineRevision,
                 "combined pipeline revision");
             AssertEqual(
-                TextureBuildReport.CurrentPaintedProfileRevision,
+                TextureBuildReport.CurrentIllustratedProfileRevision,
                 repaired.Report.PaintedProfileRevision,
                 "combined source/safety repair must preserve baseline visual-profile provenance");
             AssertSequenceEqual(

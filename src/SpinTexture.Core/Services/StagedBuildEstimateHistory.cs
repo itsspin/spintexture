@@ -133,6 +133,10 @@ public static class StagedBuildEstimateHistory
                 || report.SelectedArchives <= 0
                 || report.CompletedUtc == default
                 || report.TexturePipelineRevision != TextureProcessingPipeline.CurrentRevision
+                || (manifest.Options.Preset is TexturePreset.Illustrated or TexturePreset.RusticPainted
+                    && report.PaintedProfileRevision
+                        != TextureBuildReport.GetCurrentPaintedProfileRevision(
+                            manifest.Options.Preset))
                 || !manifest.BuildId.Equals(report.BuildId, StringComparison.Ordinal)
                 || !DirectoryNameMatchesBuildId(buildDirectory, manifest.BuildId)
                 || !SamePath(manifest.InstallPath, paths.InstallPath)

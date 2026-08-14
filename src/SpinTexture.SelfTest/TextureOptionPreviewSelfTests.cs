@@ -11,6 +11,7 @@ internal static class TextureOptionPreviewSelfTests
     {
         TestConservativeSelectionPolicy();
         TestResolutionCapTruth();
+        TestSampleSeedRotation();
         TestCacheKeyAndPathSafety();
         TestBoundedCacheEviction();
         TestFallbackTruth();
@@ -19,6 +20,38 @@ internal static class TextureOptionPreviewSelfTests
         await TestCancellationDrainsFlightAsync(cancellationToken).ConfigureAwait(false);
         await TestLateJoinGetsFreshFlightAsync(cancellationToken).ConfigureAwait(false);
         await TestPreCanceledRequestIsReadOnlyAsync().ConfigureAwait(false);
+    }
+
+    private static void TestSampleSeedRotation()
+    {
+        string[] keys = ["wall-a", "wall-b", "wall-c", "wall-d"];
+        var seed = 812UL;
+        var first = TextureOptionPreviewService.RotateCandidateKeysForTest(
+            "World surfaces",
+            keys,
+            seed);
+        var repeat = TextureOptionPreviewService.RotateCandidateKeysForTest(
+            "World surfaces",
+            keys,
+            seed);
+        var next = TextureOptionPreviewService.RotateCandidateKeysForTest(
+            "World surfaces",
+            keys,
+            seed + 1UL);
+
+        Assert(
+            first.SequenceEqual(repeat, StringComparer.Ordinal),
+            "the same preview seed must select the same deterministic candidate order");
+        Assert(
+            first.Distinct(StringComparer.Ordinal).Count() == keys.Length,
+            "a varied preview set must never duplicate a safe candidate");
+        Assert(
+            first[0] != next[0],
+            "New samples must advance to another candidate when a category has alternatives");
+        Assert(
+            first.OrderBy(item => item, StringComparer.Ordinal)
+                .SequenceEqual(next.OrderBy(item => item, StringComparer.Ordinal)),
+            "sample variation may reorder only the already-vetted candidate pool");
     }
 
     private static void TestConservativeSelectionPolicy()

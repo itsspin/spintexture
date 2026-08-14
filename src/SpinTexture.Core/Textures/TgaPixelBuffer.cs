@@ -684,11 +684,11 @@ public sealed class TgaPixelBuffer
                     // Open the darkest painted planes without flattening their
                     // form, then add a restrained parchment-gold warmth.
                     targetLuma = luma
-                        + (localStrength * ((8.0 * shadow) - (1.2 * highlight)) * midtone);
-                    saturationScale = 1 + (0.14 * localStrength * midtone);
-                    redBias = localStrength * ((6.8 * shadow) + (3.2 * highlight));
-                    greenBias = localStrength * ((2.0 * shadow) + (1.8 * highlight));
-                    blueBias = -localStrength * ((5.2 * shadow) + (1.4 * midtone));
+                        + (localStrength * ((9.2 * shadow) - (1.38 * highlight)) * midtone);
+                    saturationScale = 1 + (0.161 * localStrength * midtone);
+                    redBias = localStrength * ((7.82 * shadow) + (3.68 * highlight));
+                    greenBias = localStrength * ((2.30 * shadow) + (2.07 * highlight));
+                    blueBias = -localStrength * ((5.98 * shadow) + (1.61 * midtone));
                     break;
 
                 case PaintedTheme.DarkGothic:
@@ -696,22 +696,22 @@ public sealed class TgaPixelBuffer
                     // Cool blue-green shadows and restrained warm highlights fit
                     // underground/dark-city materials without forcing a new hue.
                     targetLuma = luma
-                        - (localStrength * ((8.6 * midtone) + (2.1 * highlight)));
-                    saturationScale = 1 - (0.08 * localStrength * shadow);
-                    redBias = localStrength * ((2.6 * highlight) - (4.6 * shadow));
-                    greenBias = localStrength * ((1.3 * highlight) + (1.5 * shadow));
-                    blueBias = localStrength * ((6.0 * shadow) - (1.0 * highlight));
+                        - (localStrength * ((9.89 * midtone) + (2.42 * highlight)));
+                    saturationScale = 1 - (0.092 * localStrength * shadow);
+                    redBias = localStrength * ((2.99 * highlight) - (5.29 * shadow));
+                    greenBias = localStrength * ((1.50 * highlight) + (1.73 * shadow));
+                    blueBias = localStrength * ((6.90 * shadow) - (1.15 * highlight));
                     break;
 
                 case PaintedTheme.ComicInk:
                     // Strengthen existing light/dark planes around the current
                     // mid-gray axis. This is texture-space contrast, not a mesh
                     // outline, so silhouettes and UV alignment remain unchanged.
-                    var contrast = 1 + (0.24 * localStrength * (0.55 + (0.45 * midtone)));
+                    var contrast = 1 + (0.324 * localStrength * (0.55 + (0.45 * midtone)));
                     targetLuma = imageMeanLuma + ((luma - imageMeanLuma) * contrast);
                     var inkBand = Math.Round(targetLuma / 20) * 20;
-                    targetLuma += (inkBand - targetLuma) * (0.34 * localStrength * midtone);
-                    saturationScale = 1 + (0.20 * localStrength * midtone);
+                    targetLuma += (inkBand - targetLuma) * (0.459 * localStrength * midtone);
+                    saturationScale = 1 + (0.27 * localStrength * midtone);
                     redBias = 0;
                     greenBias = 0;
                     blueBias = 0;

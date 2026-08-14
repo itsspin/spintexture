@@ -1144,7 +1144,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
     private static string FormatPreset(TexturePreset preset, TextureBuildReport? report)
     {
         var hasCurrentPaintedProfile = (report?.PaintedProfileRevision ?? 0)
-            >= TextureBuildReport.CurrentPaintedProfileRevision;
+            == TextureBuildReport.GetCurrentPaintedProfileRevision(preset);
         return preset switch
         {
             TexturePreset.Faithful => "Original Clarity",
@@ -1165,7 +1165,8 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         TextureBuildReport? report) =>
         options.Preset != TexturePreset.Illustrated
             || (report?.PaintedProfileRevision ?? 0)
-                < TextureBuildReport.CurrentPaintedProfileRevision
+                != TextureBuildReport.GetCurrentPaintedProfileRevision(
+                    options.Preset)
             ? string.Empty
             : options.PaintedTheme switch
             {

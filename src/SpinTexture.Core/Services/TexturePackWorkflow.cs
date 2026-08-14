@@ -21,10 +21,16 @@ public sealed class TexturePackWorkflow
     public static string FreshBuildResumeOperationKey =>
         $"fresh-texture-pack-pipeline-{TextureProcessingPipeline.CurrentRevision}";
 
+    public static string IllustratedFreshBuildResumeOperationKey =>
+        $"{FreshBuildResumeOperationKey}-illustrated-{TextureBuildReport.CurrentIllustratedProfileRevision}";
+
+    public static string GetFreshBuildResumeOperationKey(TexturePreset preset) =>
+        preset == TexturePreset.Illustrated
+            ? IllustratedFreshBuildResumeOperationKey
+            : FreshBuildResumeOperationKey;
+
     internal static int GetFreshPaintedProfileRevision(TexturePreset preset) =>
-        preset is TexturePreset.Illustrated or TexturePreset.RusticPainted
-            ? TextureBuildReport.CurrentPaintedProfileRevision
-            : 0;
+        TextureBuildReport.GetCurrentPaintedProfileRevision(preset);
 
     private static readonly JsonSerializerOptions CompositionJsonOptions =
         CreateCompositionJsonOptions();
@@ -199,7 +205,7 @@ public sealed class TexturePackWorkflow
                 paths,
                 options,
                 items,
-                ResumeOperationKey: FreshBuildResumeOperationKey),
+                ResumeOperationKey: GetFreshBuildResumeOperationKey(options.Preset)),
             progress,
             cancellationToken,
             async (finalizing, metadataCancellationToken) =>
@@ -441,6 +447,17 @@ public sealed class TexturePackWorkflow
                 baselineInfo.BuildDirectory,
                 cancellationToken)
             .ConfigureAwait(false);
+        var currentPaintedProfileRevision =
+            GetFreshPaintedProfileRevision(baseline.Options.Preset);
+        if (isManualTextureRevision
+            && currentPaintedProfileRevision > 0
+            && (baselineReport?.PaintedProfileRevision ?? 0) != currentPaintedProfileRevision
+            && textureOverrides!.Any(choice =>
+                choice.Action == TextureOverrideAction.Reprocess))
+        {
+            throw new InvalidOperationException(
+                "This painted pack uses an older or unknown art-profile revision. SpinTexture will not mix newly processed textures into it; build a fresh painted pack instead. Preserve Original choices remain safe.");
+        }
         var baselineArtifactPaths = baselineInfo.Artifacts
             .Select(artifact => artifact.CanonicalRelativeInstallPath)
             .ToArray();
@@ -594,7 +611,7 @@ public sealed class TexturePackWorkflow
             TexturePreset.Illustrated or TexturePreset.RusticPainted;
         var hasReproduciblePaintedProfile = !requireRequestedVisualProfile
             || (baselineReport?.PaintedProfileRevision ?? 0)
-                >= TextureBuildReport.CurrentPaintedProfileRevision;
+                == currentPaintedProfileRevision;
         var archiveScopes = DiscoverArchiveScopes(paths.InstallPath);
         var selectedArchives = SelectArchives(archiveScopes, repairOptions);
         var selectedRelativePaths = selectedArchives
@@ -949,7 +966,7 @@ public sealed class TexturePackWorkflow
                     baseline.Options.Preset is not (TexturePreset.Illustrated
                         or TexturePreset.RusticPainted)
                     || (baselineReport?.PaintedProfileRevision ?? 0)
-                        >= TextureBuildReport.CurrentPaintedProfileRevision)
+                        == GetFreshPaintedProfileRevision(baseline.Options.Preset))
             : null;
         var items = new List<StagedBuildItem>(baselineInfo.Artifacts.Count);
         var exactReusedArtifacts = 0;
@@ -1233,9 +1250,11 @@ public sealed class TexturePackWorkflow
             .ConfigureAwait(false);
         var isPaintedBaseline = baseline.Options.Preset is
             TexturePreset.Illustrated or TexturePreset.RusticPainted;
+        var currentPaintedProfileRevision =
+            GetFreshPaintedProfileRevision(baseline.Options.Preset);
         var hasReproduciblePaintedProfile = !isPaintedBaseline
             || (baselineReport?.PaintedProfileRevision ?? 0)
-                >= TextureBuildReport.CurrentPaintedProfileRevision;
+                == currentPaintedProfileRevision;
         // Production source repair can advance a stale, provenance-capable pack
         // through the current targeted safety rules in the same immutable
         // replacement. Tests may inject a non-PFS rebuild builder, so that seam

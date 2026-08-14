@@ -35,6 +35,7 @@
         <SolidColorBrush x:Key="DangerBrush" Color="#FF6B72" />
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
         <converters:RevealPositionConverter x:Key="RevealPositionConverter" />
+        <converters:RevealClipConverter x:Key="RevealClipConverter" />
 
         <Style TargetType="TextBlock">
             <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
@@ -1030,7 +1031,7 @@
                                         </ListBox.ItemContainerStyle>
                                         <ListBox.ItemTemplate>
                                             <DataTemplate>
-                                                <Grid Height="54">
+                                                <Grid Height="66">
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="54" />
                                                         <ColumnDefinition Width="*" />
@@ -1042,68 +1043,88 @@
                                                         <TextBlock Text="{Binding Category}" FontSize="8" FontWeight="Bold" Foreground="{StaticResource LavaBrightBrush}" />
                                                         <TextBlock Text="{Binding Title}" FontSize="11" FontWeight="SemiBold" Margin="0,3,0,0"
                                                                    TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock Text="{Binding TabStatusText}" FontSize="9" Margin="0,3,0,0"
+                                                                   Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
                                                     </StackPanel>
                                                 </Grid>
                                             </DataTemplate>
                                         </ListBox.ItemTemplate>
                                     </ListBox>
 
-                                    <Border x:Name="LiveComparisonSurface" Margin="0,10,0,0" Height="300"
+                                    <Border x:Name="LiveComparisonSurface" Margin="0,12,0,0" Height="430" MinHeight="400"
                                             Background="#07080B" BorderBrush="#393F49" BorderThickness="1"
                                             CornerRadius="8" ClipToBounds="True"
-                                            AutomationProperties.Name="Original and enhanced reveal comparison">
+                                            AutomationProperties.Name="Draggable original and enhanced reveal comparison"
+                                            AutomationProperties.HelpText="Drag horizontally to reveal the enhanced texture over the original.">
                                         <Grid ClipToBounds="True">
-                                            <Image Source="{Binding SelectedSample.OriginalImage}" Stretch="Uniform"
-                                                   RenderOptions.BitmapScalingMode="HighQuality" />
-                                            <Grid x:Name="EnhancedRevealLayer" HorizontalAlignment="Right" ClipToBounds="True">
-                                                <Grid.Width>
-                                                    <MultiBinding Converter="{StaticResource RevealPositionConverter}">
-                                                        <Binding ElementName="LiveComparisonSurface" Path="ActualWidth" />
-                                                        <Binding Path="RevealPercent" />
-                                                    </MultiBinding>
-                                                </Grid.Width>
-                                                <Image Source="{Binding SelectedSample.EnhancedImage}" Stretch="Uniform"
-                                                       Width="{Binding ActualWidth, ElementName=LiveComparisonSurface}"
-                                                       HorizontalAlignment="Right" RenderOptions.BitmapScalingMode="HighQuality" />
-                                            </Grid>
-
-                                            <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10" Padding="8,4" CornerRadius="4" Background="#D5101217">
-                                                <TextBlock Text="ORIGINAL" FontSize="9" FontWeight="Bold" />
-                                            </Border>
-                                            <Border HorizontalAlignment="Right" VerticalAlignment="Top" Margin="10" Padding="8,4" CornerRadius="4" Background="#DB16372D">
-                                                <TextBlock Text="ENHANCED" FontSize="9" FontWeight="Bold" Foreground="{StaticResource SafeBrush}" />
-                                            </Border>
-
-                                            <Canvas IsHitTestVisible="False">
-                                                <Rectangle x:Name="RevealDivider" Width="2" Height="300" Fill="#F7F2E8">
-                                                    <Canvas.Left>
-                                                        <MultiBinding Converter="{StaticResource RevealPositionConverter}" ConverterParameter="Reverse">
-                                                            <Binding ElementName="LiveComparisonSurface" Path="ActualWidth" />
-                                                            <Binding Path="RevealPercent" />
-                                                        </MultiBinding>
-                                                    </Canvas.Left>
-                                                </Rectangle>
-                                            </Canvas>
-
-                                            <Border VerticalAlignment="Bottom" Margin="10" Padding="10,7" CornerRadius="5"
-                                                    Background="#DD0B0D11" BorderBrush="#363B44" BorderThickness="1">
-                                                <Grid>
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="Auto" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <StackPanel>
-                                                        <TextBlock Text="{Binding SelectedSample.Title}" FontSize="12" FontWeight="SemiBold" />
-                                                        <TextBlock Text="{Binding SelectedSample.ProvenanceText}" FontSize="9" Margin="0,3,12,0"
-                                                                   Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
-                                                    </StackPanel>
-                                                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                                                        <TextBlock Text="{Binding SelectedSample.SourceDimensionsText}" FontSize="9" Foreground="{StaticResource SecondaryTextBrush}" />
-                                                        <TextBlock Text="  &#x2192;  " FontSize="9" Foreground="{StaticResource MutedTextBrush}" />
-                                                        <TextBlock Text="{Binding SelectedSample.ResultDimensionsText}" FontSize="9" FontWeight="Bold" Foreground="{StaticResource SafeBrush}" />
-                                                    </StackPanel>
+                                            <Viewbox x:Name="ComparisonViewbox" Stretch="Uniform" StretchDirection="Both"
+                                                     HorizontalAlignment="Center" VerticalAlignment="Center">
+                                                <Grid x:Name="ComparisonImageStage"
+                                                      Width="{Binding SelectedSample.SourceWidth}"
+                                                      Height="{Binding SelectedSample.SourceHeight}">
+                                                    <Image x:Name="OriginalPreviewImage" Source="{Binding SelectedSample.OriginalImage}" Stretch="Fill"
+                                                           RenderOptions.BitmapScalingMode="HighQuality" />
+                                                    <Image x:Name="EnhancedPreviewImage" Source="{Binding SelectedSample.EnhancedImage}" Stretch="Fill"
+                                                           RenderOptions.BitmapScalingMode="HighQuality">
+                                                        <Image.Clip>
+                                                            <MultiBinding Converter="{StaticResource RevealClipConverter}">
+                                                                <Binding ElementName="ComparisonImageStage" Path="ActualWidth" />
+                                                                <Binding ElementName="ComparisonImageStage" Path="ActualHeight" />
+                                                                <Binding Path="RevealPercent" />
+                                                            </MultiBinding>
+                                                        </Image.Clip>
+                                                    </Image>
                                                 </Grid>
-                                            </Border>
+                                            </Viewbox>
+
+                                            <Grid x:Name="ComparisonInteractionSurface"
+                                                  Width="{Binding ActualWidth, ElementName=ComparisonViewbox}"
+                                                  Height="{Binding ActualHeight, ElementName=ComparisonViewbox}"
+                                                  HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                  Background="Transparent" Cursor="SizeWE"
+                                                  MouseLeftButtonDown="OnLiveComparisonMouseLeftButtonDown"
+                                                  MouseMove="OnLiveComparisonMouseMove"
+                                                  MouseLeftButtonUp="OnLiveComparisonMouseLeftButtonUp"
+                                                  LostMouseCapture="OnLiveComparisonLostMouseCapture">
+                                                <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10" Padding="8,4" CornerRadius="4" Background="#D5101217">
+                                                    <TextBlock Text="ENHANCED" FontSize="9" FontWeight="Bold" Foreground="{StaticResource SafeBrush}" />
+                                                </Border>
+                                                <Border HorizontalAlignment="Right" VerticalAlignment="Top" Margin="10" Padding="8,4" CornerRadius="4" Background="#DB16372D">
+                                                    <TextBlock Text="ORIGINAL" FontSize="9" FontWeight="Bold" />
+                                                </Border>
+                                                <Canvas IsHitTestVisible="False">
+                                                    <Rectangle x:Name="RevealDivider" Width="2"
+                                                               Height="{Binding ActualHeight, ElementName=ComparisonInteractionSurface}"
+                                                               Fill="#F7F2E8">
+                                                        <Canvas.Left>
+                                                            <MultiBinding Converter="{StaticResource RevealPositionConverter}">
+                                                                <Binding ElementName="ComparisonInteractionSurface" Path="ActualWidth" />
+                                                                <Binding Path="RevealPercent" />
+                                                            </MultiBinding>
+                                                        </Canvas.Left>
+                                                    </Rectangle>
+                                                </Canvas>
+                                            </Grid>
+                                        </Grid>
+                                    </Border>
+
+                                    <Border Margin="0,7,0,0" Padding="10,7" CornerRadius="5"
+                                            Background="#0B0D11" BorderBrush="#363B44" BorderThickness="1">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding SelectedSample.Title}" FontSize="12" FontWeight="SemiBold" />
+                                                <TextBlock Text="{Binding SelectedSample.ProvenanceText}" FontSize="9" Margin="0,3,12,0"
+                                                           Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding SelectedSample.SourceDimensionsText}" FontSize="9" Foreground="{StaticResource SecondaryTextBrush}" />
+                                                <TextBlock Text="  &#x2192;  " FontSize="9" Foreground="{StaticResource MutedTextBrush}" />
+                                                <TextBlock Text="{Binding SelectedSample.ResultDimensionsText}" FontSize="9" FontWeight="Bold" Foreground="{StaticResource SafeBrush}" />
+                                            </StackPanel>
                                         </Grid>
                                     </Border>
 
@@ -1121,18 +1142,23 @@
                                             <Button Command="{Binding ShowEnhancedCommand}" Content="Enhanced" Padding="12,7" Margin="6,0,0,0"
                                                     AutomationProperties.Name="Show enhanced texture only" />
                                         </StackPanel>
-                                        <Slider Grid.Column="1" Minimum="0" Maximum="100" Value="{Binding RevealPercent}"
+                                        <Slider x:Name="RevealSlider" Grid.Column="1" Minimum="0" Maximum="100"
+                                                Value="{Binding RevealPercent, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                SmallChange="1" LargeChange="10"
                                                 Margin="18,0" VerticalAlignment="Center" IsSnapToTickEnabled="False"
                                                 AutomationProperties.Name="Enhanced image reveal percentage"
-                                                AutomationProperties.HelpText="Use Left and Right Arrow to compare original and enhanced imagery." />
-                                        <Button Grid.Column="2" Command="{Binding RefreshCommand}" Padding="11,7"
-                                                AutomationProperties.Name="Regenerate live texture preview" ToolTip="Regenerate these three samples">
+                                                AutomationProperties.HelpText="Move right to reveal more of the enhanced image, or drag directly on the preview." />
+                                        <Button Grid.Column="2" Command="{Binding NewSamplesCommand}" Padding="11,7"
+                                                AutomationProperties.Name="Choose three new safe texture samples" ToolTip="Choose another varied set of three safe textures">
                                             <StackPanel Orientation="Horizontal">
                                                 <TextBlock Text="&#xE72C;" FontFamily="Segoe Fluent Icons" Margin="0,0,7,0" />
-                                                <TextBlock Text="Refresh" />
+                                                <TextBlock Text="New samples" />
                                             </StackPanel>
                                         </Button>
                                     </Grid>
+                                    <TextBlock Text="Drag the divider for a pixel-aligned overlay. Changing settings keeps these samples so theme differences are easy to judge; New samples chooses another safe trio."
+                                               Margin="0,7,0,0" FontSize="10" Foreground="{StaticResource MutedTextBrush}"
+                                               TextWrapping="Wrap" TextAlignment="Center" />
 
                                     <Grid Margin="0,10,0,0">
                                         <Grid.ColumnDefinitions>

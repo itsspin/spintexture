@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Buffers.Binary;
 using System.Text.Json.Serialization;
 using SpinTexture.Core.Archives;
 using SpinTexture.Core.Models;
@@ -25,7 +26,7 @@ public sealed class TextureOptionPreviewService
     private const string CacheFolderName = "OptionPreviews";
     private const string CacheManifestFileName = "preview.json";
     private const string WorkDirectoryPrefix = ".work-";
-    private const string CacheKeyPrefix = "option-preview-v1";
+    private const string CacheKeyPrefix = "option-preview-v2";
 
     private static readonly JsonSerializerOptions CacheJsonOptions = CreateCacheJsonOptions();
     private static readonly string[] PreferredWorldZones =
@@ -106,7 +107,8 @@ public sealed class TextureOptionPreviewService
         UpscaleOptions options,
         ScanSummary? analysis = null,
         IProgress<ProgressUpdate>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        ulong sampleSeed = 0)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(options);
@@ -150,14 +152,14 @@ public sealed class TextureOptionPreviewService
         var originalSources = await workflow
             .PrepareBuildOriginalSourcesAsync(paths, cancellationToken)
             .ConfigureAwait(false);
-        var candidates = await FindCandidatesAsync(
+        var candidatePool = await FindCandidatesAsync(
                 paths,
                 options,
                 originalSources,
                 progress,
                 cancellationToken)
             .ConfigureAwait(false);
-        if (candidates.Count == 0)
+        if (candidatePool.Count == 0)
         {
             if (options.Scope == AssetScope.SpellEffectsOnly)
             {
@@ -169,12 +171,18 @@ public sealed class TextureOptionPreviewService
                 "No conservative opaque color textures were found for a live preview in this scope.");
         }
 
+        // Selection happens once, after every production safety and provenance
+        // check, and before the cache key is computed. A preview seed therefore
+        // changes only which already-safe sources are shown; it cannot weaken
+        // eligibility or let two different sets share a cache entry.
+        var candidates = SelectProcessingCandidates(candidatePool, sampleSeed);
+
         var toolSignature = await CreateToolSignatureAsync(
                 tools,
                 candidates,
                 cancellationToken)
             .ConfigureAwait(false);
-        var cacheKey = ComputeCacheKey(options, candidates, toolSignature);
+        var cacheKey = ComputeCacheKey(options, candidates, toolSignature, sampleSeed);
         var cacheDirectory = GetCacheDirectory(paths, cacheKey);
         var cached = await TryReadCacheAsync(
                 cacheRoot,
@@ -323,14 +331,13 @@ public sealed class TextureOptionPreviewService
         try
         {
             var processor = new NativeTextureProcessor(tools);
-            var selected = SelectProcessingCandidates(candidates);
             var successful = new List<GeneratedSample>(MaximumSamples);
             var cursor = 0;
-            while (successful.Count < MaximumSamples && cursor < selected.Count)
+            while (successful.Count < MaximumSamples && cursor < candidates.Count)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var remaining = MaximumSamples - successful.Count;
-                var batch = selected.Skip(cursor).Take(Math.Max(remaining, 1)).ToArray();
+                var batch = candidates.Skip(cursor).Take(Math.Max(remaining, 1)).ToArray();
                 cursor += batch.Length;
                 var pending = new List<PendingPreview>(batch.Length);
                 foreach (var candidate in batch)
@@ -856,7 +863,8 @@ public sealed class TextureOptionPreviewService
     }
 
     private static IReadOnlyList<PreviewCandidate> SelectProcessingCandidates(
-        IReadOnlyList<PreviewCandidate> candidates)
+        IReadOnlyList<PreviewCandidate> candidates,
+        ulong sampleSeed)
     {
         var ordered = candidates
             .OrderBy(item => GetCategoryOrder(item.Category))
@@ -866,12 +874,41 @@ public sealed class TextureOptionPreviewService
             .ToArray();
         var selected = new List<PreviewCandidate>(ordered.Length);
         var usedFamilies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var groups = ordered
+            .GroupBy(item => item.Category, StringComparer.Ordinal)
+            .Select(group => new
+            {
+                group.Key,
+                Items = RotateBySeed(
+                    group.ToArray(),
+                    CreateRotationIdentity(
+                        group.Key,
+                        group.Select(item => $"{item.ContainerRelativePath}/{item.LogicalName}")),
+                    sampleSeed)
+            })
+            .OrderBy(group => GetCategoryOrder(group.Key))
+            .ThenBy(group => group.Key, StringComparer.Ordinal)
+            .ToArray();
 
-        // Put one example from each semantic category first. Later candidates
-        // remain deterministic fallbacks when a native fidelity gate rejects one.
-        foreach (var group in ordered.GroupBy(item => item.Category, StringComparer.Ordinal))
+        // More than three categories can be available in broad scopes. Rotate
+        // which category is omitted, then restore normal semantic tab order.
+        var primaryGroups = groups.Length <= MaximumSamples
+            ? groups
+            : RotateBySeed(
+                    groups,
+                    CreateRotationIdentity("categories", groups.Select(group => group.Key)),
+                    sampleSeed)
+                .Take(MaximumSamples)
+                .OrderBy(group => GetCategoryOrder(group.Key))
+                .ThenBy(group => group.Key, StringComparer.Ordinal)
+                .ToArray();
+
+        // Put one varied example from each chosen semantic category first.
+        // Later candidates remain deterministic fallbacks when a native
+        // fidelity gate rejects one.
+        foreach (var group in primaryGroups)
         {
-            var candidate = group.FirstOrDefault(item =>
+            var candidate = group.Items.FirstOrDefault(item =>
                 usedFamilies.Add(TexturePreviewCollector.CreateFamilyKey(item.LogicalName)));
             if (candidate is not null)
             {
@@ -879,7 +916,10 @@ public sealed class TextureOptionPreviewService
             }
         }
 
-        foreach (var candidate in ordered)
+        var fallbackOrder = primaryGroups
+            .Concat(groups.Where(group => !primaryGroups.Contains(group)))
+            .SelectMany(group => group.Items);
+        foreach (var candidate in fallbackOrder)
         {
             if (selected.Contains(candidate))
             {
@@ -895,6 +935,40 @@ public sealed class TextureOptionPreviewService
 
         return selected;
     }
+
+    private static IReadOnlyList<T> RotateBySeed<T>(
+        IReadOnlyList<T> items,
+        string identity,
+        ulong sampleSeed)
+    {
+        if (items.Count <= 1)
+        {
+            return items.ToArray();
+        }
+
+        var identityHash = SHA256.HashData(Encoding.UTF8.GetBytes(identity));
+        var baseOffset = BinaryPrimitives.ReadUInt64LittleEndian(identityHash);
+        var offset = (int)((baseOffset + sampleSeed) % (ulong)items.Count);
+        return items.Skip(offset).Concat(items.Take(offset)).ToArray();
+    }
+
+    private static string CreateRotationIdentity(
+        string category,
+        IEnumerable<string> candidateIdentities) =>
+        string.Join(
+            "|",
+            candidateIdentities
+                .OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+                .Prepend(category));
+
+    internal static IReadOnlyList<string> RotateCandidateKeysForTest(
+        string category,
+        IReadOnlyList<string> stableKeys,
+        ulong sampleSeed) =>
+        RotateBySeed(
+            stableKeys,
+            CreateRotationIdentity(category, stableKeys),
+            sampleSeed);
 
     private static IReadOnlyList<string> PrioritizeArchives(
         string installPath,
@@ -1475,19 +1549,22 @@ public sealed class TextureOptionPreviewService
     private static string ComputeCacheKey(
         UpscaleOptions options,
         IReadOnlyList<PreviewCandidate> candidates,
-        string toolSignature)
+        string toolSignature,
+        ulong sampleSeed)
     {
         var parts = new List<string>
         {
             CacheKeyPrefix,
             TextureProcessingPipeline.CurrentRevision.ToString(CultureInfo.InvariantCulture),
-            TextureBuildReport.CurrentPaintedProfileRevision.ToString(CultureInfo.InvariantCulture),
+            TextureBuildReport.GetCurrentPaintedProfileRevision(options.Preset)
+                .ToString(CultureInfo.InvariantCulture),
             options.Preset.ToString(),
             options.Scope.ToString(),
             options.MaximumDimension.ToString(CultureInfo.InvariantCulture),
             options.GenerateMipMaps ? "mips" : "top-only",
             options.SelectedZone?.Trim().ToLowerInvariant() ?? string.Empty,
             options.PaintedTheme.ToString(),
+            sampleSeed.ToString(CultureInfo.InvariantCulture),
             SerializeOverrides(options.TextureOverrides),
             toolSignature
         };
