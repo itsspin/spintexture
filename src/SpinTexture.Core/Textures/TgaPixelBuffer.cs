@@ -470,6 +470,68 @@ public sealed class TgaPixelBuffer
     }
 
     /// <summary>
+    /// Runs the complete multi-pass painterly stylization at full strength.
+    /// Callers that need several strengths should stylize once and use
+    /// <see cref="BlendTowardStylized"/> for each candidate.
+    /// </summary>
+    public TgaPixelBuffer ApplyPaintedStylizationFull(
+        bool wrapEdges,
+        int neuralScale,
+        PaintedStyleSettings? style = null)
+    {
+        return new TgaPixelBuffer(
+            Width,
+            Height,
+            PaintedStylizer.RenderStylized(
+                _rgba,
+                Width,
+                Height,
+                wrapEdges,
+                neuralScale,
+                style ?? PaintedStyleSettings.Default));
+    }
+
+    /// <summary>
+    /// Blends this image toward a stylized rendition of itself while keeping
+    /// this image's alpha plane byte-for-byte.
+    /// </summary>
+    public TgaPixelBuffer BlendTowardStylized(TgaPixelBuffer stylized, double strength)
+    {
+        ArgumentNullException.ThrowIfNull(stylized);
+        if (stylized.Width != Width || stylized.Height != Height)
+        {
+            throw new ArgumentException("Stylized buffer must match this image's dimensions.", nameof(stylized));
+        }
+
+        return new TgaPixelBuffer(
+            Width,
+            Height,
+            PaintedStylizer.MixToward(_rgba, stylized._rgba, strength));
+    }
+
+    /// <summary>
+    /// Convenience single-call painterly stylization at the given strength.
+    /// </summary>
+    public TgaPixelBuffer ApplyPaintedStylization(
+        double strength,
+        bool wrapEdges = true,
+        int neuralScale = 4,
+        PaintedStyleSettings? style = null)
+    {
+        return new TgaPixelBuffer(
+            Width,
+            Height,
+            PaintedStylizer.Render(
+                _rgba,
+                Width,
+                Height,
+                strength,
+                wrapEdges,
+                neuralScale,
+                style ?? PaintedStyleSettings.Default));
+    }
+
+    /// <summary>
     /// Gives an illustrated neural reconstruction a graphic hand-painted finish.
     /// The pass consolidates nearby, already-similar colors into broad value planes
     /// and reinforces only dark/light ridges that are present in the reconstruction.
