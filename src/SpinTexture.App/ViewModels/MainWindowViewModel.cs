@@ -31,6 +31,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private ScanSummary? _scanSummary;
     private PresetOptionViewModel _selectedPresetOption;
     private PaintedThemeOptionViewModel _selectedPaintedThemeOption;
+    private double _paintedStrokeSize;
+    private double _paintedStrokeStrength;
+    private double _paintedDetailPreservation;
+    private double _paintedColorSimplification;
+    private double _paintedCanvasGrain;
     private ScopeOptionViewModel _selectedScopeOption;
     private string? _selectedZone;
     private int _selectedMaximumDimension = 2048;
@@ -190,7 +195,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         WorldExpansionOptions.Single(option => option.Value == WorldExpansion.CurrentEql)
             .SetSelectedSilently(true);
         OptionPreview = new TextureOptionPreviewViewModel(_workflow);
-        var rememberedInstall = _preferences.Read().LastInstallPath;
+        var rememberedPreferences = _preferences.Read();
+        var rememberedStyle = (rememberedPreferences.PaintedStyle
+            ?? PaintedStyleSettings.Default).Clamped();
+        _paintedStrokeSize = rememberedStyle.StrokeSize;
+        _paintedStrokeStrength = rememberedStyle.StrokeStrength;
+        _paintedDetailPreservation = rememberedStyle.DetailPreservation;
+        _paintedColorSimplification = rememberedStyle.ColorSimplification;
+        _paintedCanvasGrain = rememberedStyle.CanvasGrain;
+        var rememberedInstall = rememberedPreferences.LastInstallPath;
         if (!string.IsNullOrWhiteSpace(rememberedInstall)
             && Directory.Exists(rememberedInstall)
             && File.Exists(Path.Combine(rememberedInstall, "eqgame.exe")))
@@ -200,6 +213,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
 
         BrowseCommand = new RelayCommand(_ => Browse(), _ => !IsBusy);
+        ResetPaintedStyleCommand = new RelayCommand(_ => ResetPaintedStyle(), _ => !IsBusy);
         AnalyzeCommand = new AsyncRelayCommand(AnalyzeAsync, CanAnalyze);
         BuildStagedPackCommand = new AsyncRelayCommand(
             BuildAsync,
@@ -434,6 +448,113 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public bool IsGraphicPaintedSelected =>
         SelectedPresetOption.Value == TexturePreset.Illustrated;
+
+    public double PaintedStrokeSize
+    {
+        get => _paintedStrokeSize;
+        set => SetPaintedStyleComponent(ref _paintedStrokeSize, value);
+    }
+
+    public double PaintedStrokeStrength
+    {
+        get => _paintedStrokeStrength;
+        set => SetPaintedStyleComponent(ref _paintedStrokeStrength, value);
+    }
+
+    public double PaintedDetailPreservation
+    {
+        get => _paintedDetailPreservation;
+        set => SetPaintedStyleComponent(ref _paintedDetailPreservation, value);
+    }
+
+    public double PaintedColorSimplification
+    {
+        get => _paintedColorSimplification;
+        set => SetPaintedStyleComponent(ref _paintedColorSimplification, value);
+    }
+
+    public double PaintedCanvasGrain
+    {
+        get => _paintedCanvasGrain;
+        set => SetPaintedStyleComponent(ref _paintedCanvasGrain, value);
+    }
+
+    public RelayCommand ResetPaintedStyleCommand { get; }
+
+    private void SetPaintedStyleComponent(
+        ref double field,
+        double value,
+        [System.Runtime.CompilerServices.CallerMemberName] string? propertyName = null)
+    {
+        var clamped = double.IsFinite(value) ? Math.Clamp(value, 0, 1) : field;
+        if (Math.Abs(field - clamped) < 0.0005)
+        {
+            return;
+        }
+
+        field = clamped;
+        OnPropertyChanged(propertyName);
+        PersistPaintedStyle();
+        UpdateOptionPreviewSelection();
+    }
+
+    private void ResetPaintedStyle()
+    {
+        var defaults = PaintedStyleSettings.Default;
+        _paintedStrokeSize = defaults.StrokeSize;
+        _paintedStrokeStrength = defaults.StrokeStrength;
+        _paintedDetailPreservation = defaults.DetailPreservation;
+        _paintedColorSimplification = defaults.ColorSimplification;
+        _paintedCanvasGrain = defaults.CanvasGrain;
+        OnPropertyChanged(nameof(PaintedStrokeSize));
+        OnPropertyChanged(nameof(PaintedStrokeStrength));
+        OnPropertyChanged(nameof(PaintedDetailPreservation));
+        OnPropertyChanged(nameof(PaintedColorSimplification));
+        OnPropertyChanged(nameof(PaintedCanvasGrain));
+        PersistPaintedStyle();
+        UpdateOptionPreviewSelection();
+    }
+
+    private void PersistPaintedStyle()
+    {
+        var style = EffectivePaintedStyleOrDefault;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _preferences
+                    .WritePaintedStyleAsync(style == PaintedStyleSettings.Default ? null : style)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is
+                IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                // Remembering slider positions is best-effort; the build itself
+                // always uses the live in-memory values.
+            }
+        });
+    }
+
+    private PaintedStyleSettings EffectivePaintedStyleOrDefault => new PaintedStyleSettings(
+        _paintedStrokeSize,
+        _paintedStrokeStrength,
+        _paintedDetailPreservation,
+        _paintedColorSimplification,
+        _paintedCanvasGrain).Clamped();
+
+    private PaintedStyleSettings? EffectivePaintedStyle
+    {
+        get
+        {
+            if (!IsGraphicPaintedSelected)
+            {
+                return null;
+            }
+
+            var style = EffectivePaintedStyleOrDefault;
+            return style == PaintedStyleSettings.Default ? null : style;
+        }
+    }
 
     public ScopeOptionViewModel SelectedScopeOption
     {
@@ -845,7 +966,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 InstallAfterBuild: false,
                 IsSelectedZoneScope ? SelectedZone : null,
                 PaintedTheme: EffectivePaintedTheme,
-                WorldExpansions: EffectiveWorldExpansionSelection);
+                WorldExpansions: EffectiveWorldExpansionSelection,
+                PaintedStyle: EffectivePaintedStyle);
 
             TexturePackBuildResult result = await _workflow.BuildAsync(
                 InstallPath,
@@ -1907,7 +2029,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             InstallAfterBuild: false,
             IsSelectedZoneScope ? SelectedZone : null,
             PaintedTheme: EffectivePaintedTheme,
-            WorldExpansions: EffectiveWorldExpansionSelection);
+            WorldExpansions: EffectiveWorldExpansionSelection,
+            PaintedStyle: EffectivePaintedStyle);
         OptionPreview.UpdateSelection(
             InstallPath,
             previewOptions,
