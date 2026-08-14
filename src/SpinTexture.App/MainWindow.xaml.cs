@@ -1,6 +1,8 @@
 using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using SpinTexture.App.Services;
 using SpinTexture.App.ViewModels;
 using SpinTexture.Core.Services;
@@ -16,8 +18,82 @@ public partial class MainWindow : Window
     private NativeGraphicsWindow? _nativeGraphicsView;
     private bool _previewReturnsToPacks;
     private string? _viewInstallPath;
+    private bool _shutdownDrainComplete;
+    private bool _shutdownDrainRunning;
+    private bool _closedCleanupComplete;
 
     internal bool CanStartUpdate => !_viewModel.IsBusy && CanLeaveCurrentSection();
+
+    internal void RunLivePreviewLayoutSmoke(Size viewport)
+    {
+        TextureOptionPreviewSampleViewModel.ValidateThemeDescriptionSmoke();
+        _viewModel.OptionPreview.PrepareLayoutSmokeState();
+        _viewModel.OptionPreview.ShowOriginalCommand.Execute(null);
+        if (!_viewModel.OptionPreview.IsOriginalView)
+        {
+            throw new InvalidDataException("The live preview Original shortcut did not select the original image.");
+        }
+
+        _viewModel.OptionPreview.ShowEnhancedCommand.Execute(null);
+        if (!_viewModel.OptionPreview.IsEnhancedView)
+        {
+            throw new InvalidDataException("The live preview Enhanced shortcut did not select the enhanced image.");
+        }
+
+        _viewModel.OptionPreview.RevealPercent = 35d;
+        Dispatcher.Invoke(() => { }, DispatcherPriority.DataBind);
+        Measure(viewport);
+        Arrange(new Rect(new Point(0, 0), viewport));
+        UpdateLayout();
+
+        LivePreviewCard.BringIntoView();
+        BuildPage.ScrollToVerticalOffset(Math.Min(
+            BuildPage.ScrollableHeight,
+            Math.Max(0d, BuildPage.VerticalOffset)));
+        Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+        UpdateLayout();
+
+        if (LiveComparisonSurface.ActualWidth < 240d)
+        {
+            // A headless single-file startup can defer layout for content below
+            // the current ScrollViewer viewport. Measure the named card at the
+            // real center-column width so the binding smoke stays deterministic.
+            double cardWidth = Math.Max(
+                400d,
+                viewport.Width - 48d - 310d - 338d - 28d);
+            LivePreviewCard.Measure(new Size(cardWidth, double.PositiveInfinity));
+            LivePreviewCard.Arrange(new Rect(
+                0d,
+                0d,
+                cardWidth,
+                LivePreviewCard.DesiredSize.Height));
+            LivePreviewCard.UpdateLayout();
+        }
+
+        if (LiveComparisonSurface.ActualWidth < 240d)
+        {
+            throw new InvalidDataException("The live preview comparison surface collapsed below its usable minimum width.");
+        }
+
+        double expectedRevealWidth = LiveComparisonSurface.ActualWidth * 0.35d;
+        if (Math.Abs(EnhancedRevealLayer.ActualWidth - expectedRevealWidth) > 2d)
+        {
+            throw new InvalidDataException("The live preview enhanced reveal width binding is invalid.");
+        }
+
+        double dividerPosition = Canvas.GetLeft(RevealDivider);
+        double expectedDividerPosition = LiveComparisonSurface.ActualWidth * 0.65d;
+        if (double.IsNaN(dividerPosition)
+            || Math.Abs(dividerPosition - expectedDividerPosition) > 2d)
+        {
+            throw new InvalidDataException("The live preview reveal divider binding is invalid.");
+        }
+
+        if (BuildPage.ExtentWidth > BuildPage.ViewportWidth + 2d)
+        {
+            throw new InvalidDataException("The expanded live preview introduced horizontal overflow at minimum width.");
+        }
+    }
 
     public MainWindow()
     {
@@ -36,11 +112,13 @@ public partial class MainWindow : Window
         _viewModel.PackLibraryRequested += OnPackLibraryRequested;
         _viewModel.PackStorageRequested += OnPackStorageRequested;
         _viewModel.NativeGraphicsRequested += OnNativeGraphicsRequested;
+        Closing += OnWindowClosing;
         Closed += OnWindowClosed;
     }
 
-    private void OnPackStorageRequested(string installPath)
+    private async void OnPackStorageRequested(string installPath)
     {
+        await _viewModel.SuspendOptionPreviewForExternalWorkflowAsync().ConfigureAwait(true);
         EnsureViewsMatchInstall(installPath);
         if (_packStorageView is null)
         {
@@ -58,8 +136,9 @@ public partial class MainWindow : Window
         await _viewModel.RefreshAfterPackStorageMoveAsync().ConfigureAwait(true);
     }
 
-    private void OnNativeGraphicsRequested(string installPath)
+    private async void OnNativeGraphicsRequested(string installPath)
     {
+        await _viewModel.SuspendOptionPreviewForExternalWorkflowAsync().ConfigureAwait(true);
         EnsureViewsMatchInstall(installPath);
         if (_nativeGraphicsView is null)
         {
@@ -72,8 +151,9 @@ public partial class MainWindow : Window
         ShowSection(_nativeGraphicsView, "NATIVE GRAPHICS");
     }
 
-    private void OnPackLibraryRequested(string installPath)
+    private async void OnPackLibraryRequested(string installPath)
     {
+        await _viewModel.SuspendOptionPreviewForExternalWorkflowAsync().ConfigureAwait(true);
         EnsureViewsMatchInstall(installPath);
         if (_packLibraryView is null)
         {
@@ -92,8 +172,11 @@ public partial class MainWindow : Window
     private void OnPackPreviewRequested(object? sender, PackPreviewRequestedEventArgs e) =>
         ShowPreview(e.ManifestPath, e.ApplyChoices, returnsToPacks: true);
 
-    private void OnPreviewGalleryRequested(string manifestPath) =>
+    private async void OnPreviewGalleryRequested(string manifestPath)
+    {
+        await _viewModel.SuspendOptionPreviewForExternalWorkflowAsync().ConfigureAwait(true);
         ShowPreview(manifestPath, applyChoices: null, returnsToPacks: false);
+    }
 
     private void ShowPreview(
         string manifestPath,
@@ -135,6 +218,11 @@ public partial class MainWindow : Window
         }
         catch (Exception exception)
         {
+            if (!returnsToPacks)
+            {
+                _viewModel.ResumeOptionPreviewForBuildSection();
+            }
+
             MessageBox.Show(
                 this,
                 $"The texture review could not be opened.\n\n{exception.Message}",
@@ -160,6 +248,7 @@ public partial class MainWindow : Window
 
         SectionContent.Content = null;
         SectionOverlay.Visibility = Visibility.Collapsed;
+        _viewModel.ResumeOptionPreviewForBuildSection();
     }
 
     private bool CanLeaveCurrentSection() => SectionContent.Content switch
@@ -268,8 +357,53 @@ public partial class MainWindow : Window
             ActivityLogList.ScrollIntoView(_viewModel.LogEntries[^1])));
     }
 
+    private async void OnWindowClosing(object? sender, CancelEventArgs e)
+    {
+        if (_shutdownDrainComplete)
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        if (_shutdownDrainRunning)
+        {
+            return;
+        }
+
+        _shutdownDrainRunning = true;
+        try
+        {
+            await _viewModel.DrainOptionPreviewForShutdownAsync().ConfigureAwait(true);
+            await Dispatcher.InvokeAsync(
+                () =>
+                {
+                    _shutdownDrainComplete = true;
+                    Close();
+                },
+                DispatcherPriority.ApplicationIdle);
+        }
+        catch (Exception exception)
+        {
+            _shutdownDrainRunning = false;
+            MessageBox.Show(
+                this,
+                $"SpinTexture is still stopping preview work safely. Try closing again after it finishes.\n\n{exception.Message}",
+                "Preview is still stopping",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+    }
+
     private void OnWindowClosed(object? sender, EventArgs e)
     {
+        if (_closedCleanupComplete)
+        {
+            return;
+        }
+
+        _closedCleanupComplete = true;
+        Closing -= OnWindowClosing;
+        Closed -= OnWindowClosed;
         _viewModel.LogEntries.CollectionChanged -= OnLogEntriesChanged;
         _viewModel.PreviewGalleryRequested -= OnPreviewGalleryRequested;
         _viewModel.PackLibraryRequested -= OnPackLibraryRequested;

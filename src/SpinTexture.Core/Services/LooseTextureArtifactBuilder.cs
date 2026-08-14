@@ -117,19 +117,14 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder, ISta
             reviewDimensions.OutputWidth,
             reviewDimensions.OutputHeight));
 
-        var textureOptions = metadata.FileFormat == TextureFileFormat.Bmp
-            && metadata.BitsPerPixel == 8
-            ? context.Options with { Preset = TexturePreset.ClassicHd }
-            : context.Options;
-        if (!allowSpellEffects
-            && !(metadata.FileFormat == TextureFileFormat.Bmp
-                && metadata.BitsPerPixel == 8)
-            && context.Options.Preset != TexturePreset.Faithful
-            && (PfsTextureArchiveBuilder.ShouldUseConservativeColorModel(context.RelativeInstallPath)
-                || Math.Max(metadata.Width, metadata.Height) < 128))
-        {
-            textureOptions = context.Options with { Preset = TexturePreset.Faithful };
-        }
+        var textureOptions = PfsTextureArchiveBuilder.ResolveColorProcessingOptions(
+            context.Options,
+            metadata,
+            context.RelativeInstallPath,
+            allowExplicitEffectArt: allowSpellEffects);
+        textureOptions = PaintedThemeResolver.ResolveForArtifact(
+            textureOptions,
+            context.RelativeInstallPath);
 
         try
         {

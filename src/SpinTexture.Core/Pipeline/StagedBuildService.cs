@@ -797,6 +797,9 @@ public sealed class StagedBuildService
 
         if (!Enum.IsDefined(checkpoint.Options.Preset)
             || !Enum.IsDefined(checkpoint.Options.Scope)
+            || !Enum.IsDefined(checkpoint.Options.PaintedTheme)
+            || (checkpoint.Options.Preset != TexturePreset.Illustrated
+                && checkpoint.Options.PaintedTheme != PaintedTheme.ClassicPainted)
             || checkpoint.Options.MaximumDimension is not (1024 or 2048 or 4096)
             || (checkpoint.Options.Scope == AssetScope.SelectedZone
                 && string.IsNullOrWhiteSpace(checkpoint.Options.SelectedZone)))

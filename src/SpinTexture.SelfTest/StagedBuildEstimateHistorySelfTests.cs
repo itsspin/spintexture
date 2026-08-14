@@ -22,6 +22,17 @@ internal static class StagedBuildEstimateHistorySelfTests
 
         try
         {
+            const string legacyPaintedOptionsJson =
+                """
+                {"preset":"illustrated","scope":"worldOnly","maximumDimension":2048,"generateMipMaps":true,"installAfterBuild":false}
+                """;
+            var legacyPaintedOptions = JsonSerializer.Deserialize<UpscaleOptions>(
+                legacyPaintedOptionsJson,
+                JsonOptions);
+            Assert(
+                legacyPaintedOptions?.PaintedTheme == PaintedTheme.ClassicPainted,
+                "manifests written before painted themes must deserialize to the classic painted finish");
+
             var paths = new ProjectPaths(installPath, workspacePath);
             var options = new UpscaleOptions(
                 TexturePreset.MaximumDetail,
@@ -49,6 +60,7 @@ internal static class StagedBuildEstimateHistorySelfTests
                     isIncrementalRepair: false,
                     isSourceMismatchRepair: false,
                     reusedTextures: 0,
+                    texturePipelineRevision: TextureProcessingPipeline.CurrentRevision,
                     cancellationToken)
                 .ConfigureAwait(false);
 
@@ -85,6 +97,21 @@ internal static class StagedBuildEstimateHistorySelfTests
                     zoneOptions with { SelectedZone = "fearplane" },
                     zoneOptions),
                 "different selected zones must not share timing history");
+            var paintedOptions = options with
+            {
+                Preset = TexturePreset.Illustrated,
+                PaintedTheme = PaintedTheme.ClassicPainted
+            };
+            Assert(
+                !StagedBuildEstimateHistory.OptionsMatch(
+                    paintedOptions with { PaintedTheme = PaintedTheme.DarkGothic },
+                    paintedOptions),
+                "different painted themes must not share exact-style timing history");
+            Assert(
+                StagedBuildEstimateHistory.OptionsMatch(
+                    options with { PaintedTheme = PaintedTheme.ComicInk },
+                    options),
+                "painted theme metadata must not split history for a non-painted preset");
 
             var reportedCompletedUtc = legacyCompletedUtc.AddDays(1);
             await CreateBuildAsync(
@@ -100,6 +127,7 @@ internal static class StagedBuildEstimateHistorySelfTests
                     isIncrementalRepair: false,
                     isSourceMismatchRepair: false,
                     reusedTextures: 0,
+                    texturePipelineRevision: TextureProcessingPipeline.CurrentRevision,
                     cancellationToken)
                 .ConfigureAwait(false);
 
@@ -126,6 +154,7 @@ internal static class StagedBuildEstimateHistorySelfTests
                     isIncrementalRepair: true,
                     isSourceMismatchRepair: false,
                     reusedTextures: 42,
+                    texturePipelineRevision: TextureProcessingPipeline.CurrentRevision,
                     cancellationToken)
                 .ConfigureAwait(false);
 
@@ -148,12 +177,34 @@ internal static class StagedBuildEstimateHistorySelfTests
                     isIncrementalRepair: false,
                     isSourceMismatchRepair: true,
                     reusedTextures: 0,
+                    texturePipelineRevision: TextureProcessingPipeline.CurrentRevision,
                     cancellationToken)
                 .ConfigureAwait(false);
             AssertEqual(
                 "build-reported-full",
                 StagedBuildEstimateHistory.FindLatest(paths, options)?.BuildId,
                 "source-mismatch repair timing must not underestimate a fresh build");
+
+            await CreateBuildAsync(
+                    paths,
+                    "build-obsolete-painted-pipeline",
+                    options,
+                    reportedCompletedUtc.AddHours(3),
+                    [9_000],
+                    reportSchemaVersion: TextureBuildReport.CurrentSchemaVersion,
+                    durationSeconds: 10,
+                    startedUtc: reportedCompletedUtc.AddHours(3).AddSeconds(-10),
+                    directoryCreatedUtc: reportedCompletedUtc.AddHours(3).AddSeconds(-10),
+                    isIncrementalRepair: false,
+                    isSourceMismatchRepair: false,
+                    reusedTextures: 0,
+                    texturePipelineRevision: TextureProcessingPipeline.CurrentRevision - 1,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            AssertEqual(
+                "build-reported-full",
+                StagedBuildEstimateHistory.FindLatest(paths, options)?.BuildId,
+                "an older processing pipeline must not calibrate a materially changed style route");
 
             var corruptDirectory = Path.Combine(paths.StagingPath, "build-corrupt-newest");
             Directory.CreateDirectory(corruptDirectory);
@@ -195,6 +246,7 @@ internal static class StagedBuildEstimateHistorySelfTests
         bool isIncrementalRepair,
         bool isSourceMismatchRepair,
         int reusedTextures,
+        int texturePipelineRevision,
         CancellationToken cancellationToken)
     {
         paths.EnsureWorkspaceDirectories();
@@ -238,7 +290,8 @@ internal static class StagedBuildEstimateHistorySelfTests
             StartedUtc = startedUtc,
             DurationSeconds = durationSeconds,
             IsIncrementalRepair = isIncrementalRepair,
-            IsSourceMismatchRepair = isSourceMismatchRepair
+            IsSourceMismatchRepair = isSourceMismatchRepair,
+            TexturePipelineRevision = texturePipelineRevision
         };
 
         await WriteJsonAsync(

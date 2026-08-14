@@ -11,13 +11,15 @@ namespace SpinTexture.Core.Services;
 /// based on view angle. Revision 4 adds the legacy celestial/sky safety policy.
 /// Revision 5 closes the native Resources/sky atlas boundary. Revision 6
 /// preserves the exact bitmap sets referenced by legacy semi-transparent WLD
-/// materials so water and glass retain their authored blending. Older
+/// materials so water and glass retain their authored blending. Revision 7
+/// introduces the asset-aware graphic-painted route and fences crash-resume
+/// checkpoints so older painted artifacts cannot mix with the new art pass. Older
 /// packs can advance through these independent safety rules without rerunning
 /// unaffected successfully enhanced textures.
 /// </summary>
 public static class TextureProcessingPipeline
 {
-    public const int CurrentRevision = 6;
+    public const int CurrentRevision = 7;
     public const string CharacterEquipmentCoverageRuleId =
         "character-equipment-coverage-v1";
     public const string CutoutMipSafetyRuleId =
@@ -267,6 +269,7 @@ public sealed record TextureBuildReport(
     TextureBuildStatistics Statistics)
 {
     public const int CurrentSchemaVersion = 3;
+    public const int CurrentPaintedProfileRevision = 1;
     public DateTimeOffset? StartedUtc { get; init; }
     public double? DurationSeconds { get; init; }
     public bool WasResumed { get; init; }
@@ -284,6 +287,9 @@ public sealed record TextureBuildReport(
     public int RebuiltArtifacts { get; init; }
     public int SafetyUpgradedArtifacts { get; init; }
     public int TexturePipelineRevision { get; init; }
+    // Zero is the backward-compatible value for reports written before the
+    // Graphic Painted/Rustic profile provenance marker existed.
+    public int PaintedProfileRevision { get; init; }
     public IReadOnlyList<string> AppliedRepairRuleIds { get; init; } = [];
 }
 

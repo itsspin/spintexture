@@ -127,7 +127,8 @@ internal static class WorldCutoutRepairSelfTests
                     new Dictionary<string, int>(),
                     []))
             {
-                TexturePipelineRevision = 1
+                TexturePipelineRevision = 1,
+                PaintedProfileRevision = TextureBuildReport.CurrentPaintedProfileRevision
             };
             await WriteJsonAsync(
                     Path.Combine(baseline.BuildDirectory, "texture-report.json"),
@@ -226,6 +227,10 @@ internal static class WorldCutoutRepairSelfTests
                 TextureProcessingPipeline.CurrentRevision,
                 repaired.Report.TexturePipelineRevision,
                 "replacement pipeline revision");
+            AssertEqual(
+                TextureBuildReport.CurrentPaintedProfileRevision,
+                repaired.Report.PaintedProfileRevision,
+                "safety repair must preserve baseline visual-profile provenance");
             AssertEqual(2, repaired.Report.Statistics.ReusedTextures, "opaque prior enhancement reuse count");
             AssertEqual(0, repaired.Report.Statistics.EnhancedTextures, "no stale cutout in synthetic opaque fixture");
 

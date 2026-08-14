@@ -317,6 +317,9 @@ public sealed class StagedPackCatalogService
         if (manifest.Options is null
             || !Enum.IsDefined(manifest.Options.Preset)
             || !Enum.IsDefined(manifest.Options.Scope)
+            || !Enum.IsDefined(manifest.Options.PaintedTheme)
+            || (manifest.Options.Preset != TexturePreset.Illustrated
+                && manifest.Options.PaintedTheme != PaintedTheme.ClassicPainted)
             || manifest.Options.MaximumDimension is not (1024 or 2048 or 4096))
         {
             throw new InvalidDataException("The staged-pack manifest contains invalid upscale options.");

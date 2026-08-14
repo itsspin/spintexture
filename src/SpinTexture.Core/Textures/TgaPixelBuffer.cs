@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using SpinTexture.Core.Imaging;
+using SpinTexture.Core.Models;
 
 namespace SpinTexture.Core.Textures;
 
@@ -468,6 +469,279 @@ public sealed class TgaPixelBuffer
         return new TgaPixelBuffer(Width, Height, output);
     }
 
+    /// <summary>
+    /// Gives an illustrated neural reconstruction a graphic hand-painted finish.
+    /// The pass consolidates nearby, already-similar colors into broad value planes
+    /// and reinforces only dark/light ridges that are present in the reconstruction.
+    /// It does not trace a global outline or synthesize detail. Sampling can wrap for
+    /// repeating world materials, and the input alpha plane is retained byte-for-byte.
+    /// </summary>
+    public TgaPixelBuffer ApplyGraphicPaintedFinish(
+        double strength = 1,
+        bool wrapEdges = true)
+    {
+        if (!double.IsFinite(strength) || strength is < 0 or > 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(strength));
+        }
+
+        if (strength == 0)
+        {
+            return new TgaPixelBuffer(Width, Height, (byte[])_rgba.Clone());
+        }
+
+        // Precomputed neighbors keep this bounded post-process inexpensive for
+        // 2K/4K assets and make its edge behavior explicit and deterministic.
+        var previousX = new int[Width];
+        var nextX = new int[Width];
+        var previousY = new int[Height];
+        var nextY = new int[Height];
+        for (var x = 0; x < Width; x++)
+        {
+            previousX[x] = wrapEdges ? Mod(x - 1, Width) : Math.Max(0, x - 1);
+            nextX[x] = wrapEdges ? Mod(x + 1, Width) : Math.Min(Width - 1, x + 1);
+        }
+
+        for (var y = 0; y < Height; y++)
+        {
+            previousY[y] = wrapEdges ? Mod(y - 1, Height) : Math.Max(0, y - 1);
+            nextY[y] = wrapEdges ? Mod(y + 1, Height) : Math.Min(Height - 1, y + 1);
+        }
+
+        var output = new byte[_rgba.Length];
+        var similarityThreshold = 28 + (8 * (1 - strength));
+        var planeStep = 12 + (6 * strength);
+        var chromaStep = 9 + (3 * strength);
+        for (var y = 0; y < Height; y++)
+        {
+            for (var x = 0; x < Width; x++)
+            {
+                var offset = ((y * Width) + x) * 4;
+                var red = (double)_rgba[offset];
+                var green = (double)_rgba[offset + 1];
+                var blue = (double)_rgba[offset + 2];
+                var centerLuma = Luminance(_rgba, offset);
+
+                double redSum = red * 4;
+                double greenSum = green * 4;
+                double blueSum = blue * 4;
+                double weightSum = 4;
+                var localLumaSum = centerLuma;
+                var localMinimum = centerLuma;
+                var localMaximum = centerLuma;
+                Accumulate(previousX[x], y);
+                Accumulate(nextX[x], y);
+                Accumulate(x, previousY[y]);
+                Accumulate(x, nextY[y]);
+
+                var normalizedLuma = centerLuma / 255;
+                var midtone = 1 - Math.Abs((normalizedLuma * 2) - 1);
+                var smoothingMix = strength * (0.20 + (0.16 * midtone));
+                var smoothedRed = red + (((redSum / weightSum) - red) * smoothingMix);
+                var smoothedGreen = green + (((greenSum / weightSum) - green) * smoothingMix);
+                var smoothedBlue = blue + (((blueSum / weightSum) - blue) * smoothingMix);
+                var smoothedLuma = (0.2126 * smoothedRed)
+                    + (0.7152 * smoothedGreen)
+                    + (0.0722 * smoothedBlue);
+
+                // A partially blended value/chroma quantization creates painted
+                // planes without producing hard posterization bands.
+                var planeLuma = Math.Round(smoothedLuma / planeStep) * planeStep;
+                var planeMix = strength * (0.24 + (0.12 * midtone));
+                var targetLuma = smoothedLuma + ((planeLuma - smoothedLuma) * planeMix);
+                var redChroma = smoothedRed - smoothedLuma;
+                var blueChroma = smoothedBlue - smoothedLuma;
+                var planeRedChroma = Math.Round(redChroma / chromaStep) * chromaStep;
+                var planeBlueChroma = Math.Round(blueChroma / chromaStep) * chromaStep;
+                var chromaMix = 0.24 * strength;
+                redChroma += (planeRedChroma - redChroma) * chromaMix;
+                blueChroma += (planeBlueChroma - blueChroma) * chromaMix;
+
+                // Reinforce existing structural valleys/ridges only. This brings
+                // out forms already inferred by the model instead of drawing a
+                // uniform cartoon outline around every color transition.
+                var localMean = localLumaSum / 5;
+                var localRange = localMaximum - localMinimum;
+                if (localRange > 18)
+                {
+                    var signedRidge = localMean - centerLuma;
+                    var ridgeMagnitude = Math.Min(
+                        7.5,
+                        ((localRange - 18) * 0.055) + (Math.Abs(signedRidge) * 0.045));
+                    if (signedRidge > 2)
+                    {
+                        targetLuma -= ridgeMagnitude * strength;
+                    }
+                    else if (signedRidge < -4)
+                    {
+                        targetLuma += ridgeMagnitude * strength * 0.42;
+                    }
+                }
+
+                targetLuma = Math.Clamp(targetLuma, 1, 254);
+                var candidateRed = targetLuma + redChroma;
+                var candidateBlue = targetLuma + blueChroma;
+                var candidateGreen = (targetLuma
+                    - (0.2126 * candidateRed)
+                    - (0.0722 * candidateBlue)) / 0.7152;
+                output[offset] = ClampByte(candidateRed);
+                output[offset + 1] = ClampByte(candidateGreen);
+                output[offset + 2] = ClampByte(candidateBlue);
+                output[offset + 3] = _rgba[offset + 3];
+
+                void Accumulate(int sampleX, int sampleY)
+                {
+                    var sampleOffset = ((sampleY * Width) + sampleX) * 4;
+                    var sampleLuma = Luminance(_rgba, sampleOffset);
+                    localLumaSum += sampleLuma;
+                    localMinimum = Math.Min(localMinimum, sampleLuma);
+                    localMaximum = Math.Max(localMaximum, sampleLuma);
+                    if (Math.Abs(sampleLuma - centerLuma) > similarityThreshold)
+                    {
+                        return;
+                    }
+
+                    redSum += _rgba[sampleOffset];
+                    greenSum += _rgba[sampleOffset + 1];
+                    blueSum += _rgba[sampleOffset + 2];
+                    weightSum++;
+                }
+            }
+        }
+
+        return new TgaPixelBuffer(Width, Height, output);
+    }
+
+    /// <summary>
+    /// Applies one bounded art-direction palette after the shared graphic-paint
+    /// finish. Themes reshape only source-derived color and luminance; they never
+    /// add random marks, alter geometry, or change alpha. ZoneAware must be resolved
+    /// to a concrete theme by the artifact builder before this pixel stage.
+    /// </summary>
+    public TgaPixelBuffer ApplyPaintedTheme(
+        PaintedTheme theme,
+        double strength = 1)
+    {
+        if (!Enum.IsDefined(theme) || theme == PaintedTheme.ZoneAware)
+        {
+            throw new ArgumentOutOfRangeException(nameof(theme));
+        }
+
+        if (!double.IsFinite(strength) || strength is < 0 or > 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(strength));
+        }
+
+        if (theme == PaintedTheme.ClassicPainted || strength == 0)
+        {
+            return new TgaPixelBuffer(Width, Height, (byte[])_rgba.Clone());
+        }
+
+        var output = (byte[])_rgba.Clone();
+        var imageMeanLuma = CalculateVisibleColorStatistics().MeanLuminance;
+        for (var offset = 0; offset < output.Length; offset += 4)
+        {
+            // Hidden cutout color was already edge-dilated for safe filtering.
+            // Keep it unchanged so a global theme statistic cannot recolor BC
+            // blocks behind alpha and create a fringe at the visible boundary.
+            if (_rgba[offset + 3] == byte.MinValue)
+            {
+                continue;
+            }
+
+            var red = (double)_rgba[offset];
+            var green = (double)_rgba[offset + 1];
+            var blue = (double)_rgba[offset + 2];
+            var luma = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue);
+            var normalizedLuma = luma / 255;
+            var shadow = 1 - normalizedLuma;
+            var highlight = normalizedLuma;
+            var midtone = 1 - Math.Abs((normalizedLuma * 2) - 1);
+            var peakChannel = Math.Max(red, Math.Max(green, blue)) / 255;
+            var chroma = (Math.Max(red, Math.Max(green, blue))
+                - Math.Min(red, Math.Min(green, blue))) / 255;
+
+            // A zone mood is a restrained material/shadow direction, not a
+            // blanket color wash. Preserve source-derived emissive paint,
+            // stained glass, signs, magic, metals, and other vivid accents even
+            // inside a dark zone such as Neriak. Near-white highlights receive
+            // the same protection. A small residual treatment keeps the palette
+            // cohesive without erasing the zone's authored color contrast.
+            var vividAccent = SmoothStep(0.18, 0.62, chroma)
+                * SmoothStep(0.35, 0.82, peakChannel);
+            var brightAccent = SmoothStep(0.62, 0.94, normalizedLuma);
+            var accentProtection = Math.Max(vividAccent, brightAccent);
+            var localStrength = strength * (1 - (0.82 * accentProtection));
+
+            double targetLuma;
+            double saturationScale;
+            double redBias;
+            double greenBias;
+            double blueBias;
+            switch (theme)
+            {
+                case PaintedTheme.LightStorybook:
+                    // Open the darkest painted planes without flattening their
+                    // form, then add a restrained parchment-gold warmth.
+                    targetLuma = luma
+                        + (localStrength * ((8.0 * shadow) - (1.2 * highlight)) * midtone);
+                    saturationScale = 1 + (0.14 * localStrength * midtone);
+                    redBias = localStrength * ((6.8 * shadow) + (3.2 * highlight));
+                    greenBias = localStrength * ((2.0 * shadow) + (1.8 * highlight));
+                    blueBias = -localStrength * ((5.2 * shadow) + (1.4 * midtone));
+                    break;
+
+                case PaintedTheme.DarkGothic:
+                    // Deepen midtone planes while keeping black detail readable.
+                    // Cool blue-green shadows and restrained warm highlights fit
+                    // underground/dark-city materials without forcing a new hue.
+                    targetLuma = luma
+                        - (localStrength * ((8.6 * midtone) + (2.1 * highlight)));
+                    saturationScale = 1 - (0.08 * localStrength * shadow);
+                    redBias = localStrength * ((2.6 * highlight) - (4.6 * shadow));
+                    greenBias = localStrength * ((1.3 * highlight) + (1.5 * shadow));
+                    blueBias = localStrength * ((6.0 * shadow) - (1.0 * highlight));
+                    break;
+
+                case PaintedTheme.ComicInk:
+                    // Strengthen existing light/dark planes around the current
+                    // mid-gray axis. This is texture-space contrast, not a mesh
+                    // outline, so silhouettes and UV alignment remain unchanged.
+                    var contrast = 1 + (0.24 * localStrength * (0.55 + (0.45 * midtone)));
+                    targetLuma = imageMeanLuma + ((luma - imageMeanLuma) * contrast);
+                    var inkBand = Math.Round(targetLuma / 20) * 20;
+                    targetLuma += (inkBand - targetLuma) * (0.34 * localStrength * midtone);
+                    saturationScale = 1 + (0.20 * localStrength * midtone);
+                    redBias = 0;
+                    greenBias = 0;
+                    blueBias = 0;
+                    break;
+
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(theme));
+            }
+
+            targetLuma = Math.Clamp(targetLuma, 1, 254);
+            var candidateRed = targetLuma + ((red - luma) * saturationScale) + redBias;
+            var candidateGreen = targetLuma + ((green - luma) * saturationScale) + greenBias;
+            var candidateBlue = targetLuma + ((blue - luma) * saturationScale) + blueBias;
+
+            // Biases carry palette direction, while this correction keeps the
+            // intended theme curve in charge of brightness and protects the
+            // stylized fidelity budget on already-dark or already-bright art.
+            var candidateLuma = (0.2126 * candidateRed)
+                + (0.7152 * candidateGreen)
+                + (0.0722 * candidateBlue);
+            var lumaCorrection = targetLuma - candidateLuma;
+            output[offset] = ClampByte(candidateRed + lumaCorrection);
+            output[offset + 1] = ClampByte(candidateGreen + lumaCorrection);
+            output[offset + 2] = ClampByte(candidateBlue + lumaCorrection);
+            output[offset + 3] = _rgba[offset + 3];
+        }
+
+        return new TgaPixelBuffer(Width, Height, output);
+    }
+
     public TgaPixelBuffer AddWrappedBorder(int padding)
     {
         return AddBorder(padding, wrap: true);
@@ -862,6 +1136,12 @@ public sealed class TgaPixelBuffer
 
     private static byte ClampByte(double value) =>
         (byte)Math.Clamp(Math.Round(value), byte.MinValue, byte.MaxValue);
+
+    private static double SmoothStep(double edge0, double edge1, double value)
+    {
+        var normalized = Math.Clamp((value - edge0) / (edge1 - edge0), 0, 1);
+        return normalized * normalized * (3 - (2 * normalized));
+    }
 
     private static double CalculateStableGain(
         double sourceMean,

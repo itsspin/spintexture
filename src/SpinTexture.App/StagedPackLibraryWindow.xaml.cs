@@ -759,9 +759,8 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             : workflow.RepairStagedPackAsync(
                 paths,
                 pack.ManifestPath,
-                TexturePreset.Faithful,
-                progress,
-                cancellationToken);
+                progress: progress,
+                cancellationToken: cancellationToken);
 
     private static string BuildRepairPrompt(StagedPackRow pack)
     {
@@ -769,7 +768,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             ? "A managed source mismatch was detected. SpinTexture will rebuild only affected archives from verified original bytes, reuse complete unaffected archives, and apply any missing current safety fixes in the same replacement."
             : pack.RepairReasonText;
         return $"Repair {pack.Title}?\n\n{reason}\n\n"
-            + "The complete baseline is SHA-256 verified first. Repair creates a new immutable replacement, leaves this completed staged pack unchanged, and checks the replacement for the next install. If this pack was checked, its checkmark moves to the replacement.";
+            + "The complete baseline is SHA-256 verified first. Its recorded texture style and painted theme are preserved; SpinTexture stops instead of silently substituting another style. Repair creates a new immutable replacement, leaves this completed staged pack unchanged, and checks the replacement for the next install. If this pack was checked, its checkmark moves to the replacement.";
     }
 
     private async void Delete_Click(object sender, RoutedEventArgs e)
@@ -1016,10 +1015,9 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                             var result = await workflow.RepairStagedPackAsync(
                                 paths,
                                 baselineManifestPath,
-                                TexturePreset.Faithful,
-                                progress,
-                                token,
-                                choices).ConfigureAwait(false);
+                                progress: progress,
+                                cancellationToken: token,
+                                textureOverrides: choices).ConfigureAwait(false);
                             return result.StagedBuild.ManifestPath;
                         },
                         "Texture revision complete. Unselected prior work was reused and the new immutable pack is checked.",
@@ -1143,15 +1141,41 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         return $"{value:0.##} {units[unit]}";
     }
 
-    private static string FormatPreset(TexturePreset preset) => preset switch
+    private static string FormatPreset(TexturePreset preset, TextureBuildReport? report)
     {
-        TexturePreset.Faithful => "Original Clarity",
-        TexturePreset.ClassicHd => "Texture HD",
-        TexturePreset.MaximumDetail => "Material Detail",
-        TexturePreset.Illustrated => "Illustrated / Clean Painted",
-        TexturePreset.RusticPainted => "Rustic Painted Fantasy",
-        _ => preset.ToString()
-    };
+        var hasCurrentPaintedProfile = (report?.PaintedProfileRevision ?? 0)
+            >= TextureBuildReport.CurrentPaintedProfileRevision;
+        return preset switch
+        {
+            TexturePreset.Faithful => "Original Clarity",
+            TexturePreset.ClassicHd => "Texture HD",
+            TexturePreset.MaximumDetail => "Material Detail",
+            TexturePreset.Illustrated when !hasCurrentPaintedProfile =>
+                "Legacy Illustrated / Clean Painted",
+            TexturePreset.Illustrated => "Graphic Painted Fantasy",
+            TexturePreset.RusticPainted when !hasCurrentPaintedProfile =>
+                "Legacy Rustic Painted Fantasy",
+            TexturePreset.RusticPainted => "Rustic Painted Fantasy",
+            _ => preset.ToString()
+        };
+    }
+
+    private static string FormatPaintedThemeSuffix(
+        UpscaleOptions options,
+        TextureBuildReport? report) =>
+        options.Preset != TexturePreset.Illustrated
+            || (report?.PaintedProfileRevision ?? 0)
+                < TextureBuildReport.CurrentPaintedProfileRevision
+            ? string.Empty
+            : options.PaintedTheme switch
+            {
+                PaintedTheme.ClassicPainted => " / Classic painted",
+                PaintedTheme.LightStorybook => " / Light storybook",
+                PaintedTheme.DarkGothic => " / Dark gothic",
+                PaintedTheme.ComicInk => " / Comic ink",
+                PaintedTheme.ZoneAware => " / Follow each zone",
+                _ => string.Empty
+            };
 
     private static JsonSerializerOptions CreateCompositionJsonOptions()
     {
@@ -1224,6 +1248,10 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             var isSafetyRepair = report?.IsSafetyRepair == true
                 || report?.IsCutoutMipRepair == true;
             var isManualTextureRevision = report?.IsManualTextureRevision == true;
+            var visualProfile = manifest is null
+                ? string.Empty
+                : $"{FormatPreset(manifest.Options.Preset, report)}"
+                  + FormatPaintedThemeSuffix(manifest.Options, report);
             var scopeTitle = manifest?.Options.Scope switch
             {
                 AssetScope.SelectedZone => $"Zone \u00B7 {manifest.Options.SelectedZone ?? "Unknown"}",
@@ -1301,22 +1329,22 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                     ? $"{ArtifactCount:N0} combined archives \u00B7 {FormatBytes(StagedBytes)} \u00B7 "
                       + manifest.CreatedUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture)
                     : isSourceRepair && report is not null
-                        ? $"{report.ReusedArtifacts:N0} complete archives reused \u00B7 "
+                        ? $"{visualProfile} \u00B7 {report.ReusedArtifacts:N0} complete archives reused \u00B7 "
                           + $"{report.RebuiltArtifacts:N0} source-contaminated archives rebuilt \u00B7 "
                           + $"{ArtifactCount:N0} archives \u00B7 {FormatBytes(StagedBytes)} \u00B7 "
                           + manifest.CreatedUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture)
                     : isSafetyRepair && report is not null
-                        ? $"revision {report.BaselineTexturePipelineRevision:N0}\u2192{report.TexturePipelineRevision:N0} \u00B7 "
+                        ? $"{visualProfile} \u00B7 revision {report.BaselineTexturePipelineRevision:N0}\u2192{report.TexturePipelineRevision:N0} \u00B7 "
                           + $"{report.Statistics.ReusedTextures:N0} prior textures reused \u00B7 "
                           + $"{report.Statistics.EnhancedTextures:N0} affected textures safely updated \u00B7 "
                           + $"{ArtifactCount:N0} archives \u00B7 {FormatBytes(StagedBytes)} \u00B7 "
                           + manifest.CreatedUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture)
                     : isLegacyRepair && report is not null
-                        ? $"{report.Statistics.ReusedTextures:N0} prior textures reused \u00B7 "
+                        ? $"{visualProfile} \u00B7 {report.Statistics.ReusedTextures:N0} prior textures reused \u00B7 "
                           + $"{report.Statistics.EnhancedTextures:N0} newly enhanced \u00B7 "
                           + $"{ArtifactCount:N0} archives \u00B7 {FormatBytes(StagedBytes)} \u00B7 "
                           + manifest.CreatedUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture)
-                        : $"{FormatPreset(manifest.Options.Preset)} \u00B7 {manifest.Options.MaximumDimension:N0}px \u00B7 "
+                        : $"{visualProfile} \u00B7 {manifest.Options.MaximumDimension:N0}px \u00B7 "
                           + (report is null
                               ? string.Empty
                               : $"{report.Statistics.EnhancedTextures:N0} enhanced \u00B7 "

@@ -21,6 +21,11 @@ public sealed class TexturePackWorkflow
     public static string FreshBuildResumeOperationKey =>
         $"fresh-texture-pack-pipeline-{TextureProcessingPipeline.CurrentRevision}";
 
+    internal static int GetFreshPaintedProfileRevision(TexturePreset preset) =>
+        preset is TexturePreset.Illustrated or TexturePreset.RusticPainted
+            ? TextureBuildReport.CurrentPaintedProfileRevision
+            : 0;
+
     private static readonly JsonSerializerOptions CompositionJsonOptions =
         CreateCompositionJsonOptions();
 
@@ -107,6 +112,20 @@ public sealed class TexturePackWorkflow
             throw new ArgumentOutOfRangeException(
                 nameof(options),
                 "The texture cap must be 1024, 2048, or 4096 pixels.");
+        }
+        if (!Enum.IsDefined(options.Preset) || !Enum.IsDefined(options.Scope))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "The selected texture preset or asset scope is not supported.");
+        }
+        if (!Enum.IsDefined(options.PaintedTheme)
+            || (options.Preset != TexturePreset.Illustrated
+                && options.PaintedTheme != PaintedTheme.ClassicPainted))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "A painted theme may be selected only with Graphic Painted Fantasy.");
         }
         TextureOverridePolicy.ValidateAll(options.TextureOverrides);
 
@@ -209,6 +228,7 @@ public sealed class TexturePackWorkflow
                     WasResumed = finalizing.ResumedArtifactCount > 0,
                     ResumedArtifacts = finalizing.ResumedArtifactCount,
                     TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
+                    PaintedProfileRevision = GetFreshPaintedProfileRevision(options.Preset),
                     AppliedRepairRuleIds = TextureProcessingPipeline
                         .GetCurrentRepairRuleIds(
                             options.Scope,
@@ -376,6 +396,7 @@ public sealed class TexturePackWorkflow
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentException.ThrowIfNullOrWhiteSpace(baselineManifestPath);
         TextureOverridePolicy.ValidateAll(textureOverrides);
+        _ = retryPreset; // Retained for binary/source compatibility; repair never changes pack identity.
         var isManualTextureRevision = textureOverrides is { Count: > 0 };
         var repairStartedUtc = DateTimeOffset.UtcNow;
         var validation = EverQuestInstall.Validate(paths.InstallPath);
@@ -563,15 +584,17 @@ public sealed class TexturePackWorkflow
 
         var repairOptions = baseline.Options with
         {
-            // A revision upgrade must preserve the original pack's visual
-            // profile. The explicit retry preset remains available to the
-            // legacy character/equipment missing-texture repair.
-            Preset = isTargetedSafetyRepair || isManualTextureRevision
-                ? baseline.Options.Preset
-                : retryPreset,
+            // Every repair preserves the completed pack's recorded visual
+            // profile. A repair must never silently turn Painted work into
+            // Faithful, Texture HD, or original pixels.
             InstallAfterBuild = false,
             TextureOverrides = textureOverrides
         };
+        var requireRequestedVisualProfile = baseline.Options.Preset is
+            TexturePreset.Illustrated or TexturePreset.RusticPainted;
+        var hasReproduciblePaintedProfile = !requireRequestedVisualProfile
+            || (baselineReport?.PaintedProfileRevision ?? 0)
+                >= TextureBuildReport.CurrentPaintedProfileRevision;
         var archiveScopes = DiscoverArchiveScopes(paths.InstallPath);
         var selectedArchives = SelectArchives(archiveScopes, repairOptions);
         var selectedRelativePaths = selectedArchives
@@ -611,8 +634,19 @@ public sealed class TexturePackWorkflow
                     or AssetScope.WorldCharactersAndEquipment,
             reuseArchivePaths: reuseArchivePaths,
             reuseArchiveFingerprints: reuseArchiveFingerprints,
-            rebuildFromReuseArchive: isTargetedSafetyRepair || isManualTextureRevision,
-            retryUnchangedEntries: !(isTargetedSafetyRepair || isManualTextureRevision));
+            // A painted repair always starts from the exact verified staged
+            // archive. Rebuilding from the original would silently drop any
+            // prior painted member that no longer matches today's allowlist.
+            rebuildFromReuseArchive: isTargetedSafetyRepair
+                || isManualTextureRevision
+                || requireRequestedVisualProfile,
+            retryUnchangedEntries: !(isTargetedSafetyRepair || isManualTextureRevision),
+            requireRequestedVisualProfile: requireRequestedVisualProfile,
+            // Only the explicitly versioned current painted pipeline can
+            // reproduce a missing member. Legacy painted pixels can still be
+            // reused byte-for-byte, but mixing them with today's algorithm is
+            // refused so users receive a rebuild instruction instead.
+            allowRequestedVisualProfileRegeneration: hasReproduciblePaintedProfile);
 
         var items = new List<StagedBuildItem>();
         for (var index = 0; index < repairArchives.Count; index++)
@@ -739,6 +773,7 @@ public sealed class TexturePackWorkflow
             BaselineBuildId = baseline.BuildId,
             BaselineTexturePipelineRevision = baselineReport?.TexturePipelineRevision ?? 0,
             TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
+            PaintedProfileRevision = baselineReport?.PaintedProfileRevision ?? 0,
             AppliedRepairRuleIds = TextureProcessingPipeline
                 .GetCurrentRepairRuleIds(
                     baseline.Options.Scope,
@@ -907,7 +942,14 @@ public sealed class TexturePackWorkflow
                 retryUnchangedEntries: false,
                 rebuildFromReuseArchive: true,
                 reuseArchivePaths: reuseArchivePaths,
-                reuseArchiveFingerprints: reuseArchiveFingerprints)
+                reuseArchiveFingerprints: reuseArchiveFingerprints,
+                requireRequestedVisualProfile: baseline.Options.Preset is
+                    TexturePreset.Illustrated or TexturePreset.RusticPainted,
+                allowRequestedVisualProfileRegeneration:
+                    baseline.Options.Preset is not (TexturePreset.Illustrated
+                        or TexturePreset.RusticPainted)
+                    || (baselineReport?.PaintedProfileRevision ?? 0)
+                        >= TextureBuildReport.CurrentPaintedProfileRevision)
             : null;
         var items = new List<StagedBuildItem>(baselineInfo.Artifacts.Count);
         var exactReusedArtifacts = 0;
@@ -1028,6 +1070,7 @@ public sealed class TexturePackWorkflow
             ReusedArtifacts = exactReusedArtifacts,
             SafetyUpgradedArtifacts = safetyUpgradedArtifacts,
             TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
+            PaintedProfileRevision = baselineReport?.PaintedProfileRevision ?? 0,
             AppliedRepairRuleIds = TextureProcessingPipeline.GetCurrentRepairRuleIds(
                 baseline.Options.Scope,
                 artifactPaths)
@@ -1188,6 +1231,11 @@ public sealed class TexturePackWorkflow
                 baselineInfo.BuildDirectory,
                 cancellationToken)
             .ConfigureAwait(false);
+        var isPaintedBaseline = baseline.Options.Preset is
+            TexturePreset.Illustrated or TexturePreset.RusticPainted;
+        var hasReproduciblePaintedProfile = !isPaintedBaseline
+            || (baselineReport?.PaintedProfileRevision ?? 0)
+                >= TextureBuildReport.CurrentPaintedProfileRevision;
         // Production source repair can advance a stale, provenance-capable pack
         // through the current targeted safety rules in the same immutable
         // replacement. Tests may inject a non-PFS rebuild builder, so that seam
@@ -1215,7 +1263,9 @@ public sealed class TexturePackWorkflow
             clampArchivePaths: archiveScopes.CharacterAndEquipmentArchives,
             filterCharacterEquipmentEntries:
                 baseline.Options.Scope is AssetScope.CharactersAndEquipmentOnly
-                    or AssetScope.WorldCharactersAndEquipment);
+                    or AssetScope.WorldCharactersAndEquipment,
+            requireRequestedVisualProfile: isPaintedBaseline,
+            allowRequestedVisualProfileRegeneration: hasReproduciblePaintedProfile);
         var reuseArchivePaths = baselineInfo.Artifacts.ToDictionary(
             artifact => artifact.CanonicalRelativeInstallPath,
             artifact => artifact.PayloadPath,
@@ -1239,7 +1289,9 @@ public sealed class TexturePackWorkflow
                 retryUnchangedEntries: false,
                 rebuildFromReuseArchive: true,
                 reuseArchivePaths: reuseArchivePaths,
-                reuseArchiveFingerprints: reuseArchiveFingerprints)
+                reuseArchiveFingerprints: reuseArchiveFingerprints,
+                requireRequestedVisualProfile: isPaintedBaseline,
+                allowRequestedVisualProfileRegeneration: hasReproduciblePaintedProfile)
             : null;
         var reusableArtifacts = baselineInfo.Artifacts.ToDictionary(
             artifact => artifact.CanonicalRelativeInstallPath,
@@ -1423,6 +1475,7 @@ public sealed class TexturePackWorkflow
             TexturePipelineRevision = applyTargetedSafetyRepair
                 ? TextureProcessingPipeline.CurrentRevision
                 : baselineReport?.TexturePipelineRevision ?? 0,
+            PaintedProfileRevision = baselineReport?.PaintedProfileRevision ?? 0,
             AppliedRepairRuleIds = applyTargetedSafetyRepair
                 ? TextureProcessingPipeline.GetCurrentRepairRuleIds(
                     baseline.Options.Scope,
@@ -2428,6 +2481,10 @@ public sealed class TexturePackWorkflow
     public static IReadOnlyList<string> ResolveSelectedArchives(
         string installPath,
         UpscaleOptions options) => SelectArchives(installPath, options);
+
+    internal static IReadOnlyList<string> ResolveCharacterAndEquipmentArchives(
+        string installPath) => DiscoverArchiveScopes(installPath)
+        .CharacterAndEquipmentArchives;
 
     private static ArchiveScopes DiscoverArchiveScopes(string installPath)
     {

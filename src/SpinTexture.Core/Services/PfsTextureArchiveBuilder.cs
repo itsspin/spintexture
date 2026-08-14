@@ -26,6 +26,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
     private readonly bool filterCharacterEquipmentEntries;
     private readonly bool retryUnchangedEntries;
     private readonly bool rebuildFromReuseArchive;
+    private readonly bool requireRequestedVisualProfile;
+    private readonly bool allowRequestedVisualProfileRegeneration;
     private readonly IReadOnlyDictionary<string, string> reuseArchivePaths;
     private readonly IReadOnlyDictionary<string, StagedPackFileFingerprint> reuseArchiveFingerprints;
     private readonly IStagedPackPayloadMaterializer reuseMaterializer;
@@ -45,6 +47,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         bool filterCharacterEquipmentEntries = false,
         bool retryUnchangedEntries = true,
         bool rebuildFromReuseArchive = false,
+        bool requireRequestedVisualProfile = false,
+        bool allowRequestedVisualProfileRegeneration = false,
         IReadOnlyDictionary<string, string>? reuseArchivePaths = null,
         IReadOnlyDictionary<string, StagedPackFileFingerprint>? reuseArchiveFingerprints = null,
         IStagedPackPayloadMaterializer? reuseMaterializer = null,
@@ -65,6 +69,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         this.filterCharacterEquipmentEntries = filterCharacterEquipmentEntries;
         this.retryUnchangedEntries = retryUnchangedEntries;
         this.rebuildFromReuseArchive = rebuildFromReuseArchive;
+        this.requireRequestedVisualProfile = requireRequestedVisualProfile;
+        this.allowRequestedVisualProfileRegeneration = allowRequestedVisualProfileRegeneration;
         this.reuseArchivePaths = reuseArchivePaths
             ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         this.reuseArchiveFingerprints = reuseArchiveFingerprints
@@ -308,6 +314,12 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                 var forceReprocess = textureOverride?.Action == TextureOverrideAction.Reprocess;
                 if (!entryAllowed)
                 {
+                    await ThrowIfPaintedRepairWouldRestoreChangedOriginalAsync(
+                        reuseArchive,
+                        entry,
+                        sourceTexturePath,
+                        "the texture is outside the current character/equipment allowlist",
+                        cancellationToken).ConfigureAwait(false);
                     var restored = await RestoreOriginalIfBaselineChangedAsync(
                         reuseArchive,
                         entry,
@@ -330,6 +342,12 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                     cancellationToken).ConfigureAwait(false);
                 if (metadata is null)
                 {
+                    await ThrowIfPaintedRepairWouldRestoreChangedOriginalAsync(
+                        reuseArchive,
+                        entry,
+                        sourceTexturePath,
+                        "the prior painted texture is no longer a supported image payload",
+                        cancellationToken).ConfigureAwait(false);
                     counter.Preserve("Unsupported image payload");
                     var restored = await RestoreOriginalIfBaselineChangedAsync(
                         reuseArchive,
@@ -359,6 +377,12 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                             sourcePayload,
                             metadata))
                     {
+                        await ThrowIfPaintedRepairWouldRestoreChangedOriginalAsync(
+                            reuseArchive,
+                            entry,
+                            sourceTexturePath,
+                            "the texture is now classified as a fully transparent renderer control",
+                            cancellationToken).ConfigureAwait(false);
                         counter.Preserve("Fully transparent renderer-control texture");
                         var restored = await RestoreOriginalIfBaselineChangedAsync(
                             reuseArchive,
@@ -393,6 +417,12 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                 }
                 if (preservedReason is not null)
                 {
+                    await ThrowIfPaintedRepairWouldRestoreChangedOriginalAsync(
+                        reuseArchive,
+                        entry,
+                        sourceTexturePath,
+                        preservedReason,
+                        cancellationToken).ConfigureAwait(false);
                     counter.Preserve(preservedReason);
                     var restored = await RestoreOriginalIfBaselineChangedAsync(
                         reuseArchive,
@@ -499,6 +529,13 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                             // explicitly restored from the original instead of
                             // being carried forward or entering the AI path.
                             TryDeleteTemporaryFile(reusedTexturePath);
+                            if (requireRequestedVisualProfile && !useCutoutMipFloor)
+                            {
+                                throw new InvalidDataException(
+                                    $"Repair stopped because the prior painted output for {entry.Name} no longer passes current validation. Rebuilding the complete painted pack is required; SpinTexture will not replace it with original or differently styled pixels.",
+                                    exception);
+                            }
+
                             if (rebuildFromReuseArchive && !useCutoutMipFloor)
                             {
                                 replacements.Add(PfsArchiveReplacement.FromFile(
@@ -523,6 +560,14 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                     }
                 }
 
+                if (requireRequestedVisualProfile
+                    && !forceReprocess
+                    && !allowRequestedVisualProfileRegeneration)
+                {
+                    throw new InvalidDataException(
+                        $"Repair stopped because {entry.Name} has no validated prior painted output that can be reused with this legacy profile. SpinTexture will not generate a partial painted replacement using a different algorithm revision; rebuild the complete painted pack instead.");
+                }
+
                 var payloadExtension = GetPayloadExtension(metadata.FileFormat);
                 var enhancedTexturePath = Path.Combine(context.WorkingDirectory, $"{index:D5}-enhanced{payloadExtension}");
                 enhancedTexturePaths.Add(enhancedTexturePath);
@@ -533,22 +578,23 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                 // valid. The bundled texture model retains those palette blocks
                 // more reliably; the normal fidelity gate and faithful fallback
                 // still protect every result.
-                var textureOptions = metadata.FileFormat == TextureFileFormat.Bmp
-                    && metadata.BitsPerPixel == 8
-                    ? context.Options with { Preset = TexturePreset.ClassicHd }
-                    : context.Options;
-                if (!(metadata.FileFormat == TextureFileFormat.Bmp
-                        && metadata.BitsPerPixel == 8)
-                    && context.Options.Preset != TexturePreset.Faithful
-                    && (ShouldUseConservativeColorModel(entry.Name)
-                        || Math.Max(metadata.Width, metadata.Height) < 128))
-                {
-                    textureOptions = context.Options with { Preset = TexturePreset.Faithful };
-                }
+                var textureOptions = ResolveColorProcessingOptions(
+                    context.Options,
+                    metadata,
+                    entry.Name,
+                    allowExplicitEffectArt: false);
                 if (forceReprocess && textureOverride?.Preset is { } selectedPreset)
                 {
                     textureOptions = context.Options with { Preset = selectedPreset };
                 }
+
+                // Keep the manifest's requested ZoneAware intent, but pass one
+                // concrete reviewed theme to every texture in this archive. This
+                // prevents neighboring members from receiving inconsistent color
+                // shaping and leaves unknown/shared archives on Classic Painted.
+                textureOptions = PaintedThemeResolver.ResolveForArtifact(
+                    textureOptions,
+                    context.RelativeInstallPath);
 
                 pendingTextures.Add(new PendingTexture(
                     entry,
@@ -733,6 +779,13 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                     ExceptionDispatchInfo.Capture(outcome.Error).Throw();
                 }
 
+                if (requireRequestedVisualProfile)
+                {
+                    throw new InvalidDataException(
+                        $"Repair stopped because {item.Entry.Name} could not be regenerated with the pack's requested painted profile. The completed baseline remains unchanged.",
+                        outcome.Error);
+                }
+
                 counter.Preserve("Texture processing failed safely");
                 counter.Warn(
                     $"{item.Entry.Name} was kept original because its enhanced output failed validation: "
@@ -759,6 +812,15 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                 var usedFallback = processResult.ProcessingRoute.Contains(
                     "fallback",
                     StringComparison.OrdinalIgnoreCase);
+                if (requireRequestedVisualProfile
+                    && (usedFallback
+                        || !IsRequestedVisualProfileRoute(
+                            item.Request.Options.Preset,
+                            processResult.ProcessingRoute)))
+                {
+                    throw new InvalidDataException(
+                        $"Repair stopped because {item.Entry.Name} would not use its recorded {item.Request.Options.Preset} processing route. The completed baseline remains unchanged; SpinTexture will not publish a mixed-style replacement.");
+                }
 
                 var enhancedMetadata = await sniffer.ReadFileAsync(
                     item.EnhancedTexturePath,
@@ -805,6 +867,13 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                                                    or InvalidDataException
                                                    or NotSupportedException)
             {
+                if (requireRequestedVisualProfile)
+                {
+                    throw new InvalidDataException(
+                        $"Repair stopped because {item.Entry.Name} could not be validated with the pack's requested painted profile. The completed baseline remains unchanged.",
+                        exception);
+                }
+
                 counter.Preserve("Texture processing failed safely");
                 counter.Warn(
                     $"{item.Entry.Name} was kept original because its enhanced output failed validation: "
@@ -929,6 +998,53 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         || CharacterEquipmentArchiveCatalog.IsTextureEntryAllowed(
             relativeInstallPath,
             entryName);
+
+    private async Task ThrowIfPaintedRepairWouldRestoreChangedOriginalAsync(
+        PfsArchive? reuseArchive,
+        PfsArchiveEntry sourceEntry,
+        string sourceTexturePath,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        if (!requireRequestedVisualProfile || !rebuildFromReuseArchive)
+        {
+            return;
+        }
+
+        if (reuseArchive is null
+            || !reuseArchive.TryGetEntry(sourceEntry.Name, out var reusedEntry)
+            || reusedEntry is null)
+        {
+            throw new InvalidDataException(
+                $"The painted repair baseline is missing {sourceEntry.Name}.");
+        }
+
+        var reusedPath = Path.Combine(
+            Path.GetDirectoryName(sourceTexturePath)!,
+            $"painted-restore-check-{Guid.NewGuid():N}{GetPayloadExtension(sourceEntry.Content.Kind)}");
+        try
+        {
+            await ExtractEntryToFileAsync(
+                reuseArchive,
+                reusedEntry,
+                reusedPath,
+                cancellationToken).ConfigureAwait(false);
+            if (await FilesEqualAsync(
+                    sourceTexturePath,
+                    reusedPath,
+                    cancellationToken).ConfigureAwait(false))
+            {
+                return;
+            }
+        }
+        finally
+        {
+            TryDeleteTemporaryFile(reusedPath);
+        }
+
+        throw new InvalidDataException(
+            $"Repair stopped because restoring {sourceEntry.Name} to original would discard its painted output ({reason}). The completed baseline remains unchanged; rebuild the complete painted pack instead.");
+    }
 
     private async Task<bool> RestoreOriginalIfBaselineChangedAsync(
         PfsArchive? reuseArchive,
@@ -1086,7 +1202,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         }
     }
 
-    private static string? GetPreservedReason(
+    internal static string? GetPreservedReason(
         TextureMetadata metadata,
         TextureClassification classification,
         int maximumDimension)
@@ -1386,6 +1502,88 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
             "painting", "portrait", "poster", "sign"
         };
         return graphicTerms.Any(term => name.Contains(term, StringComparison.OrdinalIgnoreCase));
+    }
+
+    internal static bool IsRequestedVisualProfileRoute(
+        TexturePreset requestedPreset,
+        string processingRoute)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(processingRoute);
+        if (processingRoute.Contains("fallback", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return requestedPreset switch
+        {
+            TexturePreset.Faithful =>
+                processingRoute.Contains("faithful color restoration", StringComparison.OrdinalIgnoreCase)
+                || processingRoute.Contains("soft-alpha restoration", StringComparison.OrdinalIgnoreCase),
+            TexturePreset.ClassicHd =>
+                processingRoute.Contains("game-texture reconstruction", StringComparison.OrdinalIgnoreCase)
+                || processingRoute.Contains("texture reconstruction", StringComparison.OrdinalIgnoreCase),
+            TexturePreset.MaximumDetail =>
+                processingRoute.Contains("maximum-detail", StringComparison.OrdinalIgnoreCase),
+            TexturePreset.Illustrated =>
+                processingRoute.Contains("illustrated", StringComparison.OrdinalIgnoreCase)
+                && processingRoute.Contains("finishing", StringComparison.OrdinalIgnoreCase),
+            TexturePreset.RusticPainted =>
+                processingRoute.Contains("graphic painted", StringComparison.OrdinalIgnoreCase)
+                && processingRoute.Contains("rustic", StringComparison.OrdinalIgnoreCase),
+            _ => false
+        };
+    }
+
+    internal static UpscaleOptions ResolveColorProcessingOptions(
+        UpscaleOptions requested,
+        TextureMetadata metadata,
+        string logicalName,
+        bool allowExplicitEffectArt)
+    {
+        ArgumentNullException.ThrowIfNull(requested);
+        ArgumentNullException.ThrowIfNull(metadata);
+        ArgumentException.ThrowIfNullOrWhiteSpace(logicalName);
+
+        var isIndexedBitmap = metadata.FileFormat == TextureFileFormat.Bmp
+            && metadata.BitsPerPixel == 8;
+        var isGraphicPainted = requested.Preset is TexturePreset.Illustrated
+            or TexturePreset.RusticPainted;
+        var longestEdge = Math.Max(metadata.Width, metadata.Height);
+
+        // Legacy indexed art keeps its exact header and source palette during
+        // reconstruction. Texture HD remains the safest default for faithful
+        // and material-detail builds, but an explicitly selected painted art
+        // direction must reach the illustrated model or most classic world,
+        // armor, and character textures would silently ignore that choice.
+        if (isIndexedBitmap)
+        {
+            if (isGraphicPainted
+                && longestEdge >= 32
+                && !IsLikelyAnimatedEffectName(logicalName))
+            {
+                return requested;
+            }
+
+            return requested with { Preset = TexturePreset.ClassicHd };
+        }
+
+        if (allowExplicitEffectArt)
+        {
+            return requested;
+        }
+
+        // Animated material sequences retain the conservative model to avoid
+        // per-frame style drift. Painted presets may intentionally transform
+        // ordinary signs and small classic diffuse art once the normal semantic
+        // and renderer-control policies have already proved them safe.
+        var requiresConservativeRoute = IsLikelyAnimatedEffectName(logicalName)
+            || longestEdge < 32
+            || (!isGraphicPainted
+                && (ShouldUseConservativeColorModel(logicalName)
+                    || longestEdge < 128));
+        return requested.Preset != TexturePreset.Faithful && requiresConservativeRoute
+            ? requested with { Preset = TexturePreset.Faithful }
+            : requested;
     }
 
     public static bool ShouldUseWrapSampling(

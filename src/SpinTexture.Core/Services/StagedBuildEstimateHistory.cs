@@ -83,7 +83,9 @@ public static class StagedBuildEstimateHistory
         if (historical.Preset != requested.Preset
             || historical.Scope != requested.Scope
             || historical.MaximumDimension != requested.MaximumDimension
-            || historical.GenerateMipMaps != requested.GenerateMipMaps)
+            || historical.GenerateMipMaps != requested.GenerateMipMaps
+            || (requested.Preset == TexturePreset.Illustrated
+                && historical.PaintedTheme != requested.PaintedTheme))
         {
             return false;
         }
@@ -130,6 +132,7 @@ public static class StagedBuildEstimateHistory
                 || report.Statistics is null
                 || report.SelectedArchives <= 0
                 || report.CompletedUtc == default
+                || report.TexturePipelineRevision != TextureProcessingPipeline.CurrentRevision
                 || !manifest.BuildId.Equals(report.BuildId, StringComparison.Ordinal)
                 || !DirectoryNameMatchesBuildId(buildDirectory, manifest.BuildId)
                 || !SamePath(manifest.InstallPath, paths.InstallPath)

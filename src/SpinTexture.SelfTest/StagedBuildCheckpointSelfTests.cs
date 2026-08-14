@@ -19,6 +19,7 @@ internal static class StagedBuildCheckpointSelfTests
         await TestCancellationRetainsCheckpointAsync(cancellationToken).ConfigureAwait(false);
         await TestTamperedPayloadRebuildsOnlyArtifactAsync(cancellationToken).ConfigureAwait(false);
         await TestChangedPlanNeverResumesAsync(cancellationToken).ConfigureAwait(false);
+        await TestChangedPaintedThemeNeverResumesAsync(cancellationToken).ConfigureAwait(false);
         await TestChangedOperationNeverResumesAsync(cancellationToken).ConfigureAwait(false);
         await TestChangedSourceNeverResumesAsync(cancellationToken).ConfigureAwait(false);
         await TestStatisticsAndPreviewReplayAsync(cancellationToken).ConfigureAwait(false);
@@ -381,6 +382,48 @@ internal static class StagedBuildCheckpointSelfTests
             finalizeAsync: static (_, _) => Task.CompletedTask).ConfigureAwait(false);
         Assert(counts[0] == 2 && counts[1] == 2, "changed options start a distinct transaction");
         Assert(result.ResumedArtifactCount == 0, "changed options never resume old outputs");
+    }
+
+    private static async Task TestChangedPaintedThemeNeverResumesAsync(
+        CancellationToken cancellationToken)
+    {
+        using var fixture = await Fixture.CreateAsync("painted-theme", cancellationToken)
+            .ConfigureAwait(false);
+        var counts = new int[2];
+        var failed = false;
+        var original = fixture.Options with
+        {
+            Preset = TexturePreset.Illustrated,
+            PaintedTheme = PaintedTheme.ClassicPainted
+        };
+        await AssertThrowsAsync<IOException>(() => new StagedBuildService().BuildAsync(
+            new StagedBuildRequest(
+                fixture.Paths,
+                original,
+                CreateBuilders(fixture, counts, index =>
+                {
+                    if (index == 1 && !failed)
+                    {
+                        failed = true;
+                        throw new IOException("simulated crash");
+                    }
+                }),
+                ResumeOperationKey: "checkpoint-self-test-v1"),
+            cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+        var changed = original with { PaintedTheme = PaintedTheme.DarkGothic };
+        var result = await new StagedBuildService().BuildAsync(
+            new StagedBuildRequest(
+                fixture.Paths,
+                changed,
+                CreateBuilders(fixture, counts),
+                ResumeOperationKey: "checkpoint-self-test-v1"),
+            cancellationToken: cancellationToken,
+            finalizeAsync: static (_, _) => Task.CompletedTask).ConfigureAwait(false);
+        Assert(counts[0] == 2 && counts[1] == 2,
+            "a changed painted theme starts a distinct transaction");
+        Assert(result.ResumedArtifactCount == 0,
+            "a different painted theme never resumes output from another look");
     }
 
     private static async Task TestChangedOperationNeverResumesAsync(CancellationToken cancellationToken)
