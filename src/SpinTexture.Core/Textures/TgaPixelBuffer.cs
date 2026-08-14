@@ -470,146 +470,65 @@ public sealed class TgaPixelBuffer
     }
 
     /// <summary>
-    /// Gives an illustrated neural reconstruction a graphic hand-painted finish.
-    /// The pass consolidates nearby, already-similar colors into broad value planes
-    /// and reinforces only dark/light ridges that are present in the reconstruction.
-    /// It does not trace a global outline or synthesize detail. Sampling can wrap for
-    /// repeating world materials, and the input alpha plane is retained byte-for-byte.
+    /// Runs the complete multi-pass painterly stylization at full strength.
+    /// Callers that need several strengths should stylize once and use
+    /// <see cref="BlendTowardStylized"/> for each candidate.
     /// </summary>
-    public TgaPixelBuffer ApplyGraphicPaintedFinish(
-        double strength = 1,
-        bool wrapEdges = true)
+    public TgaPixelBuffer ApplyPaintedStylizationFull(
+        bool wrapEdges,
+        int neuralScale,
+        PaintedStyleSettings? style = null)
     {
-        if (!double.IsFinite(strength) || strength is < 0 or > 1)
+        return new TgaPixelBuffer(
+            Width,
+            Height,
+            PaintedStylizer.RenderStylized(
+                _rgba,
+                Width,
+                Height,
+                wrapEdges,
+                neuralScale,
+                style ?? PaintedStyleSettings.Default));
+    }
+
+    /// <summary>
+    /// Blends this image toward a stylized rendition of itself while keeping
+    /// this image's alpha plane byte-for-byte.
+    /// </summary>
+    public TgaPixelBuffer BlendTowardStylized(TgaPixelBuffer stylized, double strength)
+    {
+        ArgumentNullException.ThrowIfNull(stylized);
+        if (stylized.Width != Width || stylized.Height != Height)
         {
-            throw new ArgumentOutOfRangeException(nameof(strength));
+            throw new ArgumentException("Stylized buffer must match this image's dimensions.", nameof(stylized));
         }
 
-        if (strength == 0)
-        {
-            return new TgaPixelBuffer(Width, Height, (byte[])_rgba.Clone());
-        }
+        return new TgaPixelBuffer(
+            Width,
+            Height,
+            PaintedStylizer.MixToward(_rgba, stylized._rgba, strength));
+    }
 
-        // Precomputed neighbors keep this bounded post-process inexpensive for
-        // 2K/4K assets and make its edge behavior explicit and deterministic.
-        var previousX = new int[Width];
-        var nextX = new int[Width];
-        var previousY = new int[Height];
-        var nextY = new int[Height];
-        for (var x = 0; x < Width; x++)
-        {
-            previousX[x] = wrapEdges ? Mod(x - 1, Width) : Math.Max(0, x - 1);
-            nextX[x] = wrapEdges ? Mod(x + 1, Width) : Math.Min(Width - 1, x + 1);
-        }
-
-        for (var y = 0; y < Height; y++)
-        {
-            previousY[y] = wrapEdges ? Mod(y - 1, Height) : Math.Max(0, y - 1);
-            nextY[y] = wrapEdges ? Mod(y + 1, Height) : Math.Min(Height - 1, y + 1);
-        }
-
-        var output = new byte[_rgba.Length];
-        var similarityThreshold = 28 + (8 * (1 - strength));
-        var planeStep = 12 + (6 * strength);
-        var chromaStep = 9 + (3 * strength);
-        for (var y = 0; y < Height; y++)
-        {
-            for (var x = 0; x < Width; x++)
-            {
-                var offset = ((y * Width) + x) * 4;
-                var red = (double)_rgba[offset];
-                var green = (double)_rgba[offset + 1];
-                var blue = (double)_rgba[offset + 2];
-                var centerLuma = Luminance(_rgba, offset);
-
-                double redSum = red * 4;
-                double greenSum = green * 4;
-                double blueSum = blue * 4;
-                double weightSum = 4;
-                var localLumaSum = centerLuma;
-                var localMinimum = centerLuma;
-                var localMaximum = centerLuma;
-                Accumulate(previousX[x], y);
-                Accumulate(nextX[x], y);
-                Accumulate(x, previousY[y]);
-                Accumulate(x, nextY[y]);
-
-                var normalizedLuma = centerLuma / 255;
-                var midtone = 1 - Math.Abs((normalizedLuma * 2) - 1);
-                var smoothingMix = strength * (0.20 + (0.16 * midtone));
-                var smoothedRed = red + (((redSum / weightSum) - red) * smoothingMix);
-                var smoothedGreen = green + (((greenSum / weightSum) - green) * smoothingMix);
-                var smoothedBlue = blue + (((blueSum / weightSum) - blue) * smoothingMix);
-                var smoothedLuma = (0.2126 * smoothedRed)
-                    + (0.7152 * smoothedGreen)
-                    + (0.0722 * smoothedBlue);
-
-                // A partially blended value/chroma quantization creates painted
-                // planes without producing hard posterization bands.
-                var planeLuma = Math.Round(smoothedLuma / planeStep) * planeStep;
-                var planeMix = strength * (0.24 + (0.12 * midtone));
-                var targetLuma = smoothedLuma + ((planeLuma - smoothedLuma) * planeMix);
-                var redChroma = smoothedRed - smoothedLuma;
-                var blueChroma = smoothedBlue - smoothedLuma;
-                var planeRedChroma = Math.Round(redChroma / chromaStep) * chromaStep;
-                var planeBlueChroma = Math.Round(blueChroma / chromaStep) * chromaStep;
-                var chromaMix = 0.24 * strength;
-                redChroma += (planeRedChroma - redChroma) * chromaMix;
-                blueChroma += (planeBlueChroma - blueChroma) * chromaMix;
-
-                // Reinforce existing structural valleys/ridges only. This brings
-                // out forms already inferred by the model instead of drawing a
-                // uniform cartoon outline around every color transition.
-                var localMean = localLumaSum / 5;
-                var localRange = localMaximum - localMinimum;
-                if (localRange > 18)
-                {
-                    var signedRidge = localMean - centerLuma;
-                    var ridgeMagnitude = Math.Min(
-                        7.5,
-                        ((localRange - 18) * 0.055) + (Math.Abs(signedRidge) * 0.045));
-                    if (signedRidge > 2)
-                    {
-                        targetLuma -= ridgeMagnitude * strength;
-                    }
-                    else if (signedRidge < -4)
-                    {
-                        targetLuma += ridgeMagnitude * strength * 0.42;
-                    }
-                }
-
-                targetLuma = Math.Clamp(targetLuma, 1, 254);
-                var candidateRed = targetLuma + redChroma;
-                var candidateBlue = targetLuma + blueChroma;
-                var candidateGreen = (targetLuma
-                    - (0.2126 * candidateRed)
-                    - (0.0722 * candidateBlue)) / 0.7152;
-                output[offset] = ClampByte(candidateRed);
-                output[offset + 1] = ClampByte(candidateGreen);
-                output[offset + 2] = ClampByte(candidateBlue);
-                output[offset + 3] = _rgba[offset + 3];
-
-                void Accumulate(int sampleX, int sampleY)
-                {
-                    var sampleOffset = ((sampleY * Width) + sampleX) * 4;
-                    var sampleLuma = Luminance(_rgba, sampleOffset);
-                    localLumaSum += sampleLuma;
-                    localMinimum = Math.Min(localMinimum, sampleLuma);
-                    localMaximum = Math.Max(localMaximum, sampleLuma);
-                    if (Math.Abs(sampleLuma - centerLuma) > similarityThreshold)
-                    {
-                        return;
-                    }
-
-                    redSum += _rgba[sampleOffset];
-                    greenSum += _rgba[sampleOffset + 1];
-                    blueSum += _rgba[sampleOffset + 2];
-                    weightSum++;
-                }
-            }
-        }
-
-        return new TgaPixelBuffer(Width, Height, output);
+    /// <summary>
+    /// Convenience single-call painterly stylization at the given strength.
+    /// </summary>
+    public TgaPixelBuffer ApplyPaintedStylization(
+        double strength,
+        bool wrapEdges = true,
+        int neuralScale = 4,
+        PaintedStyleSettings? style = null)
+    {
+        return new TgaPixelBuffer(
+            Width,
+            Height,
+            PaintedStylizer.Render(
+                _rgba,
+                Width,
+                Height,
+                strength,
+                wrapEdges,
+                neuralScale,
+                style ?? PaintedStyleSettings.Default));
     }
 
     /// <summary>
@@ -816,6 +735,77 @@ public sealed class TgaPixelBuffer
         return new TgaPixelBuffer(width, height, output);
     }
 
+    /// <summary>
+    /// Deterministic area-weighted downscale (equivalent to a box/FANT
+    /// reduction). Used so cutout alpha can be restored and coverage-matched
+    /// at the exact final resolution instead of the neural resolution.
+    /// </summary>
+    public TgaPixelBuffer ResizeArea(int targetWidth, int targetHeight)
+    {
+        if (targetWidth <= 0 || targetHeight <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetWidth));
+        }
+
+        if (targetWidth > Width || targetHeight > Height)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(targetWidth),
+                "Area resize only reduces; enlargement is the neural worker's job.");
+        }
+
+        if (targetWidth == Width && targetHeight == Height)
+        {
+            return new TgaPixelBuffer(Width, Height, (byte[])_rgba.Clone());
+        }
+
+        var horizontalScale = (double)Width / targetWidth;
+        var verticalScale = (double)Height / targetHeight;
+        var output = new byte[checked(targetWidth * targetHeight * 4)];
+        for (var targetY = 0; targetY < targetHeight; targetY++)
+        {
+            var top = targetY * verticalScale;
+            var bottom = (targetY + 1) * verticalScale;
+            var firstY = Math.Max(0, (int)Math.Floor(top));
+            var lastY = Math.Min(Height - 1, (int)Math.Ceiling(bottom) - 1);
+            for (var targetX = 0; targetX < targetWidth; targetX++)
+            {
+                var left = targetX * horizontalScale;
+                var right = (targetX + 1) * horizontalScale;
+                var firstX = Math.Max(0, (int)Math.Floor(left));
+                var lastX = Math.Min(Width - 1, (int)Math.Ceiling(right) - 1);
+                double red = 0;
+                double green = 0;
+                double blue = 0;
+                double alpha = 0;
+                double totalWeight = 0;
+                for (var y = firstY; y <= lastY; y++)
+                {
+                    var weightY = Math.Max(0, Math.Min(bottom, y + 1d) - Math.Max(top, y));
+                    for (var x = firstX; x <= lastX; x++)
+                    {
+                        var weight = weightY
+                            * Math.Max(0, Math.Min(right, x + 1d) - Math.Max(left, x));
+                        var offset = ((y * Width) + x) * 4;
+                        red += _rgba[offset] * weight;
+                        green += _rgba[offset + 1] * weight;
+                        blue += _rgba[offset + 2] * weight;
+                        alpha += _rgba[offset + 3] * weight;
+                        totalWeight += weight;
+                    }
+                }
+
+                var target = ((targetY * targetWidth) + targetX) * 4;
+                output[target] = ClampByte(red / totalWeight);
+                output[target + 1] = ClampByte(green / totalWeight);
+                output[target + 2] = ClampByte(blue / totalWeight);
+                output[target + 3] = ClampByte(alpha / totalWeight);
+            }
+        }
+
+        return new TgaPixelBuffer(targetWidth, targetHeight, output);
+    }
+
     public TgaPixelBuffer WithScaledAlphaFrom(
         TgaPixelBuffer source,
         bool preserveCoverage,
@@ -890,136 +880,6 @@ public sealed class TgaPixelBuffer
         return new TgaPixelBuffer(Width, Height, output);
     }
 
-    /// <summary>
-    /// Uses enhanced luminance detail while retaining the baseline palette and alpha.
-    /// This keeps the Classic HD route visually anchored to the original texture.
-    /// </summary>
-    public static TgaPixelBuffer BlendLuminanceLocked(
-        TgaPixelBuffer baseline,
-        TgaPixelBuffer enhanced,
-        double strength)
-    {
-        ArgumentNullException.ThrowIfNull(baseline);
-        ArgumentNullException.ThrowIfNull(enhanced);
-        if (baseline.Width != enhanced.Width || baseline.Height != enhanced.Height)
-        {
-            throw new ArgumentException("Baseline and enhanced buffers must have identical dimensions.", nameof(enhanced));
-        }
-
-        strength = Math.Clamp(strength, 0, 1);
-        var output = new byte[baseline._rgba.Length];
-        for (var offset = 0; offset < output.Length; offset += 4)
-        {
-            var baseRed = (double)baseline._rgba[offset];
-            var baseGreen = baseline._rgba[offset + 1];
-            var baseBlue = baseline._rgba[offset + 2];
-            var enhancedRed = (double)enhanced._rgba[offset];
-            var enhancedGreen = enhanced._rgba[offset + 1];
-            var enhancedBlue = enhanced._rgba[offset + 2];
-
-            var baseLuma = (0.2126 * baseRed) + (0.7152 * baseGreen) + (0.0722 * baseBlue);
-            var enhancedLuma = (0.2126 * enhancedRed) + (0.7152 * enhancedGreen) + (0.0722 * enhancedBlue);
-            var targetLuma = baseLuma + ((enhancedLuma - baseLuma) * strength);
-            var targetRed = targetLuma + (baseRed - baseLuma);
-            var targetBlue = targetLuma + (baseBlue - baseLuma);
-            var targetGreen = (targetLuma - (0.2126 * targetRed) - (0.0722 * targetBlue)) / 0.7152;
-
-            output[offset] = ClampByte(targetRed);
-            output[offset + 1] = ClampByte(targetGreen);
-            output[offset + 2] = ClampByte(targetBlue);
-            output[offset + 3] = baseline._rgba[offset + 3];
-        }
-
-        return new TgaPixelBuffer(baseline.Width, baseline.Height, output);
-    }
-
-    /// <summary>
-    /// Transfers neural detail by frequency band while retaining the baseline palette and alpha.
-    /// Fine and structural residuals can be emphasized without accepting the enhanced image's
-    /// low-frequency color or lighting drift. Wrapped blur sampling keeps tiled edges coherent.
-    /// </summary>
-    public static TgaPixelBuffer BlendFrequencyDetailLocked(
-        TgaPixelBuffer baseline,
-        TgaPixelBuffer enhanced,
-        double fineStrength = 1.35,
-        double structureStrength = 1.05,
-        double toneStrength = 0.25,
-        double maximumLumaDelta = 48)
-    {
-        ArgumentNullException.ThrowIfNull(baseline);
-        ArgumentNullException.ThrowIfNull(enhanced);
-        if (baseline.Width != enhanced.Width || baseline.Height != enhanced.Height)
-        {
-            throw new ArgumentException("Baseline and enhanced buffers must have identical dimensions.", nameof(enhanced));
-        }
-
-        if (!double.IsFinite(fineStrength) || fineStrength < 0
-            || !double.IsFinite(structureStrength) || structureStrength < 0
-            || !double.IsFinite(toneStrength) || toneStrength < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(fineStrength), "Detail strengths must be finite and non-negative.");
-        }
-
-        if (!double.IsFinite(maximumLumaDelta) || maximumLumaDelta is < 0 or > 255)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maximumLumaDelta));
-        }
-
-        var pixelCount = checked(baseline.Width * baseline.Height);
-        var largeResidual = new float[pixelCount];
-        var smallResidual = new float[pixelCount];
-        var scratch = new float[pixelCount];
-        for (var pixel = 0; pixel < pixelCount; pixel++)
-        {
-            var offset = pixel * 4;
-            largeResidual[pixel] = (float)(Luminance(enhanced._rgba, offset) - Luminance(baseline._rgba, offset));
-        }
-
-        GaussianBlur5Wrapped(
-            largeResidual,
-            scratch,
-            smallResidual,
-            baseline.Width,
-            baseline.Height);
-        GaussianBlur5Wrapped(
-            smallResidual,
-            scratch,
-            largeResidual,
-            baseline.Width,
-            baseline.Height);
-
-        var output = new byte[baseline._rgba.Length];
-        for (var pixel = 0; pixel < pixelCount; pixel++)
-        {
-            var offset = pixel * 4;
-            var baseRed = (double)baseline._rgba[offset];
-            var baseGreen = baseline._rgba[offset + 1];
-            var baseBlue = baseline._rgba[offset + 2];
-            var baseLuma = Luminance(baseline._rgba, offset);
-            var enhancedLuma = Luminance(enhanced._rgba, offset);
-            var residual = enhancedLuma - baseLuma;
-            var fineDetail = residual - smallResidual[pixel];
-            var structuralDetail = smallResidual[pixel] - largeResidual[pixel];
-            var toneDifference = largeResidual[pixel];
-            var lumaDelta = (fineDetail * fineStrength)
-                + (structuralDetail * structureStrength)
-                + (toneDifference * toneStrength);
-            lumaDelta = Math.Clamp(lumaDelta, -maximumLumaDelta, maximumLumaDelta);
-
-            var targetLuma = baseLuma + lumaDelta;
-            var targetRed = targetLuma + (baseRed - baseLuma);
-            var targetBlue = targetLuma + (baseBlue - baseLuma);
-            var targetGreen = (targetLuma - (0.2126 * targetRed) - (0.0722 * targetBlue)) / 0.7152;
-
-            output[offset] = ClampByte(targetRed);
-            output[offset + 1] = ClampByte(targetGreen);
-            output[offset + 2] = ClampByte(targetBlue);
-            output[offset + 3] = baseline._rgba[offset + 3];
-        }
-
-        return new TgaPixelBuffer(baseline.Width, baseline.Height, output);
-    }
-
     private byte[] ToBytes()
     {
         var output = new byte[checked(18 + (Width * Height * 4))];
@@ -1069,70 +929,6 @@ public sealed class TgaPixelBuffer
 
     private static double Luminance(byte[] rgba, int offset) =>
         (0.2126 * rgba[offset]) + (0.7152 * rgba[offset + 1]) + (0.0722 * rgba[offset + 2]);
-
-    private static void GaussianBlur5Wrapped(
-        float[] source,
-        float[] scratch,
-        float[] destination,
-        int width,
-        int height)
-    {
-        var minusTwoX = new int[width];
-        var minusOneX = new int[width];
-        var plusOneX = new int[width];
-        var plusTwoX = new int[width];
-        for (var x = 0; x < width; x++)
-        {
-            minusTwoX[x] = Mod(x - 2, width);
-            minusOneX[x] = Mod(x - 1, width);
-            plusOneX[x] = Mod(x + 1, width);
-            plusTwoX[x] = Mod(x + 2, width);
-        }
-
-        for (var y = 0; y < height; y++)
-        {
-            var row = y * width;
-            for (var x = 0; x < width; x++)
-            {
-                scratch[row + x] = (
-                    source[row + minusTwoX[x]]
-                    + (4 * source[row + minusOneX[x]])
-                    + (6 * source[row + x])
-                    + (4 * source[row + plusOneX[x]])
-                    + source[row + plusTwoX[x]]) / 16;
-            }
-        }
-
-        var minusTwoY = new int[height];
-        var minusOneY = new int[height];
-        var plusOneY = new int[height];
-        var plusTwoY = new int[height];
-        for (var y = 0; y < height; y++)
-        {
-            minusTwoY[y] = Mod(y - 2, height);
-            minusOneY[y] = Mod(y - 1, height);
-            plusOneY[y] = Mod(y + 1, height);
-            plusTwoY[y] = Mod(y + 2, height);
-        }
-
-        for (var y = 0; y < height; y++)
-        {
-            var row = y * width;
-            var minusTwoRow = minusTwoY[y] * width;
-            var minusOneRow = minusOneY[y] * width;
-            var plusOneRow = plusOneY[y] * width;
-            var plusTwoRow = plusTwoY[y] * width;
-            for (var x = 0; x < width; x++)
-            {
-                destination[row + x] = (
-                    scratch[minusTwoRow + x]
-                    + (4 * scratch[minusOneRow + x])
-                    + (6 * scratch[row + x])
-                    + (4 * scratch[plusOneRow + x])
-                    + scratch[plusTwoRow + x]) / 16;
-            }
-        }
-    }
 
     private static byte ClampByte(double value) =>
         (byte)Math.Clamp(Math.Round(value), byte.MinValue, byte.MaxValue);

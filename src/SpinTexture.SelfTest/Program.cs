@@ -62,6 +62,15 @@ internal static class Program
                 return 0;
             }
 
+            if (args.Length >= 3 && args[0].Equals("--compare", StringComparison.OrdinalIgnoreCase))
+            {
+                await ComparisonSheetGenerator.RunAsync(
+                    args[1],
+                    args.Skip(2).ToArray(),
+                    Console.Out).ConfigureAwait(false);
+                return 0;
+            }
+
             if (args.Length == 5 && args[0].Equals("--texture", StringComparison.OrdinalIgnoreCase))
             {
                 await RunTextureAsync(

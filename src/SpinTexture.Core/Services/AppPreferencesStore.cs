@@ -1,9 +1,12 @@
 using System.Text.Json;
+using SpinTexture.Core.Models;
 using SpinTexture.Core.Pipeline;
 
 namespace SpinTexture.Core.Services;
 
-public sealed record AppPreferences(string? LastInstallPath)
+public sealed record AppPreferences(
+    string? LastInstallPath,
+    PaintedStyleSettings? PaintedStyle = null)
 {
     public static AppPreferences Empty { get; } = new((string?)null);
 }
@@ -45,7 +48,9 @@ public sealed class AppPreferencesStore
                 return AppPreferences.Empty;
             }
 
-            return new AppPreferences(NormalizeOptionalPath(document.LastInstallPath));
+            return new AppPreferences(
+                NormalizeOptionalPath(document.LastInstallPath),
+                document.PaintedStyle?.Clamped());
         }
         catch (Exception exception) when (exception is
             IOException or UnauthorizedAccessException or JsonException or ArgumentException or NotSupportedException)
@@ -66,7 +71,38 @@ public sealed class AppPreferencesStore
                 "The remembered EverQuest directory must exist and contain eqgame.exe.");
         }
 
-        var document = new PreferencesDocument(CurrentSchemaVersion, normalized);
+        var document = new PreferencesDocument(
+            CurrentSchemaVersion,
+            normalized,
+            Read().PaintedStyle);
+        var parent = Path.GetDirectoryName(settingsPath)
+            ?? throw new InvalidOperationException("The preferences path has no parent directory.");
+        Directory.CreateDirectory(parent);
+        var temporaryPath = AtomicFile.CreateTemporarySiblingPath(settingsPath);
+        try
+        {
+            await File.WriteAllTextAsync(
+                temporaryPath,
+                JsonSerializer.Serialize(document, JsonOptions),
+                cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            AtomicFile.CommitTemporaryFile(temporaryPath, settingsPath);
+        }
+        catch
+        {
+            AtomicFile.TryDelete(temporaryPath);
+            throw;
+        }
+    }
+
+    public async Task WritePaintedStyleAsync(
+        PaintedStyleSettings? paintedStyle,
+        CancellationToken cancellationToken = default)
+    {
+        var document = new PreferencesDocument(
+            CurrentSchemaVersion,
+            Read().LastInstallPath,
+            paintedStyle?.Clamped());
         var parent = Path.GetDirectoryName(settingsPath)
             ?? throw new InvalidOperationException("The preferences path has no parent directory.");
         Directory.CreateDirectory(parent);
@@ -104,5 +140,8 @@ public sealed class AppPreferencesStore
         }
     }
 
-    private sealed record PreferencesDocument(int SchemaVersion, string? LastInstallPath);
+    private sealed record PreferencesDocument(
+        int SchemaVersion,
+        string? LastInstallPath,
+        PaintedStyleSettings? PaintedStyle = null);
 }

@@ -82,6 +82,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 OnPropertyChanged(nameof(CanRepairCheckedPacks));
                 OnPropertyChanged(nameof(CanPreview));
                 OnPropertyChanged(nameof(CanDelete));
+                OnPropertyChanged(nameof(CanRename));
                 OnPropertyChanged(nameof(CanAddHighlightedToCurrent));
             }
         }
@@ -105,6 +106,9 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 OnPropertyChanged(nameof(CanCheckCurrentInstall));
                 OnPropertyChanged(nameof(CanCheckAll));
                 OnPropertyChanged(nameof(CanClearChecks));
+                OnPropertyChanged(nameof(CanRename));
+                OnPropertyChanged(nameof(CanCleanupDebris));
+                OnPropertyChanged(nameof(IsLibraryEmpty));
                 OnPropertyChanged(nameof(CanClose));
             }
         }
@@ -128,12 +132,15 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         private set => SetField(ref highlightedSelectionText, value);
     }
 
-    public string DeleteButtonText => GetHighlightedPacks().Count switch
+    public string DeleteButtonText => GetHighlightedPacks() switch
     {
-        0 => "Delete Focused Pack...",
-        1 => "Delete Focused Pack...",
-        var count => $"Delete {count:N0} Highlighted Packs..."
+        { Count: 0 } => "Delete Pack...",
+        { Count: 1 } packs => $"Delete “{TruncateForButton(packs[0].Title)}”...",
+        var packs => $"Delete {packs.Count:N0} Highlighted Packs..."
     };
+
+    private static string TruncateForButton(string title) =>
+        title.Length <= 26 ? title : title[..25] + "…";
 
     public string InstallButtonText
     {
@@ -170,6 +177,9 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
     public bool CanPreview => !IsBusy
         && SelectedPack?.PreviewManifestPath is not null;
     public bool CanDelete => !IsBusy && GetHighlightedPacks().Count != 0;
+    public bool CanRename => !IsBusy && SelectedPack is not null;
+    public bool CanCleanupDebris => !IsBusy;
+    public bool IsLibraryEmpty => !IsBusy && Packs.Count == 0;
     public bool CanCheckHighlighted => !IsBusy
         && GetHighlightedPacks().Any(pack => pack.CanSelect && !pack.IsSelected);
     public bool CanUncheckHighlighted => !IsBusy
@@ -196,6 +206,178 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             .Select(pack => Path.GetFullPath(pack.ManifestPath))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         await RefreshAsync(checkedManifestPaths: checkedPaths).ConfigureAwait(true);
+    }
+
+    private async void Rename_Click(object sender, RoutedEventArgs e)
+    {
+        var pack = SelectedPack;
+        if (IsBusy || pack is null)
+        {
+            return;
+        }
+
+        var newName = PromptForPackName(pack.AutoTitle, pack.CustomName ?? string.Empty);
+        if (newName is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var existing = StagedPackMetadataStore.TryRead(pack.BuildDirectory);
+            await StagedPackMetadataStore
+                .WriteAsync(pack.BuildDirectory, newName, existing?.Notes)
+                .ConfigureAwait(true);
+            StatusText = string.IsNullOrWhiteSpace(newName)
+                ? $"Removed the custom name; the pack shows as “{pack.AutoTitle}” again."
+                : $"Renamed pack to “{newName.Trim()}”. The name lives in pack-meta.json; pack identity, contents, and installs are unchanged.";
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            MessageBox.Show(
+                Window.GetWindow(this),
+                $"The pack name could not be saved: {exception.Message}",
+                "Rename pack",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+
+        var checkedPaths = Packs
+            .Where(candidate => candidate.IsSelected && candidate.CanSelect)
+            .Select(candidate => Path.GetFullPath(candidate.ManifestPath))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        await RefreshAsync(pack.ManifestPath, checkedPaths).ConfigureAwait(true);
+    }
+
+    private string? PromptForPackName(string autoTitle, string currentName)
+    {
+        var dialog = new Window
+        {
+            Title = "Rename staged pack",
+            Owner = Window.GetWindow(this),
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            SizeToContent = SizeToContent.Height,
+            Width = 460,
+            ResizeMode = ResizeMode.NoResize,
+            Background = System.Windows.Media.Brushes.Black,
+            Foreground = System.Windows.Media.Brushes.White
+        };
+        var nameBox = new TextBox
+        {
+            Text = currentName,
+            MaxLength = StagedPackUserMetadata.MaximumDisplayNameLength,
+            Margin = new Thickness(0, 8, 0, 0)
+        };
+        var okButton = new Button
+        {
+            Content = "Save name",
+            IsDefault = true,
+            Margin = new Thickness(0, 12, 8, 0),
+            Padding = new Thickness(12, 4, 12, 4)
+        };
+        var cancelButton = new Button
+        {
+            Content = "Cancel",
+            IsCancel = true,
+            Margin = new Thickness(0, 12, 0, 0),
+            Padding = new Thickness(12, 4, 12, 4)
+        };
+        okButton.Click += (_, _) => dialog.DialogResult = true;
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right
+        };
+        buttons.Children.Add(okButton);
+        buttons.Children.Add(cancelButton);
+        var layout = new StackPanel { Margin = new Thickness(16) };
+        layout.Children.Add(new TextBlock
+        {
+            Text = $"Custom display name for “{autoTitle}”. Leave empty to go back to the automatic name. The name is stored beside the pack and never affects its contents.",
+            TextWrapping = TextWrapping.Wrap
+        });
+        layout.Children.Add(nameBox);
+        layout.Children.Add(buttons);
+        dialog.Content = layout;
+        nameBox.SelectAll();
+        nameBox.Focus();
+        return dialog.ShowDialog() == true ? nameBox.Text : null;
+    }
+
+    private async void CleanupDebris_Click(object sender, RoutedEventArgs e)
+    {
+        if (IsBusy)
+        {
+            return;
+        }
+
+        IReadOnlyList<StagedPackDebrisInfo> debris;
+        try
+        {
+            debris = await Task.Run(() => StagedPackCatalogService.FindBuildDebris(paths))
+                .ConfigureAwait(true);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show(
+                Window.GetWindow(this),
+                $"Leftover scan failed: {exception.Message}",
+                "Clean up leftovers",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+
+        if (debris.Count == 0)
+        {
+            MessageBox.Show(
+                Window.GetWindow(this),
+                "No leftover build folders were found. Every folder in the pack library is a completed pack or a resumable build.",
+                "Clean up leftovers",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var totalBytes = debris.Sum(item => item.Bytes);
+        var listing = string.Join(
+            "\n",
+            debris.Take(8).Select(item => $"• {item.Name} · {FormatBytes(item.Bytes)}"));
+        var confirmation = MessageBox.Show(
+            Window.GetWindow(this),
+            $"{debris.Count:N0} leftover folder(s) from interrupted builds use {FormatBytes(totalBytes)}. "
+            + "They are not completed packs and cannot be resumed (each is at least a day old and has no manifest or checkpoint).\n\n"
+            + listing
+            + (debris.Count > 8 ? "\n…" : string.Empty)
+            + "\n\nDelete them now? Completed packs, resumable builds, backups, and game files are never touched.",
+            "Clean up leftovers",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+        if (confirmation != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            var result = await Task
+                .Run(() => StagedPackCatalogService.DeleteBuildDebris(paths, debris))
+                .ConfigureAwait(true);
+            StatusText = result.Failures.Count == 0
+                ? $"Removed {result.DeletedDirectories:N0} leftover folder(s) and reclaimed {FormatBytes(result.ReclaimedBytes)}."
+                : $"Removed {result.DeletedDirectories:N0} leftover folder(s); {result.Failures.Count:N0} could not be removed (files may be open).";
+        }
+        catch (InvalidOperationException exception)
+        {
+            MessageBox.Show(
+                Window.GetWindow(this),
+                exception.Message,
+                "Clean up leftovers",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
     }
 
     private void PackList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1262,6 +1444,9 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             bool canRepairSourceMismatch)
         {
             ManifestPath = info.ManifestPath;
+            BuildDirectory = info.BuildDirectory;
+            BuildId = info.CandidateBuildId;
+            CustomName = info.UserMetadata?.DisplayName;
             IsActive = isActive;
             IsActiveComponent = isActiveComponent && !isActive;
             ArtifactPaths = info.Artifacts
@@ -1325,7 +1510,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 _ => 4
             };
             CreatedUtc = manifest?.CreatedUtc ?? DateTimeOffset.MinValue;
-            Title = IsComposition
+            AutoTitle = IsComposition
                 ? IsActive ? "Installed pack combination" : "Generated pack composition"
                 : isSourceRepair
                     ? $"Source repaired \u00B7 {scopeTitle}"
@@ -1336,6 +1521,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                     : isLegacyRepair
                     ? $"Repaired \u00B7 {scopeTitle}"
                     : scopeTitle;
+            Title = CustomName is null ? AutoTitle : CustomName;
             Badge = IsActive && IsComposition
                 ? "ACTIVE COMBINATION"
                 : IsActive
@@ -1420,6 +1606,15 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                       ? $"{report.Statistics.FallbackTextures:N0} textures used a validated safety fallback instead of the requested model route. "
                       : string.Empty)
                   + "Archive conflicts are checked before composition.";
+            if (IsComposition)
+            {
+                var componentSummary = DescribeCompositionComponents(info);
+                if (componentSummary is not null)
+                {
+                    ContentsSummary = componentSummary;
+                }
+            }
+
             var isCharacterScope = manifest?.Options.Scope is
                 AssetScope.CharactersAndEquipmentOnly
                 or AssetScope.WorldCharactersAndEquipment;
@@ -1500,6 +1695,10 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         public bool CanRepairAny { get; }
         public string? PreviewManifestPath { get; }
         public string Title { get; }
+        public string AutoTitle { get; }
+        public string BuildDirectory { get; }
+        public string BuildId { get; }
+        public string? CustomName { get; }
         public string Badge { get; }
         public string BadgeBackground { get; }
         public string BadgeForeground { get; }
@@ -1591,6 +1790,52 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             AssetScope scope,
             IReadOnlyList<string> artifactPaths) =>
             TextureProcessingPipeline.RequiresRepair(report, scope, artifactPaths);
+
+        private static string? DescribeCompositionComponents(StagedPackInfo info)
+        {
+            try
+            {
+                var path = Path.Combine(info.BuildDirectory, "composition.json");
+                if (!File.Exists(path))
+                {
+                    return null;
+                }
+
+                var composition = JsonSerializer.Deserialize<StagedPackCompositionDocument>(
+                    File.ReadAllText(path),
+                    CompositionJsonOptions);
+                if (composition is null || composition.Components.Count == 0)
+                {
+                    return null;
+                }
+
+                var stagingRoot = Path.GetDirectoryName(info.BuildDirectory);
+                var componentNames = composition.Components
+                    .Select(component =>
+                    {
+                        var displayName = stagingRoot is null
+                            ? null
+                            : StagedPackMetadataStore
+                                .TryRead(Path.Combine(stagingRoot, component.BuildId))?
+                                .DisplayName;
+                        return $"{displayName ?? component.BuildId} ({component.ArtifactCount:N0} archive(s))";
+                    })
+                    .ToArray();
+                return $"This combination was generated automatically while installing "
+                    + $"{composition.Components.Count:N0} checked pack(s) together. It combines: "
+                    + string.Join("; ", componentNames)
+                    + ". Deleting a source pack is blocked while this combination references it; "
+                    + "delete the combination first if it is no longer installed.";
+            }
+            catch (Exception exception) when (exception is
+                IOException
+                or UnauthorizedAccessException
+                or JsonException
+                or NotSupportedException)
+            {
+                return null;
+            }
+        }
 
         private static TextureBuildReport? TryReadReport(string buildDirectory)
         {

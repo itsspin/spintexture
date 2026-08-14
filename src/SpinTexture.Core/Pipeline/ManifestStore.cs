@@ -39,6 +39,11 @@ public sealed class ManifestStore
             throw new InvalidDataException(
                 "A schema-1 build manifest cannot carry a World expansion selection.");
         }
+        if (manifest.SchemaVersion < 3 && manifest.Options.PaintedStyle is not null)
+        {
+            throw new InvalidDataException(
+                "Build manifest schemas before 3 cannot carry painted style settings.");
+        }
         WorldExpansionSelectionPolicy.Validate(manifest.Options);
 
         return manifest;

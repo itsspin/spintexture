@@ -842,6 +842,12 @@ public sealed class StagedBuildService
                 "A schema-2 staged-build checkpoint cannot carry a World expansion selection.");
         }
 
+        if (checkpoint.SchemaVersion < 4 && checkpoint.Options.PaintedStyle is not null)
+        {
+            throw new InvalidDataException(
+                "Staged-build checkpoint schemas before 4 cannot carry painted style settings.");
+        }
+
         if (!double.IsFinite(checkpoint.ActiveDurationSeconds)
             || checkpoint.ActiveDurationSeconds < 0
             || checkpoint.ActiveDurationSeconds > TimeSpan.FromDays(365).TotalSeconds

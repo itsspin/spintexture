@@ -30,10 +30,6 @@ public sealed record NativeTextureProcessOutcome(
     public bool Succeeded => Result is not null && Error is null;
 }
 
-internal sealed record NeuralColorPassResult(
-    TgaPixelBuffer Image,
-    TextureUpscaleModelSelection Model);
-
 public sealed class NativeTextureProcessor
 {
     private const int MaximumNeuralBatchItems = 64;
@@ -126,7 +122,11 @@ public sealed class NativeTextureProcessor
                 var dimensions = UpscaleDimensions.Calculate(
                     request.Metadata.Width,
                     request.Metadata.Height,
-                    request.Options.MaximumDimension);
+                    request.Options.MaximumDimension,
+                    dimensionAlignment:
+                        request.Metadata.TexconvFormat?.StartsWith("BC", StringComparison.OrdinalIgnoreCase) == true
+                            ? 4
+                            : 1);
                 var started = DateTimeOffset.UtcNow;
 
                 if (!dimensions.RequiresUpscale)
@@ -454,7 +454,10 @@ public sealed class NativeTextureProcessor
         var hasSoftTranslucentAlpha = request.Metadata.HasAlpha
             && decoded.HasSoftTranslucentAlpha();
         var colorSource = preserveAlphaCoverage
-            ? decoded.DilateRgbIntoTransparentPixels()
+            // Dilate only pixels the fidelity gate treats as invisible
+            // (alpha < 8). The old 128 threshold overwrote the antialiased
+            // fringe's real RGB, charging spurious error against the gate.
+            ? decoded.DilateRgbIntoTransparentPixels(visibleThreshold: 8)
             : decoded;
         var opaque = colorSource.WithOpaqueAlpha();
         var bordered = request.WrapEdges
@@ -489,24 +492,58 @@ public sealed class NativeTextureProcessor
                                && _tools.HasTextureUpscaler
             ? _upscayl.FindTextureModel(_tools.TextureModelsPath!)
             : null;
-        var executionState = new NeuralBatchExecutionState();
-        var groups = jobs
+        using var executionState = new NeuralBatchExecutionState();
+        var chunks = jobs
             .OrderBy(job => job.RequestIndex)
-            .GroupBy(job => CreateNeuralBatchKey(job, specializedModel));
+            .GroupBy(job => CreateNeuralBatchKey(job, specializedModel))
+            .SelectMany(group => ChunkNeuralJobs(group)
+                .Select(chunk => (group.Key, Chunk: chunk)))
+            .ToArray();
 
-        foreach (var group in groups)
+        // Keep at most two chunks in flight: the GPU gate serializes actual
+        // inference, so this overlaps one chunk's CPU decoding/stylizing/
+        // encoding with the next chunk's GPU pass instead of letting the GPU
+        // idle through every CPU phase.
+        Task? inFlight = null;
+        foreach (var (key, chunk) in chunks)
         {
-            foreach (var chunk in ChunkNeuralJobs(group))
+            var current = ExecuteNeuralGroupAsync(
+                chunk,
+                key,
+                outcomes,
+                batchDirectory,
+                executionState,
+                nativeProgress,
+                cancellationToken);
+            if (inFlight is not null)
             {
-                await ExecuteNeuralGroupAsync(
-                    chunk,
-                    group.Key,
-                    outcomes,
-                    batchDirectory,
-                    executionState,
-                    nativeProgress,
-                    cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await inFlight.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Never leave the concurrent chunk running against batch
+                    // directories the caller is about to clean up.
+                    try
+                    {
+                        await current.ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // The first failure is the actionable one.
+                    }
+
+                    throw;
+                }
             }
+
+            inFlight = current;
+        }
+
+        if (inFlight is not null)
+        {
+            await inFlight.ConfigureAwait(false);
         }
     }
 
@@ -614,7 +651,7 @@ public sealed class NativeTextureProcessor
         var workerThreads = SelectNeuralWorkerThreads(
             Environment.ProcessorCount,
             jobs.Count,
-            jobs.Max(job => EstimateNeuralOutputPixels(job.Request, job.Dimensions)));
+            jobs.Max(EstimateNeuralOutputPixels));
         try
         {
             try
@@ -845,7 +882,7 @@ public sealed class NativeTextureProcessor
         CancellationToken cancellationToken)
     {
         var maximumOutputPixels = jobs.Max(
-            job => EstimateNeuralOutputPixels(job.Request, job.Dimensions));
+            EstimateNeuralOutputPixels);
         var availableMemory = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
         if (availableMemory <= 0)
         {
@@ -1015,7 +1052,7 @@ public sealed class NativeTextureProcessor
     {
         var groupDirectory = Path.Combine(
             batchDirectory,
-            $"neural-{executionState.NextGroupId++:D6}");
+            $"neural-{executionState.GetNextGroupId():D6}");
         var inputDirectory = Path.Combine(groupDirectory, "input");
         var outputDirectory = Path.Combine(groupDirectory, "output");
         Directory.CreateDirectory(inputDirectory);
@@ -1065,7 +1102,15 @@ public sealed class NativeTextureProcessor
                 NativeTextureWorkPhase.GpuInference,
                 0,
                 jobs.Count));
-            await RunCheckedAsync(command, nativeProgress, cancellationToken).ConfigureAwait(false);
+            await executionState.GpuGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await RunCheckedAsync(command, nativeProgress, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                executionState.GpuGate.Release();
+            }
             nativeProgress?.Report(new NativeOutputLine(
                 NativeOutputStream.StandardOutput,
                 $"GPU batch complete; encoding and validating {jobs.Count:N0} texture(s).",
@@ -1139,21 +1184,28 @@ public sealed class NativeTextureProcessor
             || (key.WorkerKind == NeuralWorkerKind.TextureSpecialized
                 && IsPaintedPreset(key.WorkerPreset)))
         {
-            var anchored = cropped.AnchorVisibleChannelMeansFrom(job.Decoded);
-            var anchoredFidelity = CalculateFidelityMetrics(job.Decoded, anchored.Image);
-            var anchorReducesError =
-                anchoredFidelity.RoundTripMeanSquaredError < fidelity.RoundTripMeanSquaredError
-                && anchoredFidelity.MeanLuminanceDrift <= fidelity.MeanLuminanceDrift
-                && anchoredFidelity.MaximumMeanChannelDrift <= fidelity.MaximumMeanChannelDrift;
-            var anchorRepairsDrift =
-                (fidelity.MeanLuminanceDrift > 6 || fidelity.MaximumMeanChannelDrift > 12)
-                && anchoredFidelity.MeanLuminanceDrift <= 6
-                && anchoredFidelity.MaximumMeanChannelDrift <= 12
-                && anchoredFidelity.RoundTripLuminancePsnr >= 27.5;
-            if (anchorReducesError || anchorRepairsDrift)
+            // Anchoring clamps to a 0.90-1.10 gain, so with near-zero measured
+            // drift it is a guaranteed no-op; skip its full-image rescan.
+            var anchorWorthwhile = fidelity.MeanLuminanceDrift > 1.25
+                || fidelity.MaximumMeanChannelDrift > 2.5;
+            if (anchorWorthwhile)
             {
-                cropped = anchored.Image;
-                fidelity = anchoredFidelity;
+                var anchored = cropped.AnchorVisibleChannelMeansFrom(job.Decoded);
+                var anchoredFidelity = CalculateFidelityMetrics(job.Decoded, anchored.Image);
+                var anchorReducesError =
+                    anchoredFidelity.RoundTripMeanSquaredError < fidelity.RoundTripMeanSquaredError
+                    && anchoredFidelity.MeanLuminanceDrift <= fidelity.MeanLuminanceDrift
+                    && anchoredFidelity.MaximumMeanChannelDrift <= fidelity.MaximumMeanChannelDrift;
+                var anchorRepairsDrift =
+                    (fidelity.MeanLuminanceDrift > 6 || fidelity.MaximumMeanChannelDrift > 12)
+                    && anchoredFidelity.MeanLuminanceDrift <= 6
+                    && anchoredFidelity.MaximumMeanChannelDrift <= 12
+                    && anchoredFidelity.RoundTripLuminancePsnr >= 27.5;
+                if (anchorReducesError || anchorRepairsDrift)
+                {
+                    cropped = anchored.Image;
+                    fidelity = anchoredFidelity;
+                }
             }
         }
 
@@ -1178,16 +1230,22 @@ public sealed class NativeTextureProcessor
                     $"illustrated-encoded-candidate{Path.GetExtension(job.Request.DestinationPath)}")
                 : job.Request.DestinationPath;
             InvalidDataException? lastPaintedFailure = null;
+            // The stylization passes are strength-independent, so run them
+            // once and probe the descending-strength ladder with cheap blends.
+            var stylized = reconstruction.ApplyPaintedStylizationFull(
+                job.Request.WrapEdges,
+                key.NeuralScale,
+                job.Request.Options.ResolvedPaintedStyle);
             double[] finishScales = [1d, 0.75d, 0.5d, 0.25d];
             foreach (var finishScale in finishScales)
             {
                 try
                 {
-                    var graphicPainted = reconstruction.ApplyGraphicPaintedFinish(
+                    var graphicPainted = reconstruction.BlendTowardStylized(
+                        stylized,
                         GetGraphicPaintedStrength(job.Request, job.PreserveAlphaCoverage)
                             * reconstructionStrengthScale
-                            * finishScale,
-                        job.Request.WrapEdges);
+                            * finishScale);
                     ValidateGraphicPaintedOutput(
                         CalculateFidelityMetrics(job.Decoded, graphicPainted));
                     var themed = ApplyValidatedPaintedTheme(
@@ -1261,6 +1319,23 @@ public sealed class NativeTextureProcessor
             TgaPixelBuffer image,
             string? destinationPath = null)
         {
+            if (job.PreserveAlphaCoverage
+                && (image.Width > job.Dimensions.OutputWidth
+                    || image.Height > job.Dimensions.OutputHeight))
+            {
+                // texconv's resize would resample alpha again without any
+                // coverage constraint (-keepcoverage only shapes mips), letting
+                // thin cutout strands drift at the final resolution. Reduce on
+                // the CPU and restore coverage-matched alpha at the exact
+                // output size instead.
+                image = image
+                    .ResizeArea(job.Dimensions.OutputWidth, job.Dimensions.OutputHeight)
+                    .WithScaledAlphaFrom(
+                        job.Decoded,
+                        preserveCoverage: true,
+                        wrapEdges: job.Request.WrapEdges);
+            }
+
             var mergedPath = Path.Combine(job.OperationDirectory, "merged.tga");
             await image.WriteFileAsync(mergedPath, cancellationToken).ConfigureAwait(false);
             return await EncodeToDestinationAsync(
@@ -1325,7 +1400,7 @@ public sealed class NativeTextureProcessor
         long currentOutputPixels = 0;
         foreach (var job in jobs.OrderBy(candidate => candidate.RequestIndex))
         {
-            var outputPixels = EstimateNeuralOutputPixels(job.Request, job.Dimensions);
+            var outputPixels = EstimateNeuralOutputPixels(job);
             if (current.Count > 0
                 && (current.Count >= MaximumNeuralBatchItems
                     || currentOutputPixels + outputPixels > MaximumNeuralBatchOutputPixels))
@@ -1347,11 +1422,18 @@ public sealed class NativeTextureProcessor
         return chunks;
     }
 
+    private static long EstimateNeuralOutputPixels(PreparedColorJob job) =>
+        EstimateNeuralOutputPixels(job.Request, job.Dimensions, job.EffectivePreset);
+
     private static long EstimateNeuralOutputPixels(
         NativeTextureProcessRequest request,
-        UpscaleDimensions dimensions)
+        UpscaleDimensions dimensions,
+        TexturePreset? effectivePreset = null)
     {
-        var neuralScale = ShouldUseTextureSpecializedReconstruction(request.Options.Preset)
+        // A soft-alpha texture is silently downgraded to the Faithful worker,
+        // which may run at a smaller legacy scale; sizing batches by the
+        // requested preset would overstate its output.
+        var neuralScale = ShouldUseTextureSpecializedReconstruction(effectivePreset ?? request.Options.Preset)
             ? UpscaylCommandBuilder.ModelScale
             : dimensions.RequiredNeuralScale;
         var borderedWidth = checked(
@@ -1439,292 +1521,6 @@ public sealed class NativeTextureProcessor
         finally
         {
             TryDeleteOwnedChildDirectory(destinationDirectory, temporaryDirectory, ".preview-");
-        }
-    }
-
-    private async Task<string> ProcessColorAsync(
-        NativeTextureProcessRequest request,
-        UpscaleDimensions dimensions,
-        string operationDirectory,
-        IProgress<NativeOutputLine>? nativeProgress,
-        CancellationToken cancellationToken)
-    {
-        EnsureColorTools();
-        var decodedDirectory = CreateDirectory(operationDirectory, "decoded");
-        await RunCheckedAsync(
-            _directXTex.CreateConvert(_tools.TexconvPath!, request.SourcePath, decodedDirectory, "tga"),
-            nativeProgress,
-            cancellationToken).ConfigureAwait(false);
-
-        var decodedPath = FindSingleOutput(decodedDirectory, ".tga");
-        var decoded = await TgaPixelBuffer.ReadFileAsync(decodedPath, cancellationToken).ConfigureAwait(false);
-        if (decoded.Width != request.Metadata.Width || decoded.Height != request.Metadata.Height)
-        {
-            throw new InvalidDataException("DirectXTex decoded dimensions do not match the source header.");
-        }
-
-        var preserveAlphaCoverage = decoded.HasLikelyCutoutAlpha();
-        var hasSoftTranslucentAlpha = request.Metadata.HasAlpha
-            && decoded.HasSoftTranslucentAlpha();
-        var colorSource = preserveAlphaCoverage
-            ? decoded.DilateRgbIntoTransparentPixels()
-            : decoded;
-        var opaque = colorSource.WithOpaqueAlpha();
-        var wrapped = request.WrapEdges
-            ? opaque.AddWrappedBorder(request.WrapPadding)
-            : opaque.AddClampedBorder(request.WrapPadding);
-        var wrappedTgaPath = Path.Combine(operationDirectory, "wrapped-input.tga");
-        await wrapped.WriteFileAsync(wrappedTgaPath, cancellationToken).ConfigureAwait(false);
-
-        var pngInputDirectory = CreateDirectory(operationDirectory, "png-input");
-        await RunCheckedAsync(
-            _directXTex.CreateConvert(_tools.TexconvPath!, wrappedTgaPath, pngInputDirectory, "png"),
-            nativeProgress,
-            cancellationToken).ConfigureAwait(false);
-
-        var pngInputPath = FindSingleOutput(pngInputDirectory, ".png");
-        var neuralScale = dimensions.RequiredNeuralScale;
-        // Soft smoke, spell, fire, and water alpha must retain a restrained
-        // reconstruction even if an opaque-looking legacy filename escaped
-        // semantic classification. The original alpha plane is restored below.
-        var effectivePreset = hasSoftTranslucentAlpha
-            ? TexturePreset.Faithful
-            : request.Options.Preset;
-        var primary = await RunNeuralColorPassAsync(
-            request,
-            pngInputPath,
-            decoded,
-            operationDirectory,
-            effectivePreset,
-            "primary",
-            neuralScale,
-            preserveAlphaCoverage,
-            nativeProgress,
-            cancellationToken).ConfigureAwait(false);
-
-        var mergedPath = Path.Combine(operationDirectory, "merged.tga");
-        // Texture HD intentionally keeps the texture model's full reconstruction.
-        // The previous dual-pass frequency blend suppressed the material detail
-        // users selected this profile to see. Alpha is still restored separately
-        // in RunNeuralColorPassAsync, including cutout coverage preservation.
-        var finalImage = primary.Image;
-        double? graphicPaintedScale = null;
-        double? paintedThemeScale = null;
-        if (effectivePreset == TexturePreset.Illustrated)
-        {
-            var graphicPainted = ApplyValidatedGraphicPaintedFinish(
-                decoded,
-                finalImage,
-                GetGraphicPaintedStrength(request, preserveAlphaCoverage),
-                request.WrapEdges);
-            graphicPaintedScale = graphicPainted.StrengthScale;
-            var themed = ApplyValidatedPaintedTheme(
-                decoded,
-                graphicPainted.Image,
-                request.Options.PaintedTheme,
-                GetPaintedThemeStrength(request, preserveAlphaCoverage));
-            finalImage = themed.Image;
-            paintedThemeScale = themed.StrengthScale;
-        }
-        else if (effectivePreset == TexturePreset.RusticPainted)
-        {
-            finalImage = finalImage.ApplyRusticPaintedGrade(
-                GetRusticPaintedStrength(request));
-            ValidateStylizedOutput(CalculateFidelityMetrics(decoded, finalImage));
-        }
-
-        await finalImage.WriteFileAsync(mergedPath, cancellationToken).ConfigureAwait(false);
-
-        await EncodeToDestinationAsync(
-            request,
-            dimensions,
-            mergedPath,
-            operationDirectory,
-            nativeProgress,
-            preserveAlphaCoverage,
-            cancellationToken).ConfigureAwait(false);
-
-        if (effectivePreset == TexturePreset.Illustrated
-            && RequiresFinalIllustratedDecodeValidation(
-                request.Metadata,
-                request.Classification,
-                preserveAlphaCoverage))
-        {
-            await ValidateFinalIllustratedOutputAsync(
-                    request,
-                    decoded,
-                    operationDirectory,
-                    nativeProgress,
-                    cancellationToken)
-                .ConfigureAwait(false);
-        }
-
-        if (hasSoftTranslucentAlpha)
-        {
-            return "Real-ESRNet soft-alpha restoration with original translucency";
-        }
-
-        return effectivePreset switch
-        {
-            TexturePreset.ClassicHd when primary.Model.IsTextureSpecialized =>
-                $"Single-pass game-texture reconstruction ({primary.Model.Name})",
-            TexturePreset.ClassicHd =>
-                "Single-pass texture reconstruction (legacy Real-ESRGAN fallback)",
-            TexturePreset.MaximumDetail =>
-                "Real-ESRGAN maximum-detail reconstruction with TTA",
-            TexturePreset.Illustrated =>
-                primary.Model.IsTextureSpecialized
-                    ? $"Texture-specialized illustrated reconstruction ({primary.Model.Name}) with {FormatPaintedTheme(request.Options.PaintedTheme)} finishing{FormatGraphicPaintedScale(graphicPaintedScale)}{FormatPaintedThemeScale(paintedThemeScale)}"
-                    : $"Real-ESRGAN illustrated reconstruction with {FormatPaintedTheme(request.Options.PaintedTheme)} finishing{FormatGraphicPaintedScale(graphicPaintedScale)}{FormatPaintedThemeScale(paintedThemeScale)}",
-            TexturePreset.RusticPainted =>
-                "Real-ESRGAN graphic painted reconstruction with bounded rustic grading",
-            _ =>
-                "Real-ESRNet faithful color restoration with wrapped border"
-        };
-    }
-
-    private async Task<NeuralColorPassResult> RunNeuralColorPassAsync(
-        NativeTextureProcessRequest request,
-        string pngInputPath,
-        TgaPixelBuffer decoded,
-        string operationDirectory,
-        TexturePreset preset,
-        string passName,
-        int neuralScale,
-        bool preserveAlphaCoverage,
-        IProgress<NativeOutputLine>? nativeProgress,
-        CancellationToken cancellationToken)
-    {
-        var upscaledPngPath = Path.Combine(operationDirectory, $"{passName}-neural.png");
-        TextureUpscaleModelSelection model;
-        var actualNeuralScale = neuralScale;
-        var specialized = ShouldUseTextureSpecializedReconstruction(preset)
-                          && Volatile.Read(ref textureUpscalerUnavailable) == 0
-                          && _tools.HasTextureUpscaler
-            ? _upscayl.FindTextureModel(_tools.TextureModelsPath!)
-            : null;
-        if (specialized is not null)
-        {
-            model = specialized;
-            actualNeuralScale = UpscaylCommandBuilder.ModelScale;
-            try
-            {
-                await RunCheckedAsync(
-                    _upscayl.CreateUpscale(
-                        _tools.TextureUpscalerPath!,
-                        _tools.TextureModelsPath!,
-                        pngInputPath,
-                        upscaledPngPath,
-                        model.Name,
-                        request.RealEsrganTileSize),
-                    nativeProgress,
-                    cancellationToken).ConfigureAwait(false);
-            }
-            catch (NativeProcessException)
-            {
-                // Avoid retrying a failed custom worker for every remaining
-                // texture in the same build. The reported processing route
-                // makes the fallback visible to the build report/UI.
-                Interlocked.Exchange(ref textureUpscalerUnavailable, 1);
-                TryDeleteOwnedFile(operationDirectory, upscaledPngPath);
-                model = await RunLegacyColorPassAsync(
-                    request,
-                    pngInputPath,
-                    upscaledPngPath,
-                    preset,
-                    neuralScale,
-                    nativeProgress,
-                    cancellationToken,
-                    reportFallback: true).ConfigureAwait(false);
-                actualNeuralScale = neuralScale;
-            }
-        }
-        else
-        {
-            model = await RunLegacyColorPassAsync(
-                request,
-                pngInputPath,
-                upscaledPngPath,
-                preset,
-                neuralScale,
-                nativeProgress,
-                cancellationToken,
-                reportFallback: false).ConfigureAwait(false);
-        }
-
-        try
-        {
-            return new NeuralColorPassResult(
-                await ReadAndValidateNeuralOutputAsync($"{passName}-tga").ConfigureAwait(false),
-                model);
-        }
-        catch (InvalidDataException exception) when (
-            model.IsTextureSpecialized
-            && IsPaintedPreset(preset))
-        {
-            nativeProgress?.Report(new NativeOutputLine(
-                NativeOutputStream.StandardError,
-                $"The texture-specialized painted result failed its fidelity gate; retrying with the bundled illustrated model. {exception.Message}"));
-            TryDeleteOwnedFile(operationDirectory, upscaledPngPath);
-            model = await RunLegacyColorPassAsync(
-                request,
-                pngInputPath,
-                upscaledPngPath,
-                preset,
-                neuralScale,
-                nativeProgress,
-                cancellationToken,
-                reportFallback: true).ConfigureAwait(false);
-            actualNeuralScale = neuralScale;
-            return new NeuralColorPassResult(
-                await ReadAndValidateNeuralOutputAsync($"{passName}-legacy-tga").ConfigureAwait(false),
-                model);
-        }
-
-        async Task<TgaPixelBuffer> ReadAndValidateNeuralOutputAsync(string directoryName)
-        {
-            var neuralTgaDirectory = CreateDirectory(operationDirectory, directoryName);
-            await RunCheckedAsync(
-                _directXTex.CreateConvert(
-                    _tools.TexconvPath!,
-                    upscaledPngPath,
-                    neuralTgaDirectory,
-                    "tga"),
-                nativeProgress,
-                cancellationToken).ConfigureAwait(false);
-
-            var neuralTgaPath = FindSingleOutput(neuralTgaDirectory, ".tga");
-            var neural = await TgaPixelBuffer
-                .ReadFileAsync(neuralTgaPath, cancellationToken)
-                .ConfigureAwait(false);
-            var expectedWrappedWidth = checked(
-                (request.Metadata.Width + (request.WrapPadding * 2)) * actualNeuralScale);
-            var expectedWrappedHeight = checked(
-                (request.Metadata.Height + (request.WrapPadding * 2)) * actualNeuralScale);
-            if (neural.Width != expectedWrappedWidth || neural.Height != expectedWrappedHeight)
-            {
-                throw new InvalidDataException(
-                    $"Neural {actualNeuralScale}x output dimensions were {neural.Width}x{neural.Height}; "
-                    + $"expected wrapped dimensions {expectedWrappedWidth}x{expectedWrappedHeight}.");
-            }
-
-            var scaledPadding = checked(request.WrapPadding * actualNeuralScale);
-            var expectedWidth = checked(request.Metadata.Width * actualNeuralScale);
-            var expectedHeight = checked(request.Metadata.Height * actualNeuralScale);
-            var cropped = neural.Crop(scaledPadding, scaledPadding, expectedWidth, expectedHeight);
-
-            if (request.Metadata.HasAlpha)
-            {
-                cropped = cropped.WithScaledAlphaFrom(
-                    decoded,
-                    preserveCoverage: preserveAlphaCoverage,
-                    wrapEdges: request.WrapEdges);
-            }
-
-            ValidateNeuralOutputForPreset(
-                preset,
-                CalculateFidelityMetrics(decoded, cropped));
-            return cropped;
         }
     }
 
@@ -1953,40 +1749,6 @@ public sealed class NativeTextureProcessor
 
         throw new InvalidDataException(
             $"The {FormatPaintedTheme(theme)} treatment exceeded its bounded fidelity limits even at reduced strength.",
-            lastFailure);
-    }
-
-    private static (TgaPixelBuffer Image, double StrengthScale) ApplyValidatedGraphicPaintedFinish(
-        TgaPixelBuffer source,
-        TgaPixelBuffer reconstruction,
-        double requestedStrength,
-        bool wrapEdges)
-    {
-        // The texture-specialized reconstruction normally needs less spatial
-        // consolidation than the older anime reconstruction. More importantly,
-        // a rare high-contrast material should lose finish strength—not its
-        // entire enhancement—when the full treatment crosses the same strict
-        // clipping/structure gate used for every painted result.
-        double[] scales = [1d, 0.75d, 0.5d, 0.25d];
-        InvalidDataException? lastFailure = null;
-        foreach (var scale in scales)
-        {
-            var painted = reconstruction.ApplyGraphicPaintedFinish(
-                requestedStrength * scale,
-                wrapEdges);
-            try
-            {
-                ValidateGraphicPaintedOutput(CalculateFidelityMetrics(source, painted));
-                return (painted, scale);
-            }
-            catch (InvalidDataException exception)
-            {
-                lastFailure = exception;
-            }
-        }
-
-        throw new InvalidDataException(
-            "The graphic-painted finishing treatment exceeded its bounded fidelity limits even at reduced strength.",
             lastFailure);
     }
 
@@ -2294,41 +2056,6 @@ public sealed class NativeTextureProcessor
 
     private static double Luminance(ReadOnlySpan<byte> rgba, int offset) =>
         (0.2126 * rgba[offset]) + (0.7152 * rgba[offset + 1]) + (0.0722 * rgba[offset + 2]);
-
-    private async Task<TextureUpscaleModelSelection> RunLegacyColorPassAsync(
-        NativeTextureProcessRequest request,
-        string pngInputPath,
-        string upscaledPngPath,
-        TexturePreset preset,
-        int neuralScale,
-        IProgress<NativeOutputLine>? nativeProgress,
-        CancellationToken cancellationToken,
-        bool reportFallback)
-    {
-        var model = _realEsrgan.ResolveModel(_tools.RealEsrganModelsPath!, preset);
-        if (reportFallback)
-        {
-            nativeProgress?.Report(new NativeOutputLine(
-                NativeOutputStream.StandardError,
-                IsPaintedPreset(preset)
-                    ? "The game-texture model could not complete the painted reconstruction; retrying with the bundled illustrated model."
-                    : "The game-texture model could not run on the custom Vulkan worker; retrying with the bundled legacy detail model."));
-        }
-
-        await RunCheckedAsync(
-            _realEsrgan.CreateUpscale(
-                _tools.RealEsrganPath!,
-                _tools.RealEsrganModelsPath!,
-                pngInputPath,
-                upscaledPngPath,
-                preset,
-                request.RealEsrganTileSize,
-                neuralScale,
-                model.Name),
-            nativeProgress,
-            cancellationToken).ConfigureAwait(false);
-        return model;
-    }
 
     private async Task<GeneratedMipResult> ProcessDataTextureAsync(
         NativeTextureProcessRequest request,
@@ -2823,8 +2550,19 @@ public sealed class NativeTextureProcessor
         double EdgeEnergyRatio,
         double ExtremeLuminanceGrowth);
 
-    private sealed class NeuralBatchExecutionState
+    private sealed class NeuralBatchExecutionState : IDisposable
     {
-        public int NextGroupId { get; set; }
+        private int nextGroupId;
+
+        /// <summary>
+        /// Serializes GPU worker launches. CPU preparation and post-processing
+        /// of one chunk may overlap the next chunk's inference, but two Vulkan
+        /// workers must never compete for VRAM.
+        /// </summary>
+        public SemaphoreSlim GpuGate { get; } = new(1, 1);
+
+        public int GetNextGroupId() => Interlocked.Increment(ref nextGroupId);
+
+        public void Dispose() => GpuGate.Dispose();
     }
 }

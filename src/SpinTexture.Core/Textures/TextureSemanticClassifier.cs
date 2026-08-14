@@ -19,9 +19,18 @@ public sealed record TextureClassification(
 
 public sealed class TextureSemanticClassifier
 {
-    private static readonly HashSet<string> NormalTokens = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly HashSet<string> NormalWordTokens = new(StringComparer.OrdinalIgnoreCase)
     {
-        "normal", "norm", "nm", "nrm", "nrml", "bump", "n", "ng", "ngs", "ns"
+        "normal", "norm", "nrml", "bump"
+    };
+
+    // Compact normal suffixes ("wall_n", "armor-ns") only count when they are
+    // real delimiter-separated tokens. Legacy diffuse names such as wall1n or
+    // qrc2n produce an isolated "n" via the digit-to-letter split, and those
+    // must not silently divert a color texture into the preserved normal path.
+    private static readonly HashSet<string> NormalSuffixTokens = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "nm", "nrm", "n", "ng", "ngs", "ns"
     };
 
     private static readonly HashSet<string> MaskTokens = new(StringComparer.OrdinalIgnoreCase)
@@ -74,7 +83,8 @@ public sealed class TextureSemanticClassifier
             return Result(TextureKind.Unsupported, ClassificationConfidence.High, false, metadata.HasAlpha, true, reasons);
         }
 
-        if (tokens.Overlaps(NormalTokens))
+        if (tokens.Overlaps(NormalWordTokens)
+            || TokenizeDelimitedOnly(logicalName).Overlaps(NormalSuffixTokens))
         {
             reasons.Add("The logical name contains a normal- or bump-map token.");
             reasons.Add("Vector data must be interpolated and renormalized instead of processed as color.");
@@ -175,6 +185,60 @@ public sealed class TextureSemanticClassifier
 
         AddToken(tokens, current);
         return tokens;
+    }
+
+    private static HashSet<string> TokenizeDelimitedOnly(string logicalName)
+    {
+        var tokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var current = new List<char>();
+        var semanticPath = Path.ChangeExtension(logicalName, null) ?? logicalName;
+        foreach (var character in semanticPath)
+        {
+            if (char.IsLetterOrDigit(character))
+            {
+                current.Add(char.ToLowerInvariant(character));
+                continue;
+            }
+
+            AddDelimitedToken(tokens, current);
+        }
+
+        AddDelimitedToken(tokens, current);
+        return tokens;
+    }
+
+    private static void AddDelimitedToken(ISet<string> tokens, List<char> current)
+    {
+        if (current.Count == 0)
+        {
+            return;
+        }
+
+        var token = new string(current.ToArray());
+        tokens.Add(token);
+
+        // "_12ngs" and "_01nrml" style suffixes carry a frame/variant number in
+        // front of the semantic letters; strip digits from both ends so those
+        // still register. "wall1n" has no delimiter at all and never lands here
+        // as a bare "n".
+        var start = 0;
+        while (start < token.Length && char.IsDigit(token[start]))
+        {
+            start++;
+        }
+
+        var end = token.Length;
+        while (end > start && char.IsDigit(token[end - 1]))
+        {
+            end--;
+        }
+
+        if (end > start && (start > 0 || end < token.Length))
+        {
+            tokens.Add(token[start..end]);
+        }
+
+        current.Clear();
     }
 
     private static bool HasCompactLegacyEffectPrefix(string logicalName)

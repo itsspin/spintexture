@@ -45,8 +45,18 @@ public sealed record UpscaleOptions(
     PaintedTheme PaintedTheme = PaintedTheme.ClassicPainted,
     [property: System.Text.Json.Serialization.JsonIgnore(
         Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
-    WorldExpansion? WorldExpansions = null)
+    WorldExpansion? WorldExpansions = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    PaintedStyleSettings? PaintedStyle = null)
 {
+    /// <summary>
+    /// The effective painted style: explicit settings when present, otherwise
+    /// the defaults. Null stays null in serialized manifests for compatibility.
+    /// </summary>
+    public PaintedStyleSettings ResolvedPaintedStyle =>
+        (PaintedStyle ?? PaintedStyleSettings.Default).Clamped();
+
     public static UpscaleOptions Recommended => new(
         TexturePreset.ClassicHd,
         AssetScope.WorldOnly,

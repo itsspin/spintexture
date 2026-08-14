@@ -80,7 +80,11 @@ public sealed class RealEsrganCommandBuilder
         var modelName = preset switch
         {
             TexturePreset.Faithful => LegacyFaithfulModelName,
-            TexturePreset.Illustrated or TexturePreset.RusticPainted => IllustratedModelName,
+            // Graphic Painted keeps a detail-preserving reconstruction as its
+            // base: the painterly look now comes from PaintedStylizer, and the
+            // anime model's region flattening only destroyed material detail
+            // the stylizer needs. Rustic Painted keeps its established look.
+            TexturePreset.RusticPainted => IllustratedModelName,
             _ => LegacyDetailModelName
         };
         return new TextureUpscaleModelSelection(

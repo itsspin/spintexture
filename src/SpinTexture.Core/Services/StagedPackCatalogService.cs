@@ -72,6 +72,24 @@ public sealed class StagedPackCatalogService
         StagedPackVerificationMode verificationMode = StagedPackVerificationMode.Exact,
         CancellationToken cancellationToken = default)
     {
+        var info = await InspectCoreAsync(
+                paths,
+                manifestPath,
+                verificationMode,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return info with
+        {
+            UserMetadata = StagedPackMetadataStore.TryRead(info.BuildDirectory)
+        };
+    }
+
+    private async Task<StagedPackInfo> InspectCoreAsync(
+        ProjectPaths paths,
+        string manifestPath,
+        StagedPackVerificationMode verificationMode,
+        CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentException.ThrowIfNullOrWhiteSpace(manifestPath);
         cancellationToken.ThrowIfCancellationRequested();
@@ -221,6 +239,118 @@ public sealed class StagedPackCatalogService
         }
     }
 
+    /// <summary>
+    /// Finds staging-library directories that are neither completed packs
+    /// (no manifest.json) nor resumable or in-flight builds (no
+    /// build-checkpoint.json) and are old enough that no live build can still
+    /// own them. These are crash leftovers: invisible in the pack list but
+    /// counted by disk usage until removed.
+    /// </summary>
+    public static IReadOnlyList<StagedPackDebrisInfo> FindBuildDebris(
+        ProjectPaths paths,
+        TimeSpan? minimumAge = null)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        var age = minimumAge ?? TimeSpan.FromHours(24);
+        if (!Directory.Exists(paths.StagingPath))
+        {
+            return Array.Empty<StagedPackDebrisInfo>();
+        }
+
+        var results = new List<StagedPackDebrisInfo>();
+        var cutoff = DateTimeOffset.UtcNow - age;
+        foreach (var directory in Directory.EnumerateDirectories(paths.StagingPath))
+        {
+            if (!IsBuildDebris(directory))
+            {
+                continue;
+            }
+
+            DateTimeOffset lastWrite;
+            long bytes = 0;
+            try
+            {
+                lastWrite = Directory.GetLastWriteTimeUtc(directory);
+                foreach (var file in Directory.EnumerateFiles(
+                             directory,
+                             "*",
+                             SearchOption.AllDirectories))
+                {
+                    bytes += new FileInfo(file).Length;
+                    var fileWrite = File.GetLastWriteTimeUtc(file);
+                    if (fileWrite > lastWrite)
+                    {
+                        lastWrite = fileWrite;
+                    }
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            if (lastWrite <= cutoff)
+            {
+                results.Add(new StagedPackDebrisInfo(
+                    Path.GetFullPath(directory),
+                    Path.GetFileName(directory),
+                    bytes,
+                    lastWrite));
+            }
+        }
+
+        return results
+            .OrderByDescending(debris => debris.Bytes)
+            .ToArray();
+    }
+
+    /// <summary>
+    /// Deletes previously discovered build debris. Each directory is
+    /// re-checked immediately before removal so a pack completed or a build
+    /// resumed since discovery is never touched.
+    /// </summary>
+    public static StagedPackDebrisCleanupResult DeleteBuildDebris(
+        ProjectPaths paths,
+        IReadOnlyList<StagedPackDebrisInfo> debris)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(debris);
+        var deleted = 0;
+        long reclaimedBytes = 0;
+        var failures = new List<string>();
+        using var libraryLock = StagingLibraryLock.Acquire(paths.WorkspacePath);
+        foreach (var item in debris)
+        {
+            var stagingRoot = Path.GetFullPath(paths.StagingPath);
+            var target = Path.GetFullPath(item.Directory);
+            if (!target.StartsWith(
+                    stagingRoot + Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase)
+                || !Directory.Exists(target)
+                || !IsBuildDebris(target))
+            {
+                continue;
+            }
+
+            try
+            {
+                Directory.Delete(target, recursive: true);
+                deleted++;
+                reclaimedBytes += item.Bytes;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                failures.Add($"{item.Name}: {exception.Message}");
+            }
+        }
+
+        return new StagedPackDebrisCleanupResult(deleted, reclaimedBytes, failures);
+    }
+
+    private static bool IsBuildDebris(string directory) =>
+        !File.Exists(Path.Combine(directory, "manifest.json"))
+        && !File.Exists(Path.Combine(directory, "build-checkpoint.json"));
+
     private static IReadOnlyList<string> EnumerateManifestCandidates(
         string stagingPath,
         CancellationToken cancellationToken)
@@ -337,6 +467,12 @@ public sealed class StagedPackCatalogService
         {
             throw new InvalidDataException(
                 "Build manifest schema 1 cannot carry an explicit World expansion selection.");
+        }
+
+        if (manifest.SchemaVersion < 3 && manifest.Options.PaintedStyle is not null)
+        {
+            throw new InvalidDataException(
+                "Build manifest schemas before 3 cannot carry painted style settings.");
         }
 
         WorldExpansionSelectionPolicy.Validate(manifest.Options);

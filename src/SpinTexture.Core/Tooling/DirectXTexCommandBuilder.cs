@@ -103,7 +103,11 @@ public sealed class DirectXTexCommandBuilder
             arguments.Add("-sepalpha");
             if (preserveAlphaCoverage)
             {
-                arguments.Add("--keep-coverage");
+                // The single-dash short form is accepted by every texconv
+                // release; the long-form "--keep-coverage" only exists in
+                // builds that added long-name switches, and an unrecognized
+                // option fails the whole encode.
+                arguments.Add("-keepcoverage");
                 arguments.Add("0.5");
             }
         }

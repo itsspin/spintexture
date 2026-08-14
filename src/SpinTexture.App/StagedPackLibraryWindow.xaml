@@ -142,9 +142,14 @@
                            TextTrimming="CharacterEllipsis" Margin="0,6,18,0"
                            ToolTip="Change this location from Pack Storage Settings on the main window." />
             </StackPanel>
-            <Button Grid.Column="1" Content="Refresh Library" Click="Refresh_Click"
-                    VerticalAlignment="Bottom" Margin="12,0,0,0"
-                    ToolTip="Rescan completed packs without changing the game client." />
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                <Button Content="Clean Up Leftovers" Click="CleanupDebris_Click"
+                        IsEnabled="{Binding CanCleanupDebris}" Margin="12,0,0,0"
+                        ToolTip="Find and remove folders left behind by interrupted builds. Completed packs and resumable builds are never touched." />
+                <Button Content="Refresh Library" Click="Refresh_Click"
+                        Margin="8,0,0,0"
+                        ToolTip="Rescan completed packs without changing the game client." />
+            </StackPanel>
         </Grid>
 
         <Border Grid.Row="1" Margin="0,16,0,14" Padding="12,10"
@@ -224,7 +229,13 @@
                         </Border>
                     </Expander>
 
-                    <ListBox x:Name="PackList" Grid.Row="2"
+                    <Grid Grid.Row="2">
+                        <TextBlock Text="No completed packs yet.&#x0a;&#x0a;Build one from the main window: choose your EverQuest folder, click Analyze Client, pick a zone and a texture style, then Build Staged Pack. Completed packs appear here, ready to verify and install — building never touches the live game."
+                                   Foreground="#9AA3B2" FontSize="13" TextWrapping="Wrap" LineHeight="20"
+                                   MaxWidth="420" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   TextAlignment="Center"
+                                   Visibility="{Binding IsLibraryEmpty, Converter={StaticResource BoolToVisibility}}" />
+                    <ListBox x:Name="PackList"
                              ItemsSource="{Binding PacksView}"
                              SelectedItem="{Binding SelectedPack, Mode=TwoWay}"
                              SelectionMode="Extended"
@@ -311,6 +322,7 @@
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>
+                    </Grid>
                 </Grid>
             </Border>
 
@@ -343,6 +355,8 @@
                         <WrapPanel>
                             <Button Content="Open This Pack’s Preview" Click="Preview_Click" IsEnabled="{Binding CanPreview}"
                                     Background="#193027" BorderBrush="#356A57" />
+                            <Button Content="Rename Pack" Click="Rename_Click" IsEnabled="{Binding CanRename}"
+                                    ToolTip="Give the focused pack a custom display name. The name is stored beside the pack (pack-meta.json) and never changes its contents, identity, or install." />
                             <Button Content="Repair Checked Packs"
                                     Click="RepairCheckedPacks_Click" IsEnabled="{Binding CanRepairCheckedPacks}"
                                     Background="#382B18" BorderBrush="#785C2F"

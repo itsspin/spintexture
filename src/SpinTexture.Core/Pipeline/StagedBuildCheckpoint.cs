@@ -20,7 +20,8 @@ internal sealed record StagedBuildCheckpoint(
     // checkpoints remain readable; null selections omit their JSON property,
     // preserving the exact legacy plan hash for interrupted existing builds.
     public const int MinimumSupportedSchemaVersion = 2;
-    public const int CurrentSchemaVersion = 3;
+    // Schema 3 added worldExpansions; schema 4 added paintedStyle.
+    public const int CurrentSchemaVersion = 4;
 
     public static bool IsSupportedSchemaVersion(int schemaVersion) =>
         schemaVersion is >= MinimumSupportedSchemaVersion and <= CurrentSchemaVersion;

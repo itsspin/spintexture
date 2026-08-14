@@ -1332,8 +1332,13 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                     throw new InvalidDataException($"Preserved archive member changed size: {sourceEntry.Name}.");
                 }
 
-                var sourceHash = await HashEntryAsync(source, sourceEntry, cancellationToken).ConfigureAwait(false);
-                var rebuiltHash = await HashEntryAsync(rebuilt, rebuiltEntry, cancellationToken).ConfigureAwait(false);
+                // Preserved members are copied as raw stored ranges during the
+                // rebuild, so identical stored bytes prove identical members
+                // without paying a double zlib decompression of the archive.
+                var sourceHash = await source.ComputeStoredEntrySha256Async(sourceEntry, cancellationToken)
+                    .ConfigureAwait(false);
+                var rebuiltHash = await rebuilt.ComputeStoredEntrySha256Async(rebuiltEntry, cancellationToken)
+                    .ConfigureAwait(false);
                 if (!CryptographicOperations.FixedTimeEquals(sourceHash, rebuiltHash))
                 {
                     throw new InvalidDataException($"Preserved archive member changed bytes: {sourceEntry.Name}.");
@@ -1720,26 +1725,6 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
             FileOptions.Asynchronous | FileOptions.SequentialScan);
         await archive.ExtractEntryAsync(entry, destination, cancellationToken).ConfigureAwait(false);
         await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    private static async Task<byte[]> HashEntryAsync(
-        PfsArchive archive,
-        PfsArchiveEntry entry,
-        CancellationToken cancellationToken)
-    {
-        using var algorithm = SHA256.Create();
-        await using (var hashingStream = new CryptoStream(
-            Stream.Null,
-            algorithm,
-            CryptoStreamMode.Write,
-            leaveOpen: true))
-        {
-            await archive.ExtractEntryAsync(entry, hashingStream, cancellationToken).ConfigureAwait(false);
-            hashingStream.FlushFinalBlock();
-        }
-
-        return algorithm.Hash
-            ?? throw new InvalidOperationException("SHA-256 did not produce an archive-member hash.");
     }
 
     private static void TryDeleteTemporaryFile(string path)

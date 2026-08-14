@@ -32,7 +32,8 @@ public sealed record UpscaleDimensions(
         int sourceWidth,
         int sourceHeight,
         int maximumDimension,
-        double maximumLinearScale = RealEsrganCommandBuilder.ModelScale)
+        double maximumLinearScale = RealEsrganCommandBuilder.ModelScale,
+        int dimensionAlignment = 1)
     {
         if (sourceWidth <= 0 || sourceHeight <= 0)
         {
@@ -49,6 +50,11 @@ public sealed record UpscaleDimensions(
             throw new ArgumentOutOfRangeException(nameof(maximumLinearScale));
         }
 
+        if (dimensionAlignment is not (1 or 4))
+        {
+            throw new ArgumentOutOfRangeException(nameof(dimensionAlignment));
+        }
+
         var largestSourceDimension = Math.Max(sourceWidth, sourceHeight);
         var linearScale = Math.Min(maximumLinearScale, (double)maximumDimension / largestSourceDimension);
         linearScale = Math.Max(1, linearScale);
@@ -60,11 +66,26 @@ public sealed record UpscaleDimensions(
             maximumDimension,
             Math.Max(sourceHeight, (int)Math.Round(sourceHeight * linearScale, MidpointRounding.AwayFromZero)));
 
+        if (dimensionAlignment > 1)
+        {
+            // Block-compressed encoders refuse non-multiple-of-4 top levels;
+            // a capped non-power-of-two source would otherwise fail encoding
+            // and silently fall back to the preserved original.
+            outputWidth = AlignDimension(outputWidth, dimensionAlignment, maximumDimension);
+            outputHeight = AlignDimension(outputHeight, dimensionAlignment, maximumDimension);
+        }
+
         return new UpscaleDimensions(
             sourceWidth,
             sourceHeight,
             outputWidth,
             outputHeight,
             Math.Min((double)outputWidth / sourceWidth, (double)outputHeight / sourceHeight));
+    }
+
+    private static int AlignDimension(int value, int alignment, int maximum)
+    {
+        var aligned = (int)Math.Round((double)value / alignment, MidpointRounding.AwayFromZero) * alignment;
+        return Math.Clamp(aligned, alignment, maximum - (maximum % alignment));
     }
 }

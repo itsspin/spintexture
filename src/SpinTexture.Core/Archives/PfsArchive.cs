@@ -15,6 +15,9 @@ public sealed class PfsArchive : IDisposable, IAsyncDisposable
     private readonly SemaphoreSlim ioGate = new(1, 1);
     private readonly IReadOnlyList<PfsStoredEntry> storedEntries;
     private readonly Dictionary<string, PfsArchiveEntry> entriesByName;
+    // First byte after the source directory table; legacy S3D archives keep a
+    // date-stamp footer there that must survive a rebuild verbatim.
+    private readonly long trailingDataOffset;
     private int disposed;
 
     private PfsArchive(
@@ -24,8 +27,10 @@ public sealed class PfsArchive : IDisposable, IAsyncDisposable
         string? archivePath,
         uint version,
         IReadOnlyList<PfsStoredEntry> storedEntries,
-        IReadOnlyList<PfsArchiveEntry> entries)
+        IReadOnlyList<PfsArchiveEntry> entries,
+        long trailingDataOffset)
     {
+        this.trailingDataOffset = trailingDataOffset;
         this.source = source;
         this.leaveOpen = leaveOpen;
         DisplayName = displayName;
@@ -371,6 +376,20 @@ public sealed class PfsArchive : IDisposable, IAsyncDisposable
                 recordsByIndex,
                 cancellationToken).ConfigureAwait(false);
 
+            // Legacy S3D archives carry a trailing "STEVE"+date footer after
+            // the directory table. Preserve those bytes verbatim so a rebuilt
+            // archive stays byte-comparable outside the members it replaced.
+            var trailingLength = source.Length - trailingDataOffset;
+            if (trailingLength > 0)
+            {
+                await PfsStreamIo.CopyRangeAsync(
+                    source,
+                    trailingDataOffset,
+                    trailingLength,
+                    destination,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             var end = destination.Position;
             destination.Position = 0;
             await PfsArchiveWriter.WriteHeaderAsync(
@@ -530,6 +549,7 @@ public sealed class PfsArchive : IDisposable, IAsyncDisposable
             throw new PfsArchiveException("The PFS directory extends beyond the archive.");
         }
 
+        var trailingDataOffset = source.Position + directoryByteCount;
         var directoryBytes = new byte[directoryByteCount];
         await PfsStreamIo.ReadExactlyAsync(source, directoryBytes, cancellationToken).ConfigureAwait(false);
         var rawRecords = new RawDirectoryRecord[entryCount];
@@ -654,7 +674,8 @@ public sealed class PfsArchive : IDisposable, IAsyncDisposable
             archivePath,
             version,
             new ReadOnlyCollection<PfsStoredEntry>(storedEntries),
-            logicalEntries);
+            logicalEntries,
+            trailingDataOffset);
     }
 
     private static async ValueTask<PfsStoredEntry> ReadStoredEntryAsync(
