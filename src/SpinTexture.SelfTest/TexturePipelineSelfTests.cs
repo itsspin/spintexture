@@ -99,6 +99,8 @@ public static class TexturePipelineSelfTests
         await output.WriteLineAsync("Texture model discovery and preset fidelity-gate tests passed.").ConfigureAwait(false);
         await TestWrappedTgaAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Seam-safe TGA tests passed.").ConfigureAwait(false);
+        await TestPaintedStylizerAsync(cancellationToken).ConfigureAwait(false);
+        await output.WriteLineAsync("Painterly stylizer regression tests passed.").ConfigureAwait(false);
         if (string.Equals(
                 Environment.GetEnvironmentVariable("SPINTEXTURE_SKIP_GPU_SMOKE"),
                 "1",
@@ -2181,6 +2183,158 @@ public static class TexturePipelineSelfTests
         var replacement = Reserve("lavastorm.s3d", "replacement-material.dds");
         Assert(replacement.Accepted, "failed previews should release their family and archive share");
         AssertEqual(lava.Index, replacement.Index, "released preview indices should be reused deterministically");
+    }
+
+    private static async Task TestPaintedStylizerAsync(CancellationToken cancellationToken)
+    {
+        // A strictly periodic fixture makes the wrapped-seam assertions
+        // meaningful: opposite edges are true neighbors when the texture tiles.
+        const int size = 128;
+        var fixtureBytes = new byte[18 + (size * size * 4)];
+        fixtureBytes[2] = 2;
+        BinaryPrimitives.WriteUInt16LittleEndian(fixtureBytes.AsSpan(12), size);
+        BinaryPrimitives.WriteUInt16LittleEndian(fixtureBytes.AsSpan(14), size);
+        fixtureBytes[16] = 32;
+        fixtureBytes[17] = 0x28;
+        for (var y = 0; y < size; y++)
+        {
+            for (var x = 0; x < size; x++)
+            {
+                // Periodic value pattern plus a hard-edged cutout hole so the
+                // alpha-preservation contract is exercised on real cutout data.
+                var wave = Math.Sin(x * Math.PI * 8 / size) * Math.Cos(y * Math.PI * 6 / size);
+                var hash = (uint)((x % 16 * 374761393) + (y % 16 * 668265263));
+                hash = (hash ^ (hash >> 13)) * 1274126177u;
+                var noise = (hash & 0xFF) / 255.0;
+                var value = 96 + (64 * wave) + (48 * noise);
+                var inHole = ((x + 32) % size) < 20 && ((y + 48) % size) < 20;
+                var offset = 18 + (((y * size) + x) * 4);
+                fixtureBytes[offset] = (byte)Math.Clamp(value * 0.55, 0, 255);
+                fixtureBytes[offset + 1] = (byte)Math.Clamp(value * 0.85, 0, 255);
+                fixtureBytes[offset + 2] = (byte)Math.Clamp(value, 0, 255);
+                fixtureBytes[offset + 3] = inHole
+                    ? (byte)0
+                    : (x % 37) == 0 ? (byte)180 : byte.MaxValue;
+            }
+        }
+
+        var fixture = TgaPixelBuffer.Read(fixtureBytes);
+        var style = new PaintedStyleSettings(0.6, 0.7, 0.5, 0.6, 0.4);
+        var painted = fixture.ApplyPaintedStylization(
+            strength: 0.78,
+            wrapEdges: true,
+            neuralScale: 4,
+            style);
+
+        AssertSequenceEqual(
+            fixture.RgbaPixels.Span.ToArray().Where((_, index) => index % 4 == 3).ToArray(),
+            painted.RgbaPixels.Span.ToArray().Where((_, index) => index % 4 == 3).ToArray(),
+            "painterly stylization must preserve the alpha plane byte-for-byte, including cutout holes and fringes");
+        Assert(
+            !fixture.RgbaPixels.Span.SequenceEqual(painted.RgbaPixels.Span),
+            "painterly stylization should visibly restyle the color plane");
+
+        var repeat = fixture.ApplyPaintedStylization(
+            strength: 0.78,
+            wrapEdges: true,
+            neuralScale: 4,
+            style);
+        AssertSequenceEqual(
+            painted.RgbaPixels.Span,
+            repeat.RgbaPixels.Span,
+            "painterly stylization must be deterministic so repairs and resumed builds reproduce identical bytes");
+
+        var identity = fixture.ApplyPaintedStylization(strength: 0, wrapEdges: true, neuralScale: 4, style);
+        AssertSequenceEqual(
+            fixture.RgbaPixels.Span,
+            identity.RgbaPixels.Span,
+            "zero painterly strength must be an exact no-op");
+
+        var sizedDown = fixture.ApplyPaintedStylization(
+            strength: 0.78,
+            wrapEdges: true,
+            neuralScale: 4,
+            style with { StrokeSize = 0.05 });
+        Assert(
+            !sizedDown.RgbaPixels.Span.SequenceEqual(painted.RgbaPixels.Span),
+            "the stroke-size control must influence the painterly result");
+
+        // Tiling: wrapped-edge neighbor differences must look like interior
+        // neighbor differences, or the painted output would show seams in-game.
+        var paintedPixels = painted.RgbaPixels.Span;
+        double seamDifference = 0;
+        double interiorDifference = 0;
+        for (var y = 0; y < size; y++)
+        {
+            seamDifference += RgbDistance(paintedPixels, ((y * size) + 0) * 4, ((y * size) + size - 1) * 4);
+            interiorDifference += RgbDistance(paintedPixels, ((y * size) + (size / 2)) * 4, ((y * size) + (size / 2) - 1) * 4);
+        }
+
+        for (var x = 0; x < size; x++)
+        {
+            seamDifference += RgbDistance(paintedPixels, x * 4, (((size - 1) * size) + x) * 4);
+            interiorDifference += RgbDistance(paintedPixels, (((size / 2) * size) + x) * 4, ((((size / 2) - 1) * size) + x) * 4);
+        }
+
+        Assert(
+            seamDifference <= interiorDifference * 2.5,
+            $"wrapped painterly output must tile without visible seams (seam {seamDifference:0.0} vs interior {interiorDifference:0.0})");
+
+        // Strength mixing is what the fidelity ladder relies on: a blended
+        // candidate must always sit between the input and the stylized result.
+        var stylizedFull = fixture.ApplyPaintedStylizationFull(wrapEdges: true, neuralScale: 4, style);
+        var half = fixture.BlendTowardStylized(stylizedFull, 0.5);
+        var fixturePixels = fixture.RgbaPixels.Span;
+        var fullPixels = stylizedFull.RgbaPixels.Span;
+        var halfPixels = half.RgbaPixels.Span;
+        for (var offset = 0; offset < fixturePixels.Length; offset += 4)
+        {
+            for (var channel = 0; channel < 3; channel++)
+            {
+                int low = Math.Min(fixturePixels[offset + channel], fullPixels[offset + channel]);
+                int high = Math.Max(fixturePixels[offset + channel], fullPixels[offset + channel]);
+                Assert(
+                    halfPixels[offset + channel] >= low - 1 && halfPixels[offset + channel] <= high + 1,
+                    "a half-strength painterly blend must stay between the input and the full stylization");
+            }
+        }
+
+        // Style settings survive the options JSON round-trip and stay absent
+        // when null so older manifests remain byte-compatible.
+        var styledOptions = new UpscaleOptions(
+            TexturePreset.Illustrated,
+            AssetScope.WorldOnly,
+            2048,
+            GenerateMipMaps: true,
+            InstallAfterBuild: false,
+            PaintedTheme: PaintedTheme.ClassicPainted,
+            PaintedStyle: style);
+        var serializerOptions = new System.Text.Json.JsonSerializerOptions(
+            System.Text.Json.JsonSerializerDefaults.Web);
+        var styledJson = System.Text.Json.JsonSerializer.Serialize(styledOptions, serializerOptions);
+        Assert(
+            styledJson.Contains("paintedStyle", StringComparison.Ordinal)
+            && styledJson.Contains("strokeSize", StringComparison.Ordinal),
+            "explicit painted style settings must serialize into upscale options");
+        var roundTrip = System.Text.Json.JsonSerializer.Deserialize<UpscaleOptions>(styledJson, serializerOptions);
+        AssertEqual(style, roundTrip!.PaintedStyle!, "painted style settings must round-trip through options JSON");
+        var defaultJson = System.Text.Json.JsonSerializer.Serialize(
+            styledOptions with { PaintedStyle = null },
+            serializerOptions);
+        Assert(
+            !defaultJson.Contains("paintedStyle", StringComparison.Ordinal),
+            "default painted style must stay absent from serialized options for manifest compatibility");
+
+        var clamped = new PaintedStyleSettings(double.NaN, 4, -2, 0.5, 1).Clamped();
+        AssertEqual(new PaintedStyleSettings(0.5, 1, 0, 0.5, 1), clamped, "painted style clamping");
+
+        await Task.CompletedTask.ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        static double RgbDistance(ReadOnlySpan<byte> pixels, int offsetA, int offsetB) =>
+            Math.Abs(pixels[offsetA] - pixels[offsetB])
+            + Math.Abs(pixels[offsetA + 1] - pixels[offsetB + 1])
+            + Math.Abs(pixels[offsetA + 2] - pixels[offsetB + 2]);
     }
 
     private static async Task TestWrappedTgaAsync(CancellationToken cancellationToken)
