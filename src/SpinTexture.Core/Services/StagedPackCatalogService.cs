@@ -339,6 +339,12 @@ public sealed class StagedPackCatalogService
                 "Build manifest schema 1 cannot carry an explicit World expansion selection.");
         }
 
+        if (manifest.SchemaVersion < 3 && manifest.Options.PaintedStyle is not null)
+        {
+            throw new InvalidDataException(
+                "Build manifest schemas before 3 cannot carry painted style settings.");
+        }
+
         WorldExpansionSelectionPolicy.Validate(manifest.Options);
 
         if (manifest.Entries is null || manifest.Entries.Count == 0)

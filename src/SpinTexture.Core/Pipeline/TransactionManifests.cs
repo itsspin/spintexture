@@ -15,7 +15,8 @@ public sealed record BuildManifest(
     // while older SpinTexture releases reject schema-2 packs instead of
     // silently forgetting their World selection during repair.
     public const int MinimumSupportedSchemaVersion = 1;
-    public const int CurrentSchemaVersion = 2;
+    // Schema 2 added worldExpansions; schema 3 added paintedStyle.
+    public const int CurrentSchemaVersion = 3;
 
     public static bool IsSupportedSchemaVersion(int schemaVersion) =>
         schemaVersion is >= MinimumSupportedSchemaVersion and <= CurrentSchemaVersion;
