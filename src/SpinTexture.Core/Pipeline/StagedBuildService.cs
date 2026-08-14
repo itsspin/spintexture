@@ -147,6 +147,7 @@ public sealed class StagedBuildService
         ArgumentNullException.ThrowIfNull(request.Paths);
         ArgumentNullException.ThrowIfNull(request.Options);
         ArgumentNullException.ThrowIfNull(request.Items);
+        WorldExpansionSelectionPolicy.Validate(request.Options);
         if (request.Items.Count == 0)
         {
             throw new ArgumentException("A staged build must contain at least one install artifact.", nameof(request));
@@ -809,7 +810,7 @@ public sealed class StagedBuildService
         string resumeOperationKey,
         string directory)
     {
-        if (checkpoint.SchemaVersion != StagedBuildCheckpoint.CurrentSchemaVersion
+        if (!StagedBuildCheckpoint.IsSupportedSchemaVersion(checkpoint.SchemaVersion)
             || !checkpoint.BuildId.Equals(Path.GetFileName(directory), StringComparison.Ordinal)
             || !PathGuard.SamePath(checkpoint.InstallPath, paths.InstallPath)
             || checkpoint.RequireAllItems != requireAllItems
@@ -833,6 +834,13 @@ public sealed class StagedBuildService
             throw new InvalidDataException("The staged-build checkpoint has invalid upscale options.");
         }
         TextureOverridePolicy.ValidateAll(checkpoint.Options.TextureOverrides);
+        WorldExpansionSelectionPolicy.Validate(checkpoint.Options);
+        if (checkpoint.SchemaVersion == StagedBuildCheckpoint.MinimumSupportedSchemaVersion
+            && checkpoint.Options.WorldExpansions is not null)
+        {
+            throw new InvalidDataException(
+                "A schema-2 staged-build checkpoint cannot carry a World expansion selection.");
+        }
 
         if (!double.IsFinite(checkpoint.ActiveDurationSeconds)
             || checkpoint.ActiveDurationSeconds < 0

@@ -90,6 +90,15 @@ public static class StagedBuildEstimateHistory
             return false;
         }
 
+        if (WorldExpansionSelectionPolicy.SupportsSelection(requested.Scope)
+            && historical.WorldExpansions != requested.WorldExpansions)
+        {
+            // Null is intentionally its own legacy "all detected" identity.
+            // An explicit bit set must match exactly so a narrow World build
+            // never borrows the timing or size of a different era selection.
+            return false;
+        }
+
         if (requested.Scope != AssetScope.SelectedZone)
         {
             return true;
@@ -117,9 +126,15 @@ public static class StagedBuildEstimateHistory
 
             var manifest = ReadJson<BuildManifest>(manifestPath);
             var report = ReadJson<TextureBuildReport>(reportPath);
+            if (manifest?.Options is not null)
+            {
+                WorldExpansionSelectionPolicy.Validate(manifest.Options);
+            }
             if (manifest is null
                 || report is null
-                || manifest.SchemaVersion != BuildManifest.CurrentSchemaVersion
+                || !BuildManifest.IsSupportedSchemaVersion(manifest.SchemaVersion)
+                || (manifest.SchemaVersion == BuildManifest.MinimumSupportedSchemaVersion
+                    && manifest.Options?.WorldExpansions is not null)
                 || report.SchemaVersion is < OldestSupportedReportSchema
                     or > TextureBuildReport.CurrentSchemaVersion
                 || string.IsNullOrWhiteSpace(manifest.BuildId)

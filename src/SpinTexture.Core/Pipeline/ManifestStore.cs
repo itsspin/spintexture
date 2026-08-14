@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using SpinTexture.Core.Models;
 
 namespace SpinTexture.Core.Pipeline;
 
@@ -24,10 +25,21 @@ public sealed class ManifestStore
         CancellationToken cancellationToken = default)
     {
         var manifest = await ReadAsync<BuildManifest>(path, cancellationToken).ConfigureAwait(false);
-        if (manifest.SchemaVersion != BuildManifest.CurrentSchemaVersion)
+        if (!BuildManifest.IsSupportedSchemaVersion(manifest.SchemaVersion))
         {
             throw new InvalidDataException($"Unsupported build manifest schema {manifest.SchemaVersion}.");
         }
+        if (manifest.Options is null)
+        {
+            throw new InvalidDataException("The build manifest has no upscale options.");
+        }
+        if (manifest.SchemaVersion == BuildManifest.MinimumSupportedSchemaVersion
+            && manifest.Options.WorldExpansions is not null)
+        {
+            throw new InvalidDataException(
+                "A schema-1 build manifest cannot carry a World expansion selection.");
+        }
+        WorldExpansionSelectionPolicy.Validate(manifest.Options);
 
         return manifest;
     }

@@ -201,6 +201,311 @@ internal static class SelectedPackSwitchSelfTests
                 DeleteTree(root);
             }
         }
+
+        await TestSameArchiveStyleReplacementAsync(cancellationToken).ConfigureAwait(false);
+        await TestFalseLauncherRevertDoesNotRetireRestoreTrackingAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task TestSameArchiveStyleReplacementAsync(
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-style-replacement-{Guid.NewGuid():N}");
+        var installPath = Path.Combine(root, "EverQuest");
+        var workspacePath = Path.Combine(root, "Workspace");
+        Directory.CreateDirectory(installPath);
+
+        try
+        {
+            var paths = new ProjectPaths(installPath, workspacePath);
+            var original = "verified-vanilla-blackburrow"u8.ToArray();
+            var painted = "graphic-painted-blackburrow"u8.ToArray();
+            var textureHd = "pbrify-span-v4-blackburrow"u8.ToArray();
+            var archivePath = Path.Combine(installPath, "blackburrow.s3d");
+            await File.WriteAllBytesAsync(archivePath, original, cancellationToken)
+                .ConfigureAwait(false);
+
+            var paintedPack = await CreatePackAsync(
+                    paths,
+                    "build-painted-style-replacement-test",
+                    new UpscaleOptions(
+                        TexturePreset.Illustrated,
+                        AssetScope.SelectedZone,
+                        2048,
+                        GenerateMipMaps: true,
+                        InstallAfterBuild: false,
+                        SelectedZone: "blackburrow",
+                        PaintedTheme: PaintedTheme.ClassicPainted),
+                    "blackburrow.s3d",
+                    painted,
+                    () => { },
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var textureHdPack = await CreatePackAsync(
+                    paths,
+                    "build-texture-hd-style-replacement-test",
+                    new UpscaleOptions(
+                        TexturePreset.ClassicHd,
+                        AssetScope.SelectedZone,
+                        2048,
+                        GenerateMipMaps: true,
+                        InstallAfterBuild: false,
+                        SelectedZone: "blackburrow"),
+                    "blackburrow.s3d",
+                    textureHd,
+                    () => { },
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            var store = new ManifestStore();
+            var transactions = new InstallTransactionService(
+                store,
+                new AtomicFileOperations(),
+                ensureGameStopped: _ => { });
+            var health = new InstallHealthService(store);
+            var catalog = new StagedPackCatalogService(store);
+            var workflow = new TexturePackWorkflow(
+                clientClosedGuard: () => { },
+                installTransactionService: transactions,
+                manifestStore: store,
+                installHealthService: health,
+                stagedPackCatalogService: catalog,
+                stagedPackComposer: new StagedPackComposer(catalog, store));
+
+            await workflow.ApplySelectedStagedPacksAsync(
+                    paths,
+                    [paintedPack.ManifestPath],
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            AssertSequenceEqual(
+                painted,
+                await File.ReadAllBytesAsync(archivePath, cancellationToken).ConfigureAwait(false),
+                "painted style should be active before explicit restore");
+
+            await workflow.RestoreLatestAsync(paths, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            AssertSequenceEqual(
+                original,
+                await File.ReadAllBytesAsync(archivePath, cancellationToken).ConfigureAwait(false),
+                "explicit vanilla restore must remove every painted byte");
+
+            var textureHdApply = await workflow.ApplySelectedStagedPacksAsync(
+                    paths,
+                    [textureHdPack.ManifestPath],
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            AssertSequenceEqual(
+                textureHd,
+                await File.ReadAllBytesAsync(archivePath, cancellationToken).ConfigureAwait(false),
+                "Texture HD install after vanilla restore must contain only Texture HD bytes");
+            AssertEqual(
+                TexturePreset.ClassicHd,
+                (await store.ReadBuildManifestAsync(
+                        textureHdApply.Manifest.BuildManifestPath,
+                        cancellationToken)
+                    .ConfigureAwait(false)).Options.Preset,
+                "active replacement manifest style");
+            AssertEqual(1, textureHdApply.Manifest.Entries.Count, "active replacement artifact count");
+
+            // Also exercise the normal one-click pack switch. It must restore
+            // the managed vanilla source before applying the replacement even
+            // though both styles target the exact same archive.
+            var directPaintedApply = await workflow.ApplySelectedStagedPacksAsync(
+                    paths,
+                    [paintedPack.ManifestPath],
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            AssertSequenceEqual(
+                painted,
+                await File.ReadAllBytesAsync(archivePath, cancellationToken).ConfigureAwait(false),
+                "direct Texture HD to painted replacement");
+            Assert(
+                !directPaintedApply.ApplyId.Equals(
+                    textureHdApply.ApplyId,
+                    StringComparison.OrdinalIgnoreCase),
+                "a conflicting style replacement must use a new full transaction");
+
+            var directTextureHdApply = await workflow.ApplySelectedStagedPacksAsync(
+                    paths,
+                    [textureHdPack.ManifestPath],
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            AssertSequenceEqual(
+                textureHd,
+                await File.ReadAllBytesAsync(archivePath, cancellationToken).ConfigureAwait(false),
+                "direct painted to Texture HD replacement must not retain painted bytes");
+            AssertEqual(
+                Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(original)),
+                directTextureHdApply.Manifest.Entries.Single().OriginalSha256!,
+                "replacement transaction must keep vanilla source provenance");
+            AssertEqual(
+                Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(textureHd)),
+                directTextureHdApply.Manifest.Entries.Single().InstalledSha256,
+                "replacement transaction must identify only Texture HD output");
+
+            await workflow.RestoreLatestAsync(paths, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            AssertSequenceEqual(
+                original,
+                await File.ReadAllBytesAsync(archivePath, cancellationToken).ConfigureAwait(false),
+                "final style-replacement restore");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                DeleteTree(root);
+            }
+        }
+    }
+
+    private static async Task TestFalseLauncherRevertDoesNotRetireRestoreTrackingAsync(
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-false-launcher-revert-{Guid.NewGuid():N}");
+        var installPath = Path.Combine(root, "EverQuest");
+        var workspacePath = Path.Combine(root, "Workspace");
+        Directory.CreateDirectory(installPath);
+
+        try
+        {
+            var paths = new ProjectPaths(installPath, workspacePath);
+            var originalPaintedTarget = "original-blackburrow-archive"u8.ToArray();
+            var paintedOutput = "larger-graphic-painted-blackburrow-archive"u8.ToArray();
+            var originalHdTarget = "original-qeynos-archive"u8.ToArray();
+            var hdOutput = "larger-pbrify-span-v4-qeynos-archive"u8.ToArray();
+            var paintedTargetPath = Path.Combine(installPath, "blackburrow.s3d");
+            var hdTargetPath = Path.Combine(installPath, "qeynos.s3d");
+            await File.WriteAllBytesAsync(
+                    paintedTargetPath,
+                    originalPaintedTarget,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await File.WriteAllBytesAsync(hdTargetPath, originalHdTarget, cancellationToken)
+                .ConfigureAwait(false);
+
+            var paintedPack = await CreatePackAsync(
+                    paths,
+                    "build-painted-false-revert-test",
+                    new UpscaleOptions(
+                        TexturePreset.Illustrated,
+                        AssetScope.SelectedZone,
+                        2048,
+                        GenerateMipMaps: true,
+                        InstallAfterBuild: false,
+                        SelectedZone: "blackburrow",
+                        PaintedTheme: PaintedTheme.ClassicPainted),
+                    "blackburrow.s3d",
+                    paintedOutput,
+                    () => { },
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var hdPack = await CreatePackAsync(
+                    paths,
+                    "build-hd-false-revert-test",
+                    new UpscaleOptions(
+                        TexturePreset.ClassicHd,
+                        AssetScope.SelectedZone,
+                        2048,
+                        GenerateMipMaps: true,
+                        InstallAfterBuild: false,
+                        SelectedZone: "qeynos"),
+                    "qeynos.s3d",
+                    hdOutput,
+                    () => { },
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            var store = new ManifestStore();
+            var health = new InstallHealthService(store);
+            var catalog = new StagedPackCatalogService(store);
+            var workflow = new TexturePackWorkflow(
+                clientClosedGuard: () => { },
+                installTransactionService: new InstallTransactionService(
+                    store,
+                    new AtomicFileOperations(),
+                    ensureGameStopped: _ => { }),
+                manifestStore: store,
+                installHealthService: health,
+                stagedPackCatalogService: catalog,
+                stagedPackComposer: new StagedPackComposer(catalog, store));
+
+            var paintedApply = await workflow.ApplySelectedStagedPacksAsync(
+                    paths,
+                    [paintedPack.ManifestPath],
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+
+            // Simulate an incomplete or external launcher repair whose bytes
+            // happen to have the original archive's length. The fast audit may
+            // use that unique length as a status hint, but it must never commit
+            // a restore marker without the exact original SHA-256.
+            var sameLengthForeignBytes = Enumerable
+                .Repeat((byte)'X', originalPaintedTarget.Length)
+                .ToArray();
+            Assert(
+                !sameLengthForeignBytes.AsSpan().SequenceEqual(originalPaintedTarget),
+                "same-length tamper fixture must differ from original");
+            await File.WriteAllBytesAsync(
+                    paintedTargetPath,
+                    sameLengthForeignBytes,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            AssertEqual(
+                InstallHealthState.RevertedToOriginal,
+                (await health.AuditLatestFastAsync(paths, cancellationToken)
+                    .ConfigureAwait(false)).State,
+                "fast unique-length launcher-revert hint");
+            AssertEqual(
+                InstallHealthState.MixedOrModified,
+                (await health.AuditLatestAsync(paths, cancellationToken)
+                    .ConfigureAwait(false)).State,
+                "exact launcher-revert verification");
+
+            await AssertThrowsAsync<InvalidOperationException>(
+                    () => workflow.ApplySelectedStagedPacksAsync(
+                        paths,
+                        [hdPack.ManifestPath],
+                        cancellationToken: cancellationToken),
+                    "same-length modified bytes must block transaction retirement")
+                .ConfigureAwait(false);
+
+            var retainedManifest = await store.ReadInstallManifestAsync(
+                    paintedApply.InstallManifestPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            AssertEqual(
+                InstallTransactionState.Applied,
+                retainedManifest.State,
+                "failed exact retirement keeps the active restore transaction");
+            Assert(
+                !File.Exists(Path.Combine(
+                    Path.GetDirectoryName(paintedApply.InstallManifestPath)!,
+                    "restore-complete.json")),
+                "failed exact retirement must not write a restore-complete marker");
+            AssertSequenceEqual(
+                sameLengthForeignBytes,
+                await File.ReadAllBytesAsync(paintedTargetPath, cancellationToken)
+                    .ConfigureAwait(false),
+                "blocked retirement leaves externally modified archive untouched");
+            AssertSequenceEqual(
+                originalHdTarget,
+                await File.ReadAllBytesAsync(hdTargetPath, cancellationToken)
+                    .ConfigureAwait(false),
+                "blocked retirement must not install the disjoint Texture HD archive");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                DeleteTree(root);
+            }
+        }
     }
 
     private static Task<StagedBuildResult> CreatePackAsync(

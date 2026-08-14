@@ -16,7 +16,14 @@ internal sealed record StagedBuildCheckpoint(
     IReadOnlyList<StagedBuildCheckpointItem> Items,
     IReadOnlyList<StagedBuildCheckpointArtifact> CompletedArtifacts)
 {
-    public const int CurrentSchemaVersion = 2;
+    // Schema 3 records the optional World-expansion build identity. Schema-2
+    // checkpoints remain readable; null selections omit their JSON property,
+    // preserving the exact legacy plan hash for interrupted existing builds.
+    public const int MinimumSupportedSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
+
+    public static bool IsSupportedSchemaVersion(int schemaVersion) =>
+        schemaVersion is >= MinimumSupportedSchemaVersion and <= CurrentSchemaVersion;
 }
 
 internal sealed record StagedBuildCheckpointItem(

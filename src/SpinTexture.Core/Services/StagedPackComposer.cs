@@ -504,8 +504,7 @@ public sealed class StagedPackComposer
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            // BuildManifest schema 1 is intentionally retained so the existing
-            // transaction installer can consume a composition. Options is a
+            // The build manifest uses the current schema. Options remains a
             // compatibility value only; composition.json carries every
             // component's real (possibly mixed) options and provenance.
             var manifest = new BuildManifest(

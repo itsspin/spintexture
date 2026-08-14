@@ -1,6 +1,11 @@
+using SpinTexture.Core.Models;
+
 namespace SpinTexture.Core.Services;
 
-public sealed record ZoneAssetSet(string Name, IReadOnlyList<string> WorldArchives);
+public sealed record ZoneAssetSet(
+    string Name,
+    IReadOnlyList<string> WorldArchives,
+    WorldExpansion Expansion);
 
 public static class ZoneCatalog
 {
@@ -67,7 +72,10 @@ public static class ZoneCatalog
 
         return zoneNames
             .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
-            .Select(name => new ZoneAssetSet(name, FindWorldArchives(files, name)))
+            .Select(name => new ZoneAssetSet(
+                name,
+                FindWorldArchives(files, name),
+                WorldExpansionCatalog.Classify(name)))
             .Where(zone => zone.WorldArchives.Count != 0)
             .ToArray();
     }

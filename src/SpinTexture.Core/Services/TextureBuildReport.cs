@@ -269,7 +269,7 @@ public sealed record TextureBuildReport(
     TextureBuildStatistics Statistics)
 {
     public const int CurrentSchemaVersion = 3;
-    public const int CurrentIllustratedProfileRevision = 2;
+    public const int CurrentIllustratedProfileRevision = 3;
     public const int CurrentRusticPaintedProfileRevision = 1;
 
     public static int GetCurrentPaintedProfileRevision(TexturePreset preset) => preset switch

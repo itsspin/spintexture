@@ -134,6 +134,7 @@ public sealed class TexturePackWorkflow
                 "A painted theme may be selected only with Graphic Painted Fantasy.");
         }
         TextureOverridePolicy.ValidateAll(options.TextureOverrides);
+        WorldExpansionSelectionPolicy.Validate(options);
 
         var originalSources = await PrepareBuildOriginalSourcesAsync(
                 paths,
@@ -163,7 +164,9 @@ public sealed class TexturePackWorkflow
             counter,
             progress,
             previewCollector,
-            clampArchivePaths: archiveScopes.CharacterAndEquipmentArchives,
+            clampArchivePaths: SelectCharacterAndEquipmentArchives(
+                archiveScopes,
+                options),
             filterCharacterEquipmentEntries:
                 options.Scope is AssetScope.CharactersAndEquipmentOnly
                     or AssetScope.WorldCharactersAndEquipment);
@@ -645,7 +648,9 @@ public sealed class TexturePackWorkflow
             counter,
             progress,
             previewCollector,
-            clampArchivePaths: archiveScopes.CharacterAndEquipmentArchives,
+            clampArchivePaths: SelectCharacterAndEquipmentArchives(
+                archiveScopes,
+                repairOptions),
             filterCharacterEquipmentEntries:
                 repairOptions.Scope is AssetScope.CharactersAndEquipmentOnly
                     or AssetScope.WorldCharactersAndEquipment,
@@ -1279,7 +1284,9 @@ public sealed class TexturePackWorkflow
             counter,
             progress,
             previewCollector,
-            clampArchivePaths: archiveScopes.CharacterAndEquipmentArchives,
+            clampArchivePaths: SelectCharacterAndEquipmentArchives(
+                archiveScopes,
+                baseline.Options),
             filterCharacterEquipmentEntries:
                 baseline.Options.Scope is AssetScope.CharactersAndEquipmentOnly
                     or AssetScope.WorldCharactersAndEquipment,
@@ -1301,7 +1308,9 @@ public sealed class TexturePackWorkflow
                 counter,
                 progress,
                 previewCollector,
-                clampArchivePaths: archiveScopes.CharacterAndEquipmentArchives,
+                clampArchivePaths: SelectCharacterAndEquipmentArchives(
+                    archiveScopes,
+                    baseline.Options),
                 filterCharacterEquipmentEntries:
                     baseline.Options.Scope is AssetScope.CharactersAndEquipmentOnly
                         or AssetScope.WorldCharactersAndEquipment,
@@ -2451,6 +2460,35 @@ public sealed class TexturePackWorkflow
     {
         var installManifestPath = health.InstallManifestPath
             ?? throw new InvalidDataException("The reverted install health report did not identify its manifest.");
+
+        // Callers use the fast audit so ordinary active-pack checks can avoid
+        // hashing thousands of large archives. That audit may identify an
+        // original by its unique length, which is useful as a read-only status
+        // hint but is not strong enough to retire the only managed restore
+        // transaction. Revalidate every claimed original by SHA-256 before
+        // committing the restore marker. Otherwise an externally modified file
+        // with the original length could become untracked just before the next
+        // pack's exact apply preflight rejects it.
+        var exactHealth = await installHealthService
+            .AuditLatestAsync(paths, cancellationToken)
+            .ConfigureAwait(false);
+        if (exactHealth.State != InstallHealthState.RevertedToOriginal
+            || exactHealth.InstallManifestPath is null
+            || !PathGuard.SamePath(
+                exactHealth.InstallManifestPath,
+                installManifestPath)
+            || !string.Equals(
+                exactHealth.ApplyId,
+                health.ApplyId,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "SpinTexture could not SHA-256 verify that every previously installed archive was restored to its original bytes. "
+                + "The existing restore transaction was kept active; finish the client update or use Restore before installing another pack.");
+        }
+
+        health = exactHealth;
+        installManifestPath = exactHealth.InstallManifestPath;
         var safeManifestPath = PathGuard.EnsurePathUnderRoot(paths.BackupPath, installManifestPath);
         var manifest = await manifestStore
             .ReadInstallManifestAsync(safeManifestPath, cancellationToken)
@@ -2502,8 +2540,14 @@ public sealed class TexturePackWorkflow
         UpscaleOptions options) => SelectArchives(installPath, options);
 
     internal static IReadOnlyList<string> ResolveCharacterAndEquipmentArchives(
-        string installPath) => DiscoverArchiveScopes(installPath)
-        .CharacterAndEquipmentArchives;
+        string installPath,
+        UpscaleOptions? options = null)
+    {
+        var scopes = DiscoverArchiveScopes(installPath);
+        return options is null
+            ? scopes.LegacyCharacterAndEquipmentArchives
+            : SelectCharacterAndEquipmentArchives(scopes, options);
+    }
 
     private static ArchiveScopes DiscoverArchiveScopes(string installPath)
     {
@@ -2512,36 +2556,78 @@ public sealed class TexturePackWorkflow
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         var zones = ZoneCatalog.Discover(installPath);
-        var worldArchives = zones.SelectMany(zone => zone.WorldArchives)
-            .Concat(allArchives.Where(IsSharedWorldArchive))
+        var zoneArchives = zones.SelectMany(zone => zone.WorldArchives)
             .Select(Path.GetFullPath)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        var characterAndEquipmentArchives = CharacterEquipmentArchiveCatalog
+        var sharedWorldArchives = allArchives
+            .Where(IsSharedWorldArchive)
+            // Names such as skyfire and skyshrine begin with "sky" but are
+            // complete zones. Keep every discovered zone archive out of the
+            // shared bucket so an unselected era can never leak back in.
+            .Except(zoneArchives, StringComparer.OrdinalIgnoreCase)
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var legacySharedWorldArchives = allArchives
+            .Where(IsLegacySharedWorldArchive)
+            .Except(zoneArchives, StringComparer.OrdinalIgnoreCase)
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var legacyWorldArchives = zoneArchives
+            .Concat(legacySharedWorldArchives)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var discoveredCharacterAndEquipmentArchives = CharacterEquipmentArchiveCatalog
             .Discover(installPath, allArchives)
-            .Except(worldArchives, StringComparer.OrdinalIgnoreCase)
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var legacyCharacterAndEquipmentArchives = discoveredCharacterAndEquipmentArchives
+            // Preserve the pre-expansion-filter partition for Characters-only
+            // packs and interrupted legacy builds. New explicit World subsets
+            // still use the stricter shared boundary below.
+            .Except(legacyWorldArchives, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var explicitCharacterAndEquipmentArchives = discoveredCharacterAndEquipmentArchives
+            // Explicit World subsets use the safe shared boundary. A zone-named
+            // character sidecar such as skyfire_chr is therefore character
+            // content in a combined build, never an unselected World dependency.
+            .Except(zoneArchives, StringComparer.OrdinalIgnoreCase)
+            .Except(sharedWorldArchives, StringComparer.OrdinalIgnoreCase)
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
         return new ArchiveScopes(
             allArchives,
             zones,
-            worldArchives,
-            characterAndEquipmentArchives);
+            legacyWorldArchives,
+            sharedWorldArchives,
+            legacyCharacterAndEquipmentArchives,
+            explicitCharacterAndEquipmentArchives);
     }
 
     private static IReadOnlyList<string> SelectArchives(
         ArchiveScopes scopes,
         UpscaleOptions options)
     {
+        WorldExpansionSelectionPolicy.Validate(options);
         IEnumerable<string> selected = options.Scope switch
         {
             AssetScope.SelectedZone => SelectZone(scopes.Zones, options.SelectedZone),
-            AssetScope.WorldOnly => scopes.WorldArchives,
-            AssetScope.CharactersAndEquipmentOnly => scopes.CharacterAndEquipmentArchives,
-            AssetScope.WorldCharactersAndEquipment => scopes.WorldArchives
-                .Concat(scopes.CharacterAndEquipmentArchives),
+            AssetScope.WorldOnly => SelectWorldArchives(scopes, options.WorldExpansions),
+            AssetScope.CharactersAndEquipmentOnly =>
+                scopes.LegacyCharacterAndEquipmentArchives,
+            AssetScope.WorldCharactersAndEquipment => SelectWorldArchives(
+                    scopes,
+                    options.WorldExpansions)
+                .Concat(SelectCharacterAndEquipmentArchives(scopes, options)),
             AssetScope.AllSafeTextures => scopes.AllArchives,
             AssetScope.SpellEffectsOnly => [],
             _ => throw new ArgumentOutOfRangeException(nameof(options))
@@ -2552,6 +2638,52 @@ public sealed class TexturePackWorkflow
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    private static IReadOnlyList<string> SelectCharacterAndEquipmentArchives(
+        ArchiveScopes scopes,
+        UpscaleOptions options) =>
+        options.Scope == AssetScope.WorldCharactersAndEquipment
+            && options.WorldExpansions is not null
+                ? scopes.ExplicitCharacterAndEquipmentArchives
+                : scopes.LegacyCharacterAndEquipmentArchives;
+
+    private static IEnumerable<string> SelectWorldArchives(
+        ArchiveScopes scopes,
+        WorldExpansion? selectedExpansions)
+    {
+        if (selectedExpansions is null)
+        {
+            // Exact compatibility behavior for manifests and callers written
+            // before expansion selection existed.
+            return scopes.LegacyWorldArchives;
+        }
+
+        var selected = selectedExpansions.Value;
+        var detected = scopes.Zones.Aggregate(
+            WorldExpansion.None,
+            (current, zone) => current | zone.Expansion);
+        var missing = selected & ~detected;
+        if (missing != WorldExpansion.None)
+        {
+            var missingNames = WorldExpansionCatalog.OrderedGroups
+                .Where(expansion => (missing & expansion) == expansion)
+                .Select(WorldExpansionCatalog.GetDisplayName);
+            throw new InvalidOperationException(
+                $"The selected World expansion group(s) were not found in this EverQuest installation: {string.Join(", ", missingNames)}. Analyze the matching client or change the World selection.");
+        }
+
+        var selectedZoneArchives = scopes.Zones
+            .Where(zone => (selected & zone.Expansion) == zone.Expansion)
+            .SelectMany(zone => zone.WorldArchives)
+            .ToArray();
+        if (selectedZoneArchives.Length == 0)
+        {
+            throw new InvalidOperationException(
+                "None of the selected World expansions have zone archives in this EverQuest installation. Analyze the client again and select a detected expansion.");
+        }
+
+        return selectedZoneArchives.Concat(scopes.SharedWorldArchives);
     }
 
     private static IEnumerable<string> SelectZone(
@@ -2581,17 +2713,35 @@ public sealed class TexturePackWorkflow
             || name.StartsWith("trees", StringComparison.OrdinalIgnoreCase)
             || name.StartsWith("terrain", StringComparison.OrdinalIgnoreCase)
             || name.StartsWith("grass", StringComparison.OrdinalIgnoreCase)
-            || (name.StartsWith("sky", StringComparison.OrdinalIgnoreCase)
-                && !(extension.Equals(".eqg", StringComparison.OrdinalIgnoreCase)
-                    && name.Length == 3))
+            // sky.s3d is the audited shared legacy sky archive. Prefix matching
+            // is unsafe here: complete zones such as Skyfire and Skyshrine,
+            // including future suffix variants, must remain era-filtered.
+            || (name.Equals("sky", StringComparison.OrdinalIgnoreCase)
+                && extension.Equals(".s3d", StringComparison.OrdinalIgnoreCase))
             || name.StartsWith("props", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsLegacySharedWorldArchive(string path)
+    {
+        if (IsSharedWorldArchive(path))
+        {
+            return true;
+        }
+
+        var name = Path.GetFileNameWithoutExtension(path);
+        var extension = Path.GetExtension(path);
+        return name.StartsWith("sky", StringComparison.OrdinalIgnoreCase)
+            && !(extension.Equals(".eqg", StringComparison.OrdinalIgnoreCase)
+                && name.Length == 3);
     }
 
     private sealed record ArchiveScopes(
         IReadOnlyList<string> AllArchives,
         IReadOnlyList<ZoneAssetSet> Zones,
-        IReadOnlyList<string> WorldArchives,
-        IReadOnlyList<string> CharacterAndEquipmentArchives);
+        IReadOnlyList<string> LegacyWorldArchives,
+        IReadOnlyList<string> SharedWorldArchives,
+        IReadOnlyList<string> LegacyCharacterAndEquipmentArchives,
+        IReadOnlyList<string> ExplicitCharacterAndEquipmentArchives);
 
     internal sealed record ManagedOriginalSource(
         string BackupPath,
