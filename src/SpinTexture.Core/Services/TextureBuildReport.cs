@@ -311,6 +311,7 @@ internal sealed class TextureBuildCounter
     private int preserved;
     private int reused;
     private int fallback;
+    private int suppressedWarnings;
     private long sourceBytes;
     private long enhancedBytes;
 
@@ -376,6 +377,10 @@ internal sealed class TextureBuildCounter
             {
                 warnings.Add(warning);
             }
+            else
+            {
+                suppressedWarnings++;
+            }
         }
     }
 
@@ -383,6 +388,12 @@ internal sealed class TextureBuildCounter
     {
         lock (gate)
         {
+            var reportedWarnings = suppressedWarnings > 0
+                ? warnings.Append(
+                        $"{suppressedWarnings:N0} additional warning(s) were suppressed after the first 100; "
+                        + "per-reason preservation counts above remain complete.")
+                    .ToArray()
+                : warnings.ToArray();
             return new TextureBuildStatistics(
                 discovered,
                 enhanced,
@@ -390,7 +401,7 @@ internal sealed class TextureBuildCounter
                 sourceBytes,
                 enhancedBytes,
                 new Dictionary<string, int>(reasons, StringComparer.OrdinalIgnoreCase),
-                warnings.ToArray())
+                reportedWarnings)
             {
                 ReusedTextures = reused,
                 FallbackTextures = fallback
