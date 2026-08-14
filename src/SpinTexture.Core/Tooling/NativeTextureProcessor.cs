@@ -514,14 +514,14 @@ public sealed class NativeTextureProcessor
         PreparedColorJob job,
         TextureUpscaleModelSelection? specializedModel)
     {
-        if (job.EffectivePreset == TexturePreset.ClassicHd
+        if (ShouldUseTextureSpecializedReconstruction(job.EffectivePreset)
             && Volatile.Read(ref textureUpscalerUnavailable) == 0
             && specializedModel is not null)
         {
             return new NeuralBatchKey(
                 NeuralWorkerKind.TextureSpecialized,
                 specializedModel.Name,
-                TexturePreset.ClassicHd,
+                job.EffectivePreset,
                 UpscaylCommandBuilder.ModelScale,
                 job.Request.RealEsrganTileSize);
         }
@@ -537,6 +537,32 @@ public sealed class NativeTextureProcessor
             NeuralWorkerKind.LegacyRealEsrgan,
             model.Name,
             workerPreset,
+            job.Dimensions.RequiredNeuralScale,
+            job.Request.RealEsrganTileSize);
+    }
+
+    private static bool ShouldUseTextureSpecializedReconstruction(TexturePreset preset) =>
+        preset is TexturePreset.ClassicHd
+            or TexturePreset.Illustrated;
+
+    private static bool IsPaintedPreset(TexturePreset preset) =>
+        preset is TexturePreset.Illustrated or TexturePreset.RusticPainted;
+
+    private NeuralBatchKey CreateLegacyPaintedFallbackKey(PreparedColorJob job)
+    {
+        if (!IsPaintedPreset(job.EffectivePreset))
+        {
+            throw new InvalidOperationException(
+                "Only a painted texture can enter the legacy painted reconstruction fallback.");
+        }
+
+        var model = _realEsrgan.ResolveModel(
+            _tools.RealEsrganModelsPath!,
+            job.EffectivePreset);
+        return new NeuralBatchKey(
+            NeuralWorkerKind.LegacyRealEsrgan,
+            model.Name,
+            job.EffectivePreset,
             job.Dimensions.RequiredNeuralScale,
             job.Request.RealEsrganTileSize);
     }
@@ -572,13 +598,15 @@ public sealed class NativeTextureProcessor
         if (key.WorkerKind == NeuralWorkerKind.TextureSpecialized
             && Volatile.Read(ref textureUpscalerUnavailable) != 0)
         {
-            await ExecuteFallbackGroupsAsync(
-                jobs,
-                outcomes,
-                batchDirectory,
-                executionState,
-                nativeProgress,
-                cancellationToken).ConfigureAwait(false);
+            await ExecuteTextureSpecializedFallbackGroupsAsync(
+                    jobs,
+                    key.WorkerPreset,
+                    outcomes,
+                    batchDirectory,
+                    executionState,
+                    nativeProgress,
+                    cancellationToken)
+                .ConfigureAwait(false);
             return;
         }
 
@@ -638,14 +666,18 @@ public sealed class NativeTextureProcessor
             Interlocked.Exchange(ref textureUpscalerUnavailable, 1);
             nativeProgress?.Report(new NativeOutputLine(
                 NativeOutputStream.StandardError,
-                "The game-texture batch worker could not run; retrying this batch with the bundled faithful ESRNet model."));
-            await ExecuteFallbackGroupsAsync(
-                jobs,
-                outcomes,
-                batchDirectory,
-                executionState,
-                nativeProgress,
-                cancellationToken).ConfigureAwait(false);
+                IsPaintedPreset(key.WorkerPreset)
+                    ? "The game-texture batch worker could not run; retrying this painted batch with the bundled illustrated model."
+                    : "The game-texture batch worker could not run; retrying this batch with the bundled faithful ESRNet model."));
+            await ExecuteTextureSpecializedFallbackGroupsAsync(
+                    jobs,
+                    key.WorkerPreset,
+                    outcomes,
+                    batchDirectory,
+                    executionState,
+                    nativeProgress,
+                    cancellationToken)
+                .ConfigureAwait(false);
             return;
         }
         catch (NativeProcessException) when (key.WorkerPreset == TexturePreset.MaximumDetail)
@@ -668,14 +700,34 @@ public sealed class NativeTextureProcessor
         {
             nativeProgress?.Report(new NativeOutputLine(
                 NativeOutputStream.StandardError,
-                $"The {key.WorkerPreset} batch returned unusable output; retrying this batch with the faithful ESRNet model. {exception.Message}"));
-            await ExecuteFallbackGroupsAsync(
-                jobs,
-                outcomes,
-                batchDirectory,
-                executionState,
-                nativeProgress,
-                cancellationToken).ConfigureAwait(false);
+                key.WorkerKind == NeuralWorkerKind.TextureSpecialized
+                && IsPaintedPreset(key.WorkerPreset)
+                    ? $"The texture-specialized {key.WorkerPreset} batch returned unusable output; retrying with the bundled illustrated model. {exception.Message}"
+                    : $"The {key.WorkerPreset} batch returned unusable output; retrying this batch with the faithful ESRNet model. {exception.Message}"));
+            if (key.WorkerKind == NeuralWorkerKind.TextureSpecialized
+                && IsPaintedPreset(key.WorkerPreset))
+            {
+                await ExecuteLegacyPaintedFallbackGroupsAsync(
+                        jobs,
+                        outcomes,
+                        batchDirectory,
+                        executionState,
+                        nativeProgress,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await ExecuteFallbackGroupsAsync(
+                        jobs,
+                        outcomes,
+                        batchDirectory,
+                        executionState,
+                        nativeProgress,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
             return;
         }
         catch (Exception exception) when (IsPerTextureFailure(exception))
@@ -708,6 +760,7 @@ public sealed class NativeTextureProcessor
             return;
         }
 
+        var legacyPaintedRetries = new List<PreparedColorJob>();
         var faithfulRetries = new List<PreparedColorJob>();
         try
         {
@@ -732,10 +785,21 @@ public sealed class NativeTextureProcessor
                 }
                 else if (key.WorkerPreset != TexturePreset.Faithful)
                 {
-                    nativeProgress?.Report(new NativeOutputLine(
-                        NativeOutputStream.StandardError,
-                        $"{Path.GetFileName(job.Request.SourcePath)} failed the {key.WorkerPreset} fidelity gate; queued for the faithful ESRNet fallback batch. {completion.Error.Message}"));
-                    faithfulRetries.Add(job);
+                    if (key.WorkerKind == NeuralWorkerKind.TextureSpecialized
+                        && IsPaintedPreset(key.WorkerPreset))
+                    {
+                        nativeProgress?.Report(new NativeOutputLine(
+                            NativeOutputStream.StandardError,
+                            $"{Path.GetFileName(job.Request.SourcePath)} failed the texture-specialized {key.WorkerPreset} fidelity gate; queued for the bundled illustrated fallback batch. {completion.Error.Message}"));
+                        legacyPaintedRetries.Add(job);
+                    }
+                    else
+                    {
+                        nativeProgress?.Report(new NativeOutputLine(
+                            NativeOutputStream.StandardError,
+                            $"{Path.GetFileName(job.Request.SourcePath)} failed the {key.WorkerPreset} fidelity gate; queued for the faithful ESRNet fallback batch. {completion.Error.Message}"));
+                        faithfulRetries.Add(job);
+                    }
                 }
                 else
                 {
@@ -748,6 +812,17 @@ public sealed class NativeTextureProcessor
         finally
         {
             TryDeleteOwnedChildDirectory(batchDirectory, invocation.GroupDirectory, "neural-");
+        }
+
+        if (legacyPaintedRetries.Count > 0)
+        {
+            await ExecuteLegacyPaintedFallbackGroupsAsync(
+                legacyPaintedRetries,
+                outcomes,
+                batchDirectory,
+                executionState,
+                nativeProgress,
+                cancellationToken).ConfigureAwait(false);
         }
 
         if (faithfulRetries.Count > 0)
@@ -856,6 +931,64 @@ public sealed class NativeTextureProcessor
         foreach (var group in jobs
                      .OrderBy(job => job.RequestIndex)
                      .GroupBy(CreateFaithfulFallbackKey))
+        {
+            foreach (var chunk in ChunkNeuralJobs(group))
+            {
+                await ExecuteNeuralGroupAsync(
+                    chunk,
+                    group.Key,
+                    outcomes,
+                    batchDirectory,
+                    executionState,
+                    nativeProgress,
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task ExecuteTextureSpecializedFallbackGroupsAsync(
+        IReadOnlyList<PreparedColorJob> jobs,
+        TexturePreset requestedPreset,
+        NativeTextureProcessOutcome?[] outcomes,
+        string batchDirectory,
+        NeuralBatchExecutionState executionState,
+        IProgress<NativeOutputLine>? nativeProgress,
+        CancellationToken cancellationToken)
+    {
+        if (IsPaintedPreset(requestedPreset))
+        {
+            await ExecuteLegacyPaintedFallbackGroupsAsync(
+                    jobs,
+                    outcomes,
+                    batchDirectory,
+                    executionState,
+                    nativeProgress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        await ExecuteFallbackGroupsAsync(
+                jobs,
+                outcomes,
+                batchDirectory,
+                executionState,
+                nativeProgress,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task ExecuteLegacyPaintedFallbackGroupsAsync(
+        IReadOnlyList<PreparedColorJob> jobs,
+        NativeTextureProcessOutcome?[] outcomes,
+        string batchDirectory,
+        NeuralBatchExecutionState executionState,
+        IProgress<NativeOutputLine>? nativeProgress,
+        CancellationToken cancellationToken)
+    {
+        foreach (var group in jobs
+                     .OrderBy(job => job.RequestIndex)
+                     .GroupBy(CreateLegacyPaintedFallbackKey))
         {
             foreach (var chunk in ChunkNeuralJobs(group))
             {
@@ -1002,7 +1135,9 @@ public sealed class NativeTextureProcessor
         }
 
         var fidelity = CalculateFidelityMetrics(job.Decoded, cropped);
-        if (key.WorkerPreset is not (TexturePreset.Illustrated or TexturePreset.RusticPainted))
+        if (key.WorkerPreset is not (TexturePreset.Illustrated or TexturePreset.RusticPainted)
+            || (key.WorkerKind == NeuralWorkerKind.TextureSpecialized
+                && IsPaintedPreset(key.WorkerPreset)))
         {
             var anchored = cropped.AnchorVisibleChannelMeansFrom(job.Decoded);
             var anchoredFidelity = CalculateFidelityMetrics(job.Decoded, anchored.Image);
@@ -1023,20 +1158,83 @@ public sealed class NativeTextureProcessor
         }
 
         ValidateNeuralOutputForPreset(key.WorkerPreset, fidelity);
+        double? graphicPaintedScale = null;
         double? paintedThemeScale = null;
-        if (key.WorkerPreset == TexturePreset.Illustrated)
+        var illustratedFaithfulFallback = key.WorkerPreset == TexturePreset.Faithful
+            && job.EffectivePreset == TexturePreset.Illustrated;
+        GeneratedMipResult? mipResult = null;
+        if (key.WorkerPreset == TexturePreset.Illustrated || illustratedFaithfulFallback)
         {
-            var graphicPainted = cropped.ApplyGraphicPaintedFinish(
-                GetGraphicPaintedStrength(job.Request),
-                job.Request.WrapEdges);
-            ValidateGraphicPaintedOutput(CalculateFidelityMetrics(job.Decoded, graphicPainted));
-            var themed = ApplyValidatedPaintedTheme(
-                job.Decoded,
-                graphicPainted,
-                job.Request.Options.PaintedTheme,
-                GetPaintedThemeStrength(job.Request));
-            cropped = themed.Image;
-            paintedThemeScale = themed.StrengthScale;
+            var reconstructionStrengthScale = illustratedFaithfulFallback ? 0.62 : 1d;
+            var themeStrengthScale = illustratedFaithfulFallback ? 0.70 : 1d;
+            var reconstruction = cropped;
+            var requiresFinalValidation = RequiresFinalIllustratedDecodeValidation(
+                job.Request.Metadata,
+                job.Request.Classification,
+                job.PreserveAlphaCoverage);
+            var encodedCandidatePath = requiresFinalValidation
+                ? Path.Combine(
+                    job.OperationDirectory,
+                    $"illustrated-encoded-candidate{Path.GetExtension(job.Request.DestinationPath)}")
+                : job.Request.DestinationPath;
+            InvalidDataException? lastPaintedFailure = null;
+            double[] finishScales = [1d, 0.75d, 0.5d, 0.25d];
+            foreach (var finishScale in finishScales)
+            {
+                try
+                {
+                    var graphicPainted = reconstruction.ApplyGraphicPaintedFinish(
+                        GetGraphicPaintedStrength(job.Request, job.PreserveAlphaCoverage)
+                            * reconstructionStrengthScale
+                            * finishScale,
+                        job.Request.WrapEdges);
+                    ValidateGraphicPaintedOutput(
+                        CalculateFidelityMetrics(job.Decoded, graphicPainted));
+                    var themed = ApplyValidatedPaintedTheme(
+                        job.Decoded,
+                        graphicPainted,
+                        job.Request.Options.PaintedTheme,
+                        GetPaintedThemeStrength(job.Request, job.PreserveAlphaCoverage)
+                            * themeStrengthScale);
+                    cropped = themed.Image;
+                    var candidateMipResult = await EncodeCurrentImageAsync(
+                            cropped,
+                            encodedCandidatePath)
+                        .ConfigureAwait(false);
+                    if (requiresFinalValidation)
+                    {
+                        await ValidateFinalIllustratedOutputAsync(
+                                job.Request with { DestinationPath = encodedCandidatePath },
+                                job.Decoded,
+                                job.OperationDirectory,
+                                nativeProgress,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        await CopyFileAsync(
+                                encodedCandidatePath,
+                                job.Request.DestinationPath,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    // Do not publish an encoded candidate until every required
+                    // post-encode fidelity check has accepted those exact bytes.
+                    mipResult = candidateMipResult;
+                    graphicPaintedScale = reconstructionStrengthScale * finishScale;
+                    paintedThemeScale = themed.StrengthScale * themeStrengthScale;
+                    break;
+                }
+                catch (InvalidDataException exception)
+                {
+                    lastPaintedFailure = exception;
+                }
+            }
+
+            if (mipResult is null)
+            {
+                throw new InvalidDataException(
+                    "The encoded graphic-painted treatment exceeded its bounded fidelity limits even at reduced detail-preserving strength.",
+                    lastPaintedFailure);
+            }
         }
         else if (key.WorkerPreset == TexturePreset.RusticPainted)
         {
@@ -1044,35 +1242,48 @@ public sealed class NativeTextureProcessor
                 GetRusticPaintedStrength(job.Request));
             ValidateStylizedOutput(CalculateFidelityMetrics(job.Decoded, painted));
             cropped = painted;
+            mipResult = await EncodeCurrentImageAsync(cropped).ConfigureAwait(false);
         }
-
-        var mergedPath = Path.Combine(job.OperationDirectory, "merged.tga");
-        await cropped.WriteFileAsync(mergedPath, cancellationToken).ConfigureAwait(false);
-        var mipResult = await EncodeToDestinationAsync(
-            job.Request,
-            job.Dimensions,
-            mergedPath,
-            job.OperationDirectory,
-            nativeProgress,
-            job.PreserveAlphaCoverage,
-            cancellationToken,
-            resizeFilter: expectedWidth > job.Dimensions.OutputWidth
-                          || expectedHeight > job.Dimensions.OutputHeight
-                ? "FANT"
-                : "CUBIC").ConfigureAwait(false);
+        else
+        {
+            mipResult = await EncodeCurrentImageAsync(cropped).ConfigureAwait(false);
+        }
 
         return new NativeTextureProcessResult(
             job.Request.DestinationPath,
             job.Dimensions,
-            GetProcessingRoute(job, key, paintedThemeScale),
+            GetProcessingRoute(job, key, graphicPaintedScale, paintedThemeScale),
             DateTimeOffset.UtcNow - job.Started,
             mipResult.MipCount,
             mipResult.UsedCutoutFloor);
+
+        async Task<GeneratedMipResult> EncodeCurrentImageAsync(
+            TgaPixelBuffer image,
+            string? destinationPath = null)
+        {
+            var mergedPath = Path.Combine(job.OperationDirectory, "merged.tga");
+            await image.WriteFileAsync(mergedPath, cancellationToken).ConfigureAwait(false);
+            return await EncodeToDestinationAsync(
+                destinationPath is null
+                    ? job.Request
+                    : job.Request with { DestinationPath = destinationPath },
+                job.Dimensions,
+                mergedPath,
+                job.OperationDirectory,
+                nativeProgress,
+                job.PreserveAlphaCoverage,
+                cancellationToken,
+                resizeFilter: expectedWidth > job.Dimensions.OutputWidth
+                              || expectedHeight > job.Dimensions.OutputHeight
+                    ? "FANT"
+                    : "CUBIC").ConfigureAwait(false);
+        }
     }
 
     private static string GetProcessingRoute(
         PreparedColorJob job,
         NeuralBatchKey key,
+        double? graphicPaintedScale,
         double? paintedThemeScale)
     {
         if (job.HasSoftTranslucentAlpha)
@@ -1091,9 +1302,15 @@ public sealed class NativeTextureProcessor
         {
             TexturePreset.MaximumDetail => "Batched Real-ESRGAN maximum-detail reconstruction with TTA",
             TexturePreset.Illustrated =>
-                $"Batched Real-ESRGAN illustrated reconstruction with {FormatPaintedTheme(job.Request.Options.PaintedTheme)} finishing{FormatPaintedThemeScale(paintedThemeScale)}",
+                key.WorkerKind == NeuralWorkerKind.TextureSpecialized
+                    ? $"Batched texture-specialized illustrated reconstruction ({key.ModelName}) with {FormatPaintedTheme(job.Request.Options.PaintedTheme)} finishing{FormatGraphicPaintedScale(graphicPaintedScale)}{FormatPaintedThemeScale(paintedThemeScale)}"
+                    : $"Batched legacy illustrated reconstruction ({key.ModelName}) with {FormatPaintedTheme(job.Request.Options.PaintedTheme)} finishing{FormatGraphicPaintedScale(graphicPaintedScale)}{FormatPaintedThemeScale(paintedThemeScale)}",
             TexturePreset.RusticPainted =>
-                "Batched graphic painted reconstruction with bounded rustic grading",
+                key.WorkerKind == NeuralWorkerKind.TextureSpecialized
+                    ? $"Batched texture-specialized graphic painted reconstruction ({key.ModelName}) with bounded rustic grading"
+                    : "Batched graphic painted reconstruction with bounded rustic grading",
+            TexturePreset.Faithful when job.EffectivePreset == TexturePreset.Illustrated =>
+                $"Batched conservative illustrated recovery ({key.ModelName}) with {FormatPaintedTheme(job.Request.Options.PaintedTheme)} finishing{FormatGraphicPaintedScale(graphicPaintedScale)}{FormatPaintedThemeScale(paintedThemeScale)}",
             TexturePreset.Faithful when job.EffectivePreset != TexturePreset.Faithful =>
                 "Batched faithful Real-ESRNet reconstruction (fidelity fallback)",
             _ => "Batched Real-ESRNet faithful color restoration with seam-safe border"
@@ -1134,7 +1351,7 @@ public sealed class NativeTextureProcessor
         NativeTextureProcessRequest request,
         UpscaleDimensions dimensions)
     {
-        var neuralScale = request.Options.Preset == TexturePreset.ClassicHd
+        var neuralScale = ShouldUseTextureSpecializedReconstruction(request.Options.Preset)
             ? UpscaylCommandBuilder.ModelScale
             : dimensions.RequiredNeuralScale;
         var borderedWidth = checked(
@@ -1291,18 +1508,21 @@ public sealed class NativeTextureProcessor
         // users selected this profile to see. Alpha is still restored separately
         // in RunNeuralColorPassAsync, including cutout coverage preservation.
         var finalImage = primary.Image;
+        double? graphicPaintedScale = null;
         double? paintedThemeScale = null;
         if (effectivePreset == TexturePreset.Illustrated)
         {
-            var graphicPainted = finalImage.ApplyGraphicPaintedFinish(
-                GetGraphicPaintedStrength(request),
+            var graphicPainted = ApplyValidatedGraphicPaintedFinish(
+                decoded,
+                finalImage,
+                GetGraphicPaintedStrength(request, preserveAlphaCoverage),
                 request.WrapEdges);
-            ValidateGraphicPaintedOutput(CalculateFidelityMetrics(decoded, graphicPainted));
+            graphicPaintedScale = graphicPainted.StrengthScale;
             var themed = ApplyValidatedPaintedTheme(
                 decoded,
-                graphicPainted,
+                graphicPainted.Image,
                 request.Options.PaintedTheme,
-                GetPaintedThemeStrength(request));
+                GetPaintedThemeStrength(request, preserveAlphaCoverage));
             finalImage = themed.Image;
             paintedThemeScale = themed.StrengthScale;
         }
@@ -1324,6 +1544,21 @@ public sealed class NativeTextureProcessor
             preserveAlphaCoverage,
             cancellationToken).ConfigureAwait(false);
 
+        if (effectivePreset == TexturePreset.Illustrated
+            && RequiresFinalIllustratedDecodeValidation(
+                request.Metadata,
+                request.Classification,
+                preserveAlphaCoverage))
+        {
+            await ValidateFinalIllustratedOutputAsync(
+                    request,
+                    decoded,
+                    operationDirectory,
+                    nativeProgress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         if (hasSoftTranslucentAlpha)
         {
             return "Real-ESRNet soft-alpha restoration with original translucency";
@@ -1338,7 +1573,9 @@ public sealed class NativeTextureProcessor
             TexturePreset.MaximumDetail =>
                 "Real-ESRGAN maximum-detail reconstruction with TTA",
             TexturePreset.Illustrated =>
-                $"Real-ESRGAN illustrated reconstruction with {FormatPaintedTheme(request.Options.PaintedTheme)} finishing{FormatPaintedThemeScale(paintedThemeScale)}",
+                primary.Model.IsTextureSpecialized
+                    ? $"Texture-specialized illustrated reconstruction ({primary.Model.Name}) with {FormatPaintedTheme(request.Options.PaintedTheme)} finishing{FormatGraphicPaintedScale(graphicPaintedScale)}{FormatPaintedThemeScale(paintedThemeScale)}"
+                    : $"Real-ESRGAN illustrated reconstruction with {FormatPaintedTheme(request.Options.PaintedTheme)} finishing{FormatGraphicPaintedScale(graphicPaintedScale)}{FormatPaintedThemeScale(paintedThemeScale)}",
             TexturePreset.RusticPainted =>
                 "Real-ESRGAN graphic painted reconstruction with bounded rustic grading",
             _ =>
@@ -1361,7 +1598,7 @@ public sealed class NativeTextureProcessor
         var upscaledPngPath = Path.Combine(operationDirectory, $"{passName}-neural.png");
         TextureUpscaleModelSelection model;
         var actualNeuralScale = neuralScale;
-        var specialized = preset == TexturePreset.ClassicHd
+        var specialized = ShouldUseTextureSpecializedReconstruction(preset)
                           && Volatile.Read(ref textureUpscalerUnavailable) == 0
                           && _tools.HasTextureUpscaler
             ? _upscayl.FindTextureModel(_tools.TextureModelsPath!)
@@ -1415,40 +1652,80 @@ public sealed class NativeTextureProcessor
                 reportFallback: false).ConfigureAwait(false);
         }
 
-        var neuralTgaDirectory = CreateDirectory(operationDirectory, $"{passName}-tga");
-        await RunCheckedAsync(
-            _directXTex.CreateConvert(_tools.TexconvPath!, upscaledPngPath, neuralTgaDirectory, "tga"),
-            nativeProgress,
-            cancellationToken).ConfigureAwait(false);
-
-        var neuralTgaPath = FindSingleOutput(neuralTgaDirectory, ".tga");
-        var neural = await TgaPixelBuffer.ReadFileAsync(neuralTgaPath, cancellationToken).ConfigureAwait(false);
-        var expectedWrappedWidth = checked((request.Metadata.Width + (request.WrapPadding * 2)) * actualNeuralScale);
-        var expectedWrappedHeight = checked((request.Metadata.Height + (request.WrapPadding * 2)) * actualNeuralScale);
-        if (neural.Width != expectedWrappedWidth || neural.Height != expectedWrappedHeight)
+        try
         {
-            throw new InvalidDataException(
-                $"Neural {actualNeuralScale}x output dimensions were {neural.Width}x{neural.Height}; " +
-                $"expected wrapped dimensions {expectedWrappedWidth}x{expectedWrappedHeight}.");
+            return new NeuralColorPassResult(
+                await ReadAndValidateNeuralOutputAsync($"{passName}-tga").ConfigureAwait(false),
+                model);
+        }
+        catch (InvalidDataException exception) when (
+            model.IsTextureSpecialized
+            && IsPaintedPreset(preset))
+        {
+            nativeProgress?.Report(new NativeOutputLine(
+                NativeOutputStream.StandardError,
+                $"The texture-specialized painted result failed its fidelity gate; retrying with the bundled illustrated model. {exception.Message}"));
+            TryDeleteOwnedFile(operationDirectory, upscaledPngPath);
+            model = await RunLegacyColorPassAsync(
+                request,
+                pngInputPath,
+                upscaledPngPath,
+                preset,
+                neuralScale,
+                nativeProgress,
+                cancellationToken,
+                reportFallback: true).ConfigureAwait(false);
+            actualNeuralScale = neuralScale;
+            return new NeuralColorPassResult(
+                await ReadAndValidateNeuralOutputAsync($"{passName}-legacy-tga").ConfigureAwait(false),
+                model);
         }
 
-        var scaledPadding = checked(request.WrapPadding * actualNeuralScale);
-        var expectedWidth = checked(request.Metadata.Width * actualNeuralScale);
-        var expectedHeight = checked(request.Metadata.Height * actualNeuralScale);
-        var cropped = neural.Crop(scaledPadding, scaledPadding, expectedWidth, expectedHeight);
-
-        if (request.Metadata.HasAlpha)
+        async Task<TgaPixelBuffer> ReadAndValidateNeuralOutputAsync(string directoryName)
         {
-            cropped = cropped.WithScaledAlphaFrom(
-                decoded,
-                preserveCoverage: preserveAlphaCoverage,
-                wrapEdges: request.WrapEdges);
-        }
+            var neuralTgaDirectory = CreateDirectory(operationDirectory, directoryName);
+            await RunCheckedAsync(
+                _directXTex.CreateConvert(
+                    _tools.TexconvPath!,
+                    upscaledPngPath,
+                    neuralTgaDirectory,
+                    "tga"),
+                nativeProgress,
+                cancellationToken).ConfigureAwait(false);
 
-        ValidateNeuralOutputForPreset(
-            preset,
-            CalculateFidelityMetrics(decoded, cropped));
-        return new NeuralColorPassResult(cropped, model);
+            var neuralTgaPath = FindSingleOutput(neuralTgaDirectory, ".tga");
+            var neural = await TgaPixelBuffer
+                .ReadFileAsync(neuralTgaPath, cancellationToken)
+                .ConfigureAwait(false);
+            var expectedWrappedWidth = checked(
+                (request.Metadata.Width + (request.WrapPadding * 2)) * actualNeuralScale);
+            var expectedWrappedHeight = checked(
+                (request.Metadata.Height + (request.WrapPadding * 2)) * actualNeuralScale);
+            if (neural.Width != expectedWrappedWidth || neural.Height != expectedWrappedHeight)
+            {
+                throw new InvalidDataException(
+                    $"Neural {actualNeuralScale}x output dimensions were {neural.Width}x{neural.Height}; "
+                    + $"expected wrapped dimensions {expectedWrappedWidth}x{expectedWrappedHeight}.");
+            }
+
+            var scaledPadding = checked(request.WrapPadding * actualNeuralScale);
+            var expectedWidth = checked(request.Metadata.Width * actualNeuralScale);
+            var expectedHeight = checked(request.Metadata.Height * actualNeuralScale);
+            var cropped = neural.Crop(scaledPadding, scaledPadding, expectedWidth, expectedHeight);
+
+            if (request.Metadata.HasAlpha)
+            {
+                cropped = cropped.WithScaledAlphaFrom(
+                    decoded,
+                    preserveCoverage: preserveAlphaCoverage,
+                    wrapEdges: request.WrapEdges);
+            }
+
+            ValidateNeuralOutputForPreset(
+                preset,
+                CalculateFidelityMetrics(decoded, cropped));
+            return cropped;
+        }
     }
 
     internal static void ValidateNeuralOutputForPreset(
@@ -1569,22 +1846,28 @@ public sealed class NativeTextureProcessor
         }
     }
 
-    private static double GetGraphicPaintedStrength(NativeTextureProcessRequest request)
+    private static double GetGraphicPaintedStrength(
+        NativeTextureProcessRequest request,
+        bool preserveAlphaCoverage)
     {
         var strength = request.Options.Scope switch
         {
             // Animated effects benefit from cleaner shapes, but retaining their
             // timing silhouettes matters more than strong material flattening.
-            AssetScope.SpellEffectsOnly => 0.48,
-            AssetScope.CharactersAndEquipmentOnly => 0.84,
-            AssetScope.WorldCharactersAndEquipment => 0.90,
-            AssetScope.AllSafeTextures => 0.90,
-            _ => 0.94
+            AssetScope.SpellEffectsOnly => 0.44,
+            AssetScope.CharactersAndEquipmentOnly => 0.72,
+            AssetScope.WorldCharactersAndEquipment => 0.76,
+            AssetScope.AllSafeTextures => 0.76,
+            _ => 0.78
         };
 
-        if (request.Classification.Kind == TextureKind.Cutout)
+        if (request.Classification.Kind == TextureKind.Cutout || preserveAlphaCoverage)
         {
-            strength *= 0.72;
+            // Foliage, hair, fences, decals, and other alpha-tested cards rely
+            // on fine internal edges as well as their outer silhouette. A
+            // restrained finish keeps the requested painted plane treatment
+            // without turning those small structures into broad soft blobs.
+            strength *= 0.58;
         }
 
         return strength;
@@ -1609,7 +1892,9 @@ public sealed class NativeTextureProcessor
         return strength;
     }
 
-    private static double GetPaintedThemeStrength(NativeTextureProcessRequest request)
+    private static double GetPaintedThemeStrength(
+        NativeTextureProcessRequest request,
+        bool preserveAlphaCoverage)
     {
         var strength = request.Options.Scope switch
         {
@@ -1620,7 +1905,7 @@ public sealed class NativeTextureProcessor
             _ => 0.78
         };
 
-        if (request.Classification.Kind == TextureKind.Cutout)
+        if (request.Classification.Kind == TextureKind.Cutout || preserveAlphaCoverage)
         {
             strength *= 0.62;
         }
@@ -1648,7 +1933,7 @@ public sealed class NativeTextureProcessor
         // the normal faithful fallback to replace the complete illustrated
         // route. This keeps Comic Ink and the zone palettes visible far more
         // consistently without accepting unsafe output.
-        double[] scales = [1d, 0.8d, 0.6d];
+        double[] scales = [1d, 0.8d, 0.6d, 0.4d];
         InvalidDataException? lastFailure = null;
         foreach (var scale in scales)
         {
@@ -1671,6 +1956,45 @@ public sealed class NativeTextureProcessor
             lastFailure);
     }
 
+    private static (TgaPixelBuffer Image, double StrengthScale) ApplyValidatedGraphicPaintedFinish(
+        TgaPixelBuffer source,
+        TgaPixelBuffer reconstruction,
+        double requestedStrength,
+        bool wrapEdges)
+    {
+        // The texture-specialized reconstruction normally needs less spatial
+        // consolidation than the older anime reconstruction. More importantly,
+        // a rare high-contrast material should lose finish strength—not its
+        // entire enhancement—when the full treatment crosses the same strict
+        // clipping/structure gate used for every painted result.
+        double[] scales = [1d, 0.75d, 0.5d, 0.25d];
+        InvalidDataException? lastFailure = null;
+        foreach (var scale in scales)
+        {
+            var painted = reconstruction.ApplyGraphicPaintedFinish(
+                requestedStrength * scale,
+                wrapEdges);
+            try
+            {
+                ValidateGraphicPaintedOutput(CalculateFidelityMetrics(source, painted));
+                return (painted, scale);
+            }
+            catch (InvalidDataException exception)
+            {
+                lastFailure = exception;
+            }
+        }
+
+        throw new InvalidDataException(
+            "The graphic-painted finishing treatment exceeded its bounded fidelity limits even at reduced strength.",
+            lastFailure);
+    }
+
+    private static string FormatGraphicPaintedScale(double? scale) =>
+        scale is { } value && value < 0.999d
+            ? $" at {value:P0} detail-preserving finish strength"
+            : string.Empty;
+
     private static string FormatPaintedThemeScale(double? scale) =>
         scale is { } value && value < 0.999d
             ? $" at {value:P0} safety strength"
@@ -1686,22 +2010,33 @@ public sealed class NativeTextureProcessor
             "A concrete painted theme was not resolved before native processing.")
     };
 
-    private static TextureFidelityMetrics CalculateFidelityMetrics(
+    internal static TextureFidelityMetrics CalculateFidelityMetrics(
         TgaPixelBuffer source,
         TgaPixelBuffer enhanced)
     {
-        if (enhanced.Width % source.Width != 0 || enhanced.Height % source.Height != 0)
+        var horizontalScale = enhanced.Width / (double)source.Width;
+        var verticalScale = enhanced.Height / (double)source.Height;
+        if (horizontalScale <= 0 || verticalScale <= 0)
         {
-            throw new InvalidDataException(
-                "The neural output cannot be reduced to the source dimensions by an exact integer scale.");
+            throw new InvalidDataException("The enhanced texture dimensions are invalid.");
         }
 
-        var scaleX = enhanced.Width / source.Width;
-        var scaleY = enhanced.Height / source.Height;
-        if (scaleX != scaleY || scaleX <= 0)
+        // A maximum-dimension cap commonly rounds one axis by a fraction of a
+        // pixel (for example 300x200 -> 1024x683). Treat that as the same
+        // aspect ratio, while continuing to reject actual geometric distortion.
+        var expectedHeightFromWidth = source.Height * horizontalScale;
+        if (Math.Abs(enhanced.Height - expectedHeightFromWidth) > 1.01)
         {
-            throw new InvalidDataException("The neural output scale is not uniform.");
+            throw new InvalidDataException(
+                "The enhanced texture scale changes the source aspect ratio.");
         }
+
+        var isExactIntegerScale = enhanced.Width % source.Width == 0
+            && enhanced.Height % source.Height == 0
+            && enhanced.Width / source.Width == enhanced.Height / source.Height;
+        var integerScale = isExactIntegerScale
+            ? enhanced.Width / source.Width
+            : 0;
 
         var sourceStatistics = source.CalculateVisibleColorStatistics();
         var enhancedStatistics = enhanced.CalculateVisibleColorStatistics();
@@ -1723,26 +2058,83 @@ public sealed class NativeTextureProcessor
                 sourceLuminance[sourcePixel] = sourceLuma;
                 visible[sourcePixel] = sourcePixels[sourceOffset + 3] >= 8;
 
-                double reducedRed = 0;
-                double reducedGreen = 0;
-                double reducedBlue = 0;
-                for (var blockY = 0; blockY < scaleY; blockY++)
+                double reducedRed;
+                double reducedGreen;
+                double reducedBlue;
+                if (isExactIntegerScale)
                 {
-                    var enhancedY = (sourceY * scaleY) + blockY;
-                    for (var blockX = 0; blockX < scaleX; blockX++)
+                    reducedRed = 0;
+                    reducedGreen = 0;
+                    reducedBlue = 0;
+                    for (var blockY = 0; blockY < integerScale; blockY++)
                     {
-                        var enhancedX = (sourceX * scaleX) + blockX;
-                        var enhancedOffset = ((enhancedY * enhanced.Width) + enhancedX) * 4;
-                        reducedRed += enhancedPixels[enhancedOffset];
-                        reducedGreen += enhancedPixels[enhancedOffset + 1];
-                        reducedBlue += enhancedPixels[enhancedOffset + 2];
+                        var enhancedY = (sourceY * integerScale) + blockY;
+                        for (var blockX = 0; blockX < integerScale; blockX++)
+                        {
+                            var enhancedX = (sourceX * integerScale) + blockX;
+                            var enhancedOffset = ((enhancedY * enhanced.Width) + enhancedX) * 4;
+                            reducedRed += enhancedPixels[enhancedOffset];
+                            reducedGreen += enhancedPixels[enhancedOffset + 1];
+                            reducedBlue += enhancedPixels[enhancedOffset + 2];
+                        }
                     }
+
+                    var blockSamples = integerScale * integerScale;
+                    reducedRed /= blockSamples;
+                    reducedGreen /= blockSamples;
+                    reducedBlue /= blockSamples;
+                }
+                else
+                {
+                    // Deterministic area reduction compares the exact final
+                    // encoded size to the source even when one capped axis was
+                    // rounded. The integer fast path above remains byte-for-byte
+                    // equivalent to the established fidelity calculation.
+                    var left = sourceX * horizontalScale;
+                    var right = (sourceX + 1) * horizontalScale;
+                    var top = sourceY * verticalScale;
+                    var bottom = (sourceY + 1) * verticalScale;
+                    var firstX = Math.Max(0, (int)Math.Floor(left));
+                    var lastX = Math.Min(enhanced.Width - 1, (int)Math.Ceiling(right) - 1);
+                    var firstY = Math.Max(0, (int)Math.Floor(top));
+                    var lastY = Math.Min(enhanced.Height - 1, (int)Math.Ceiling(bottom) - 1);
+                    double weightedRed = 0;
+                    double weightedGreen = 0;
+                    double weightedBlue = 0;
+                    double totalWeight = 0;
+                    for (var enhancedY = firstY; enhancedY <= lastY; enhancedY++)
+                    {
+                        var verticalWeight = Math.Max(
+                            0,
+                            Math.Min(bottom, enhancedY + 1d) - Math.Max(top, enhancedY));
+                        for (var enhancedX = firstX; enhancedX <= lastX; enhancedX++)
+                        {
+                            var horizontalWeight = Math.Max(
+                                0,
+                                Math.Min(right, enhancedX + 1d) - Math.Max(left, enhancedX));
+                            var weight = horizontalWeight * verticalWeight;
+                            var enhancedOffset = ((enhancedY * enhanced.Width) + enhancedX) * 4;
+                            weightedRed += enhancedPixels[enhancedOffset] * weight;
+                            weightedGreen += enhancedPixels[enhancedOffset + 1] * weight;
+                            weightedBlue += enhancedPixels[enhancedOffset + 2] * weight;
+                            totalWeight += weight;
+                        }
+                    }
+
+                    if (totalWeight <= 0)
+                    {
+                        throw new InvalidDataException(
+                            "The enhanced texture could not be reduced to the source grid.");
+                    }
+
+                    reducedRed = weightedRed / totalWeight;
+                    reducedGreen = weightedGreen / totalWeight;
+                    reducedBlue = weightedBlue / totalWeight;
                 }
 
-                var blockSamples = scaleX * scaleY;
-                var reducedLuma = (0.2126 * (reducedRed / blockSamples))
-                    + (0.7152 * (reducedGreen / blockSamples))
-                    + (0.0722 * (reducedBlue / blockSamples));
+                var reducedLuma = (0.2126 * reducedRed)
+                    + (0.7152 * reducedGreen)
+                    + (0.0722 * reducedBlue);
                 reducedLuminance[sourcePixel] = reducedLuma;
                 if (visible[sourcePixel])
                 {
@@ -1918,7 +2310,9 @@ public sealed class NativeTextureProcessor
         {
             nativeProgress?.Report(new NativeOutputLine(
                 NativeOutputStream.StandardError,
-                "The game-texture model could not run on the custom Vulkan worker; retrying with the bundled legacy detail model."));
+                IsPaintedPreset(preset)
+                    ? "The game-texture model could not complete the painted reconstruction; retrying with the bundled illustrated model."
+                    : "The game-texture model could not run on the custom Vulkan worker; retrying with the bundled legacy detail model."));
         }
 
         await RunCheckedAsync(
@@ -1983,6 +2377,58 @@ public sealed class NativeTextureProcessor
             nativeProgress,
             request.Classification.Kind == TextureKind.Cutout,
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ValidateFinalIllustratedOutputAsync(
+        NativeTextureProcessRequest request,
+        TgaPixelBuffer source,
+        string operationDirectory,
+        IProgress<NativeOutputLine>? nativeProgress,
+        CancellationToken cancellationToken)
+    {
+        // Validation before encoding cannot see detail lost to the destination
+        // palette or block compression. Decode the bytes that will actually be
+        // placed in the archive and run the same painted structure gate again.
+        // This is deliberately Illustrated-only: other profiles retain their
+        // established fidelity identity and performance characteristics.
+        var validationDirectory = CreateDirectory(
+            operationDirectory,
+            "illustrated-final-validation");
+        await RunCheckedAsync(
+            _directXTex.CreateConvert(
+                _tools.TexconvPath!,
+                request.DestinationPath,
+                validationDirectory,
+                "tga"),
+            nativeProgress,
+            cancellationToken).ConfigureAwait(false);
+        var decodedPath = FindSingleOutput(validationDirectory, ".tga");
+        var finalOutput = await TgaPixelBuffer
+            .ReadFileAsync(decodedPath, cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            ValidateGraphicPaintedOutput(CalculateFidelityMetrics(source, finalOutput));
+        }
+        catch (InvalidDataException exception)
+        {
+            throw new InvalidDataException(
+                "The final encoded graphic-painted texture lost too much source structure or detail.",
+                exception);
+        }
+    }
+
+    internal static bool RequiresFinalIllustratedDecodeValidation(
+        TextureMetadata metadata,
+        TextureClassification classification,
+        bool preserveAlphaCoverage)
+    {
+        ArgumentNullException.ThrowIfNull(metadata);
+        ArgumentNullException.ThrowIfNull(classification);
+        return classification.Kind == TextureKind.Cutout
+            || preserveAlphaCoverage
+            || (metadata.FileFormat == TextureFileFormat.Bmp
+                && metadata.BitsPerPixel == 8);
     }
 
     private async Task<GeneratedMipResult> EncodeToDestinationAsync(

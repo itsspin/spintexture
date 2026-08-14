@@ -9,6 +9,8 @@ internal static class StagedBuildCheckpointSelfTests
 {
     public static async Task RunAsync(CancellationToken cancellationToken)
     {
+        await TestInvalidWorldExpansionSelectionRejectedBeforeWorkspaceAsync(cancellationToken)
+            .ConfigureAwait(false);
         await TestRestartResumeAndFinalizationAsync(cancellationToken).ConfigureAwait(false);
         await TestManifestFinalizationWindowResumesAsync(cancellationToken).ConfigureAwait(false);
         await TestFinalizerFailureResumesWithoutRebuildingAsync(cancellationToken).ConfigureAwait(false);
@@ -21,10 +23,44 @@ internal static class StagedBuildCheckpointSelfTests
         await TestTamperedPayloadRebuildsOnlyArtifactAsync(cancellationToken).ConfigureAwait(false);
         await TestChangedPlanNeverResumesAsync(cancellationToken).ConfigureAwait(false);
         await TestChangedPaintedThemeNeverResumesAsync(cancellationToken).ConfigureAwait(false);
+        await TestChangedWorldExpansionSelectionNeverResumesAsync(cancellationToken).ConfigureAwait(false);
         await TestChangedOperationNeverResumesAsync(cancellationToken).ConfigureAwait(false);
         await TestChangedSourceNeverResumesAsync(cancellationToken).ConfigureAwait(false);
         await TestStatisticsAndPreviewReplayAsync(cancellationToken).ConfigureAwait(false);
         await TestNoKeyBuildIsImmediatelyVisibleAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task TestInvalidWorldExpansionSelectionRejectedBeforeWorkspaceAsync(
+        CancellationToken cancellationToken)
+    {
+        using var fixture = await Fixture.CreateAsync("invalid-world-expansion", cancellationToken)
+            .ConfigureAwait(false);
+        var items = CreateBuilders(fixture, new int[2]);
+        await AssertThrowsAsync<ArgumentOutOfRangeException>(() =>
+            new StagedBuildService().BuildAsync(
+                new StagedBuildRequest(
+                    fixture.Paths,
+                    fixture.Options with
+                    {
+                        Scope = AssetScope.WorldOnly,
+                        WorldExpansions = WorldExpansion.None
+                    },
+                    items),
+                cancellationToken: cancellationToken)).ConfigureAwait(false);
+        await AssertThrowsAsync<ArgumentOutOfRangeException>(() =>
+            new StagedBuildService().BuildAsync(
+                new StagedBuildRequest(
+                    fixture.Paths,
+                    fixture.Options with
+                    {
+                        Scope = AssetScope.CharactersAndEquipmentOnly,
+                        WorldExpansions = WorldExpansion.CurrentEql
+                    },
+                    items),
+                cancellationToken: cancellationToken)).ConfigureAwait(false);
+        Assert(
+            !Directory.Exists(fixture.Paths.WorkspacePath),
+            "invalid expansion options are rejected before a checkpoint workspace is created");
     }
 
     private static async Task TestCancellationRetainsCheckpointAsync(CancellationToken cancellationToken)
@@ -522,6 +558,51 @@ internal static class StagedBuildCheckpointSelfTests
             "a changed painted theme starts a distinct transaction");
         Assert(result.ResumedArtifactCount == 0,
             "a different painted theme never resumes output from another look");
+    }
+
+    private static async Task TestChangedWorldExpansionSelectionNeverResumesAsync(
+        CancellationToken cancellationToken)
+    {
+        using var fixture = await Fixture.CreateAsync("world-expansion", cancellationToken)
+            .ConfigureAwait(false);
+        var counts = new int[2];
+        var failed = false;
+        var original = fixture.Options with
+        {
+            Scope = AssetScope.WorldOnly,
+            WorldExpansions = WorldExpansion.CurrentEql
+        };
+        await AssertThrowsAsync<IOException>(() => new StagedBuildService().BuildAsync(
+            new StagedBuildRequest(
+                fixture.Paths,
+                original,
+                CreateBuilders(fixture, counts, index =>
+                {
+                    if (index == 1 && !failed)
+                    {
+                        failed = true;
+                        throw new IOException("simulated crash");
+                    }
+                }),
+                ResumeOperationKey: "checkpoint-self-test-v1"),
+            cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+        var changed = original with
+        {
+            WorldExpansions = WorldExpansion.CurrentEql | WorldExpansion.Kunark
+        };
+        var result = await new StagedBuildService().BuildAsync(
+            new StagedBuildRequest(
+                fixture.Paths,
+                changed,
+                CreateBuilders(fixture, counts),
+                ResumeOperationKey: "checkpoint-self-test-v1"),
+            cancellationToken: cancellationToken,
+            finalizeAsync: static (_, _) => Task.CompletedTask).ConfigureAwait(false);
+        Assert(counts[0] == 2 && counts[1] == 2,
+            "a changed World expansion selection starts a distinct transaction");
+        Assert(result.ResumedArtifactCount == 0,
+            "a different World expansion selection never resumes another subset's output");
     }
 
     private static async Task TestChangedOperationNeverResumesAsync(CancellationToken cancellationToken)

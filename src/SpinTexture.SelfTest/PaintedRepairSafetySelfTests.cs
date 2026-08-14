@@ -418,12 +418,17 @@ internal static class PaintedRepairSafetySelfTests
                     cancellationToken)
                 .ConfigureAwait(false);
             await File.WriteAllTextAsync(
-                    Path.Combine(installPath, "paintzone.xmi"),
+                    Path.Combine(installPath, "qeynos.xmi"),
                     "synthetic-zone-marker",
                     cancellationToken)
                 .ConfigureAwait(false);
+            await File.WriteAllTextAsync(
+                    Path.Combine(installPath, "skyfire.xmi"),
+                    "synthetic-kunark-zone-marker",
+                    cancellationToken)
+                .ConfigureAwait(false);
 
-            string[] archiveNames = ["paintzone.s3d", "paintzone_obj.s3d", "hero_chr.s3d"];
+            string[] archiveNames = ["qeynos.s3d", "qeynos_obj.s3d", "hero_chr.s3d"];
             var enhancedArchives = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var (archiveName, index) in archiveNames.Select((name, index) => (name, index)))
             {
@@ -441,6 +446,15 @@ internal static class PaintedRepairSafetySelfTests
                     .ConfigureAwait(false);
                 enhancedArchives.Add(archiveName, enhancedArchive);
             }
+            string[] unselectedKunarkArchives = ["skyfire.s3d", "skyfire_obj.s3d"];
+            foreach (var (archiveName, index) in unselectedKunarkArchives.Select((name, index) => (name, index)))
+            {
+                await WriteArchiveAsync(
+                        Path.Combine(installPath, archiveName),
+                        [new("kunark-surface.tga", CreateTarga(32, 32, checked((byte)(80 + index))))],
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
 
             var paintedOptions = new UpscaleOptions(
                 TexturePreset.Illustrated,
@@ -448,7 +462,8 @@ internal static class PaintedRepairSafetySelfTests
                 MaximumDimension: 1024,
                 GenerateMipMaps: false,
                 InstallAfterBuild: false,
-                PaintedTheme: PaintedTheme.DarkGothic);
+                PaintedTheme: PaintedTheme.DarkGothic,
+                WorldExpansions: WorldExpansion.CurrentEql);
             var baseline = await new StagedBuildService().BuildAsync(
                     new StagedBuildRequest(
                         paths,
@@ -517,6 +532,16 @@ internal static class PaintedRepairSafetySelfTests
                 "ordinary combined repair must ignore a Faithful retry request and retain painted options");
             AssertEqual(TexturePreset.Illustrated, repaired.StagedBuild.Manifest.Options.Preset, "repaired preset");
             AssertEqual(PaintedTheme.DarkGothic, repaired.StagedBuild.Manifest.Options.PaintedTheme, "repaired theme");
+            AssertEqual(
+                WorldExpansion.CurrentEql,
+                repaired.StagedBuild.Manifest.Options.WorldExpansions!.Value,
+                "ordinary repair must preserve the explicit Current EQL World selection");
+            Assert(
+                repaired.StagedBuild.Manifest.Entries.All(entry =>
+                    !unselectedKunarkArchives.Contains(
+                        entry.RelativeInstallPath,
+                        StringComparer.OrdinalIgnoreCase)),
+                "ordinary Current EQL repair must never gain detected Kunark Skyfire archives");
             AssertEqual(archiveNames.Length, repaired.Report.Statistics.ReusedTextures, "painted member reuse count");
             AssertEqual(0, repaired.Report.Statistics.EnhancedTextures, "valid painted members must not be regenerated");
             AssertEqual(0, repaired.Report.Statistics.FallbackTextures, "painted repair fallback count");

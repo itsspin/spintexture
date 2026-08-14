@@ -612,6 +612,92 @@
                         </StackPanel>
                     </Border>
 
+                    <Border x:Name="WorldExpansionCard"
+                            Style="{StaticResource CardStyle}"
+                            Margin="0,14,0,0"
+                            Visibility="{Binding IsWorldExpansionSelectionVisible, Converter={StaticResource BooleanToVisibilityConverter}}"
+                            AutomationProperties.Name="World expansion filter">
+                        <StackPanel>
+                            <TextBlock Text="WORLD ZONES" Style="{StaticResource EyebrowTextStyle}" />
+                            <TextBlock Text="Choose installed expansion groups"
+                                       Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,4" />
+                            <TextBlock Text="Current EQL follows the EQL Wiki non-Out-of-Era list and is the only currently recommended build. Detected files do not prove that a zone is currently accessible on the server."
+                                       Style="{StaticResource CaptionStyle}" />
+
+                            <Grid Margin="0,13,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Button Grid.Column="0" Margin="0,0,4,0" Padding="9,7"
+                                        Command="{Binding SelectCurrentEqlCommand}"
+                                        ToolTip="Select only the currently recommended non-Out-of-Era EQL zones">
+                                    <AccessText Text="_Current EQL" />
+                                </Button>
+                                <Button Grid.Column="1" Margin="4,0,0,0" Padding="9,7"
+                                        Command="{Binding SelectAllDetectedWorldExpansionsCommand}"
+                                        ToolTip="Select every expansion group detected in this client">
+                                    <AccessText Text="_All detected" />
+                                </Button>
+                            </Grid>
+
+                            <ItemsControl x:Name="WorldExpansionItems"
+                                          Margin="0,10,0,0"
+                                          ItemsSource="{Binding WorldExpansionOptions}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Margin="0,0,0,6" Padding="9,8" CornerRadius="6"
+                                                Background="#0E1116" BorderBrush="#303640" BorderThickness="1">
+                                            <CheckBox IsChecked="{Binding IsSelected}"
+                                                      IsEnabled="{Binding IsSelectionEnabled}"
+                                                      MinHeight="38"
+                                                      VerticalContentAlignment="Center"
+                                                      AutomationProperties.Name="{Binding AutomationName}">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel Margin="7,0,8,0">
+                                                        <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource PrimaryTextBrush}" TextWrapping="Wrap" />
+                                                        <TextBlock Text="{Binding AvailabilityText}" Margin="0,3,0,0" FontSize="10"
+                                                                   Foreground="{StaticResource SecondaryTextBrush}" TextWrapping="Wrap" />
+                                                    </StackPanel>
+                                                    <Border Grid.Column="1" Padding="6,2" CornerRadius="4"
+                                                            Background="{StaticResource SafeDimBrush}" VerticalAlignment="Top">
+                                                        <Border.Style>
+                                                            <Style TargetType="Border">
+                                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding IsRecommended}" Value="True">
+                                                                        <Setter Property="Visibility" Value="Visible" />
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </Border.Style>
+                                                        <TextBlock Text="RECOMMENDED" FontSize="8" FontWeight="Bold"
+                                                                   Foreground="{StaticResource SafeBrush}" />
+                                                    </Border>
+                                                </Grid>
+                                            </CheckBox>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <Border Padding="10,8" CornerRadius="5" Background="#111922"
+                                    BorderBrush="#2C4154" BorderThickness="1">
+                                <TextBlock Text="{Binding WorldExpansionSelectionSummary}"
+                                           FontSize="10" Foreground="#C8DAE9" TextWrapping="Wrap"
+                                           AutomationProperties.LiveSetting="Polite" />
+                            </Border>
+                            <TextBlock Margin="1,8,1,0"
+                                       Text="Shared sky, plants, terrain, and common-object libraries are included automatically. For a combined build, expansion choices filter world zones only; all detected characters and equipment remain included."
+                                       Style="{StaticResource CaptionStyle}" />
+                        </StackPanel>
+                    </Border>
+
                     <Border Style="{StaticResource CardStyle}" Margin="0,14,0,0">
                         <StackPanel>
                             <Grid>
@@ -1202,6 +1288,21 @@
                                     <TextBlock Text="LIVE CLIENT UNCHANGED" FontSize="9" FontWeight="Bold" Foreground="{StaticResource SafeBrush}" />
                                 </Border>
                             </Grid>
+                            <Border Margin="0,14,0,0" Padding="10,8" CornerRadius="5"
+                                    Background="#17131A" BorderBrush="#5D3828" BorderThickness="1">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="BUILD SELECTION" Style="{StaticResource FieldLabelStyle}"
+                                               Foreground="{StaticResource LavaBrightBrush}" VerticalAlignment="Top" />
+                                    <TextBlock Grid.Column="1" Margin="10,0,0,0"
+                                               Text="{Binding SelectedBuildScopeSummary}" FontSize="11"
+                                               FontWeight="SemiBold" Foreground="{StaticResource PrimaryTextBrush}"
+                                               TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                                </Grid>
+                            </Border>
                             <Grid Margin="0,17,0,0">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />

@@ -1178,6 +1178,39 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 _ => string.Empty
             };
 
+    private static string FormatWorldExpansionSelection(
+        WorldExpansion? selection,
+        bool compact)
+    {
+        if (selection is null)
+        {
+            return compact
+                ? "All detected zones (legacy)"
+                : "all detected world zones (legacy pack)";
+        }
+
+        var selectedGroups = WorldExpansionCatalog.OrderedGroups
+            .Where(expansion => (selection.Value & expansion) == expansion)
+            .ToArray();
+        if (selectedGroups.Length == 0)
+        {
+            return "No world groups";
+        }
+
+        if (compact && selectedGroups.Length > 2)
+        {
+            return selectedGroups.Length == WorldExpansionCatalog.OrderedGroups.Count
+                ? "All detected groups"
+                : $"{selectedGroups.Length:N0} expansion groups";
+        }
+
+        return string.Join(
+            " + ",
+            selectedGroups.Select(expansion => expansion == WorldExpansion.CurrentEql
+                ? "Current EQL"
+                : WorldExpansionCatalog.GetDisplayName(expansion)));
+    }
+
     private static JsonSerializerOptions CreateCompositionJsonOptions()
     {
         var options = new JsonSerializerOptions
@@ -1253,12 +1286,19 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 ? string.Empty
                 : $"{FormatPreset(manifest.Options.Preset, report)}"
                   + FormatPaintedThemeSuffix(manifest.Options, report);
+            var worldSelectionDetail = manifest is not null
+                                       && WorldExpansionSelectionPolicy.SupportsSelection(manifest.Options.Scope)
+                ? $" · world selection: {FormatWorldExpansionSelection(manifest.Options.WorldExpansions, compact: false)}"
+                : string.Empty;
+            var visualProfileAndWorldSelection = visualProfile + worldSelectionDetail;
             var scopeTitle = manifest?.Options.Scope switch
             {
                 AssetScope.SelectedZone => $"Zone \u00B7 {manifest.Options.SelectedZone ?? "Unknown"}",
                 AssetScope.CharactersAndEquipmentOnly => "Characters + Equipment",
-                AssetScope.WorldCharactersAndEquipment => "World + Characters + Equipment",
-                AssetScope.WorldOnly => "World textures",
+                AssetScope.WorldCharactersAndEquipment =>
+                    $"World ({FormatWorldExpansionSelection(manifest.Options.WorldExpansions, compact: true)}) + Characters + Equipment",
+                AssetScope.WorldOnly =>
+                    $"World textures · {FormatWorldExpansionSelection(manifest.Options.WorldExpansions, compact: true)}",
                 AssetScope.AllSafeTextures => "All safe textures",
                 AssetScope.SpellEffectsOnly => "Spell effects",
                 _ => info.CandidateBuildId
@@ -1330,22 +1370,22 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                     ? $"{ArtifactCount:N0} combined archives \u00B7 {FormatBytes(StagedBytes)} \u00B7 "
                       + manifest.CreatedUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture)
                     : isSourceRepair && report is not null
-                        ? $"{visualProfile} \u00B7 {report.ReusedArtifacts:N0} complete archives reused \u00B7 "
+                        ? $"{visualProfileAndWorldSelection} \u00B7 {report.ReusedArtifacts:N0} complete archives reused \u00B7 "
                           + $"{report.RebuiltArtifacts:N0} source-contaminated archives rebuilt \u00B7 "
                           + $"{ArtifactCount:N0} archives \u00B7 {FormatBytes(StagedBytes)} \u00B7 "
                           + manifest.CreatedUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture)
                     : isSafetyRepair && report is not null
-                        ? $"{visualProfile} \u00B7 revision {report.BaselineTexturePipelineRevision:N0}\u2192{report.TexturePipelineRevision:N0} \u00B7 "
+                        ? $"{visualProfileAndWorldSelection} \u00B7 revision {report.BaselineTexturePipelineRevision:N0}\u2192{report.TexturePipelineRevision:N0} \u00B7 "
                           + $"{report.Statistics.ReusedTextures:N0} prior textures reused \u00B7 "
                           + $"{report.Statistics.EnhancedTextures:N0} affected textures safely updated \u00B7 "
                           + $"{ArtifactCount:N0} archives \u00B7 {FormatBytes(StagedBytes)} \u00B7 "
                           + manifest.CreatedUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture)
                     : isLegacyRepair && report is not null
-                        ? $"{visualProfile} \u00B7 {report.Statistics.ReusedTextures:N0} prior textures reused \u00B7 "
+                        ? $"{visualProfileAndWorldSelection} \u00B7 {report.Statistics.ReusedTextures:N0} prior textures reused \u00B7 "
                           + $"{report.Statistics.EnhancedTextures:N0} newly enhanced \u00B7 "
                           + $"{ArtifactCount:N0} archives \u00B7 {FormatBytes(StagedBytes)} \u00B7 "
                           + manifest.CreatedUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture)
-                        : $"{visualProfile} \u00B7 {manifest.Options.MaximumDimension:N0}px \u00B7 "
+                        : $"{visualProfileAndWorldSelection} \u00B7 {manifest.Options.MaximumDimension:N0}px \u00B7 "
                           + (report is null
                               ? string.Empty
                               : $"{report.Statistics.EnhancedTextures:N0} enhanced \u00B7 "

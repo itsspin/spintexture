@@ -95,6 +95,7 @@ public static class TexturePipelineSelfTests
             .ConfigureAwait(false);
         TestTextureModelSelection();
         TestPresetAwareFidelityGate();
+        TestPaintedFinalValidationPolicyAndCappedMetrics();
         await output.WriteLineAsync("Texture model discovery and preset fidelity-gate tests passed.").ConfigureAwait(false);
         await TestWrappedTgaAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Seam-safe TGA tests passed.").ConfigureAwait(false);
@@ -447,6 +448,9 @@ public static class TexturePipelineSelfTests
                 "testzone_obj.s3d",
                 "sro.s3d",
                 "sro_obj.s3d",
+                "skyfire.s3d",
+                "skyfire_obj.s3d",
+                "skyfire_chr.s3d",
                 "terrain_common.s3d",
                 "orc_chr.s3d",
                 "globalhuf_chr.s3d",
@@ -555,6 +559,10 @@ public static class TexturePipelineSelfTests
                 string.Empty,
                 cancellationToken).ConfigureAwait(false);
             await File.WriteAllTextAsync(
+                Path.Combine(root, "skyfire.emt"),
+                string.Empty,
+                cancellationToken).ConfigureAwait(false);
+            await File.WriteAllTextAsync(
                 Path.Combine(root, "testzone_chr.txt"),
                 "2"
                     + Environment.NewLine
@@ -633,10 +641,71 @@ public static class TexturePipelineSelfTests
             var worldPaths = TexturePackWorkflow.SelectArchives(root, worldOptions);
             var combinedPaths = TexturePackWorkflow.SelectArchives(root, combinedOptions);
             var allPaths = TexturePackWorkflow.SelectArchives(root, allOptions);
+            var currentWorldPaths = TexturePackWorkflow.SelectArchives(
+                root,
+                worldOptions with { WorldExpansions = WorldExpansion.CurrentEql });
+            var explicitAllWorldPaths = TexturePackWorkflow.SelectArchives(
+                root,
+                worldOptions with
+                {
+                    WorldExpansions = WorldExpansion.CurrentEql
+                        | WorldExpansion.Kunark
+                        | WorldExpansion.OtherInstalled
+                });
+            var kunarkWorldPaths = TexturePackWorkflow.SelectArchives(
+                root,
+                worldOptions with { WorldExpansions = WorldExpansion.Kunark });
+            var currentCombinedPaths = TexturePackWorkflow.SelectArchives(
+                root,
+                combinedOptions with { WorldExpansions = WorldExpansion.CurrentEql });
+            var explicitCharacterPaths = TexturePackWorkflow
+                .ResolveCharacterAndEquipmentArchives(
+                    root,
+                    combinedOptions with
+                    {
+                        WorldExpansions = WorldExpansion.CurrentEql
+                    });
+            var currentCombinedNames = currentCombinedPaths
+                .Select(Path.GetFileName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var missingExpansionRejected = false;
+            var partiallyMissingExpansionRejected = false;
+            try
+            {
+                _ = TexturePackWorkflow.SelectArchives(
+                    root,
+                    worldOptions with { WorldExpansions = WorldExpansion.Velious });
+            }
+            catch (InvalidOperationException)
+            {
+                missingExpansionRejected = true;
+            }
+            try
+            {
+                _ = TexturePackWorkflow.SelectArchives(
+                    root,
+                    worldOptions with
+                    {
+                        WorldExpansions = WorldExpansion.CurrentEql | WorldExpansion.Velious
+                    });
+            }
+            catch (InvalidOperationException)
+            {
+                partiallyMissingExpansionRejected = true;
+            }
             var characterNames = characterPaths
                 .Select(Path.GetFileName)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             var worldNames = worldPaths
+                .Select(Path.GetFileName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var currentWorldNames = currentWorldPaths
+                .Select(Path.GetFileName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var explicitAllWorldNames = explicitAllWorldPaths
+                .Select(Path.GetFileName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var kunarkWorldNames = kunarkWorldPaths
                 .Select(Path.GetFileName)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
@@ -717,6 +786,30 @@ public static class TexturePipelineSelfTests
             Assert(
                 worldNames.Contains("sky.s3d") && !worldNames.Contains("sky.eqg"),
                 "the shared sky texture pack must not hide the compact SKY race model");
+            Assert(
+                worldNames.Contains("skyfire_chr.s3d")
+                && !explicitAllWorldNames.Contains("skyfire_chr.s3d"),
+                "legacy null World selection must preserve the historical sky-prefix partition while explicit expansion groups use the safe boundary");
+            Assert(
+                currentWorldNames.Contains("sro.s3d")
+                && currentWorldNames.Contains("sro_obj.s3d")
+                && currentWorldNames.Contains("sky.s3d")
+                && !currentWorldNames.Contains("testzone.s3d")
+                && !currentWorldNames.Contains("skyfire.s3d")
+                && !currentWorldNames.Contains("skyfire_chr.s3d"),
+                "Current EQL World selection should retain its zones and shared sky without leaking Other or Kunark sky-prefix archives");
+            Assert(
+                currentCombinedNames.Contains("skyfire_chr.s3d"),
+                "an explicit combined build must retain zone-named character sidecars as character content even when their World era is not selected");
+            Assert(
+                kunarkWorldNames.Contains("skyfire.s3d")
+                && kunarkWorldNames.Contains("skyfire_obj.s3d")
+                && kunarkWorldNames.Contains("sky.s3d")
+                && !kunarkWorldNames.Contains("sro.s3d"),
+                "Kunark World selection should include Skyfire as a zone and never as a shared sky-prefix archive");
+            Assert(
+                missingExpansionRejected && partiallyMissingExpansionRejected,
+                "an explicit selection with any missing expansion must fail instead of producing a shared-only or falsely labeled partial World pack");
             Assert(
                 !characterNames.Overlaps(
                     [
@@ -820,6 +913,10 @@ public static class TexturePipelineSelfTests
                 combinedPaths.ToHashSet(StringComparer.OrdinalIgnoreCase)
                     .SetEquals(expectedCombined),
                 "World + characters must be the exact union of the two isolated scopes");
+            Assert(
+                currentCombinedPaths.ToHashSet(StringComparer.OrdinalIgnoreCase)
+                    .SetEquals(currentWorldPaths.Concat(explicitCharacterPaths)),
+                "an expansion-filtered combined build should be the exact union of filtered World and all character/equipment archives");
             AssertEqual(
                 allPaths.Count,
                 allPaths.Distinct(StringComparer.OrdinalIgnoreCase).Count(),
@@ -850,6 +947,68 @@ public static class TexturePipelineSelfTests
                 AssetScope.CharactersAndEquipmentOnly,
                 roundTripped.Options.Scope,
                 "character/equipment-only scope manifest round trip");
+
+            var explicitManifestPath = Path.Combine(root, "manifest", "expansion-manifest.json");
+            var explicitManifest = new BuildManifest(
+                BuildManifest.CurrentSchemaVersion,
+                "expansion-round-trip",
+                DateTimeOffset.UtcNow,
+                root,
+                worldOptions with
+                {
+                    WorldExpansions = WorldExpansion.CurrentEql | WorldExpansion.Kunark
+                },
+                []);
+            await manifestStore.WriteBuildManifestAsync(
+                explicitManifestPath,
+                explicitManifest,
+                cancellationToken).ConfigureAwait(false);
+            var explicitRoundTrip = await manifestStore.ReadBuildManifestAsync(
+                explicitManifestPath,
+                cancellationToken).ConfigureAwait(false);
+            Assert(
+                explicitRoundTrip.Options.WorldExpansions
+                    == (WorldExpansion.CurrentEql | WorldExpansion.Kunark),
+                "explicit World expansion manifest should round trip exactly");
+
+            var legacyManifestPath = Path.Combine(root, "manifest", "legacy-manifest.json");
+            await manifestStore.WriteBuildManifestAsync(
+                legacyManifestPath,
+                explicitManifest with
+                {
+                    SchemaVersion = BuildManifest.MinimumSupportedSchemaVersion,
+                    BuildId = "legacy-world",
+                    Options = worldOptions with { WorldExpansions = null }
+                },
+                cancellationToken).ConfigureAwait(false);
+            var legacyRoundTrip = await manifestStore.ReadBuildManifestAsync(
+                legacyManifestPath,
+                cancellationToken).ConfigureAwait(false);
+            Assert(
+                legacyRoundTrip.Options.WorldExpansions is null,
+                "schema-1 World manifests must remain readable as legacy all-detected selections");
+            var downgradedSubsetPath = Path.Combine(
+                root,
+                "manifest",
+                "downgraded-subset-manifest.json");
+            await manifestStore.WriteBuildManifestAsync(
+                downgradedSubsetPath,
+                explicitManifest with { SchemaVersion = BuildManifest.MinimumSupportedSchemaVersion },
+                cancellationToken).ConfigureAwait(false);
+            var downgradedSubsetRejected = false;
+            try
+            {
+                _ = await manifestStore.ReadBuildManifestAsync(
+                    downgradedSubsetPath,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (InvalidDataException)
+            {
+                downgradedSubsetRejected = true;
+            }
+            Assert(
+                downgradedSubsetRejected,
+                "an explicit World subset must never masquerade as a schema-1 manifest that older apps would misread");
         }
         finally
         {
@@ -1315,7 +1474,7 @@ public static class TexturePipelineSelfTests
             AssertEqual(
                 RealEsrganCommandBuilder.IllustratedModelName,
                 illustrated.Name,
-                "Illustrated should use the bundled official illustrated model");
+                "Illustrated legacy recovery should use the bundled official illustrated model");
             var illustratedCommand = legacyBuilder.CreateUpscale(
                 Path.Combine(root, "realesrgan-ncnn-vulkan.exe"),
                 legacyModels,
@@ -1325,7 +1484,7 @@ public static class TexturePipelineSelfTests
             AssertEqual(
                 RealEsrganCommandBuilder.IllustratedModelName,
                 GetCommandArgument(illustratedCommand.Arguments, "-n")!,
-                "Illustrated command model");
+                "Illustrated legacy recovery command model");
             Assert(
                 !illustratedCommand.Arguments.Contains("-x"),
                 "Illustrated should not silently enable the maximum-detail TTA route");
@@ -1452,6 +1611,108 @@ public static class TexturePipelineSelfTests
         Assert(
             blankRejected,
             "graphic painted fidelity gate must reject output with no visible pixels");
+    }
+
+    private static void TestPaintedFinalValidationPolicyAndCappedMetrics()
+    {
+        var metadata = new TextureMetadata(
+            TextureFileFormat.Tga,
+            "TGA/TRUE-COLOR/32bpp",
+            30,
+            20,
+            1,
+            32,
+            TextureAlphaStatus.None,
+            IsCompressed: false,
+            IsTopDown: true,
+            IsCubeMap: false,
+            IsVolumeTexture: false,
+            ArraySize: 1,
+            TexconvFormat: "B8G8R8X8_UNORM");
+        var color = new TextureClassification(
+            TextureKind.Color,
+            ClassificationConfidence.High,
+            CanUseColorUpscaler: true,
+            RequiresSeparateAlphaHandling: false,
+            RequiresReview: false,
+            Reasons: []);
+        Assert(
+            !NativeTextureProcessor.RequiresFinalIllustratedDecodeValidation(
+                metadata,
+                color,
+                preserveAlphaCoverage: false),
+            "ordinary opaque Illustrated textures must avoid an extra final texconv decode");
+        Assert(
+            NativeTextureProcessor.RequiresFinalIllustratedDecodeValidation(
+                metadata,
+                color with { Kind = TextureKind.Cutout },
+                preserveAlphaCoverage: false),
+            "semantic cutouts require validation of the exact final encoded bytes");
+        Assert(
+            NativeTextureProcessor.RequiresFinalIllustratedDecodeValidation(
+                metadata with { AlphaStatus = TextureAlphaStatus.Explicit },
+                color,
+                preserveAlphaCoverage: true),
+            "runtime-detected binary-alpha foliage requires final validation even when its name classified as Color");
+        Assert(
+            NativeTextureProcessor.RequiresFinalIllustratedDecodeValidation(
+                metadata with
+                {
+                    FileFormat = TextureFileFormat.Bmp,
+                    PayloadFormat = "BMP/INDEXED8",
+                    BitsPerPixel = 8
+                },
+                color,
+                preserveAlphaCoverage: false),
+            "8-bit indexed BMP palette mapping requires validation after final encoding");
+
+        var source = CreateSolidTgaBuffer(30, 20, 92, 128, 74);
+        var roundedCap = CreateSolidTgaBuffer(103, 69, 92, 128, 74);
+        var metrics = NativeTextureProcessor.CalculateFidelityMetrics(source, roundedCap);
+        Assert(
+            metrics.RoundTripLuminancePsnr >= 100
+            && metrics.CoarseLuminanceCorrelation >= 0.999,
+            "a rounded aspect-preserving cap must pass deterministic area-reduced fidelity comparison");
+
+        var distortedRejected = false;
+        try
+        {
+            _ = NativeTextureProcessor.CalculateFidelityMetrics(
+                source,
+                CreateSolidTgaBuffer(103, 75, 92, 128, 74));
+        }
+        catch (InvalidDataException)
+        {
+            distortedRejected = true;
+        }
+
+        Assert(
+            distortedRejected,
+            "final painted validation must still reject a real aspect-ratio distortion");
+
+        static TgaPixelBuffer CreateSolidTgaBuffer(
+            int width,
+            int height,
+            byte red,
+            byte green,
+            byte blue)
+        {
+            var bytes = new byte[checked(18 + (width * height * 4))];
+            bytes[2] = 2;
+            BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(12), checked((ushort)width));
+            BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(14), checked((ushort)height));
+            bytes[16] = 32;
+            bytes[17] = 0x28;
+            for (var offset = 18; offset < bytes.Length; offset += 4)
+            {
+                bytes[offset] = blue;
+                bytes[offset + 1] = green;
+                bytes[offset + 2] = red;
+                bytes[offset + 3] = byte.MaxValue;
+            }
+
+            return TgaPixelBuffer.Read(bytes);
+        }
     }
 
     private static void TestArtDirectionAndEffectPolicies()
@@ -2436,6 +2697,12 @@ public static class TexturePipelineSelfTests
         var missingOutputDestinationPathTwo = Path.Combine(root, "result", "lavastorm-rock-missing-output-2.tga");
         var classicDestinationPath = Path.Combine(root, "result", "lavastorm-rock-classic.tga");
         var illustratedDestinationPath = Path.Combine(root, "result", "lavastorm-rock-illustrated.tga");
+        var patternedSourcePath = Path.Combine(root, "patterned-rock.tga");
+        var cutoutSourcePath = Path.Combine(root, "foliage-card.tga");
+        var cutoutDestinationPath = Path.Combine(root, "result", "foliage-card-illustrated.tga");
+        var legacyPaintedRecoveryPath = Path.Combine(root, "result", "painted-legacy-recovery.tga");
+        var conservativePaintedRecoveryPath = Path.Combine(root, "result", "painted-conservative-recovery.tga");
+        var rejectedPaintedCandidatePath = Path.Combine(root, "result", "painted-rejected-candidate.tga");
         var rusticDestinationPath = Path.Combine(root, "result", "lavastorm-rock-rustic-painted.tga");
         // Real profiles can already be deeply nested before per-build and
         // per-texture names are appended. Native processing must isolate its
@@ -2470,6 +2737,37 @@ public static class TexturePipelineSelfTests
             }
 
             await File.WriteAllBytesAsync(sourcePath, source, cancellationToken).ConfigureAwait(false);
+            var cutoutSource = source.ToArray();
+            for (var y = 0; y < 16; y++)
+            {
+                for (var x = 0; x < 16; x++)
+                {
+                    var index = 18 + ((y * 16) + x) * 4;
+                    cutoutSource[index] = (byte)(52 + ((x * 7 + y * 3) % 44));
+                    cutoutSource[index + 1] = (byte)(104 + ((x * 5 + y * 9) % 72));
+                    cutoutSource[index + 2] = (byte)(38 + ((x * 11 + y * 2) % 38));
+                    cutoutSource[index + 3] = x is >= 2 and <= 13
+                        && y is >= 2 and <= 13
+                        && ((x + y) % 5 != 0)
+                        ? byte.MaxValue
+                        : byte.MinValue;
+                }
+            }
+
+            var patternedSource = cutoutSource.ToArray();
+            for (var offset = 18; offset < patternedSource.Length; offset += 4)
+            {
+                patternedSource[offset + 3] = byte.MaxValue;
+            }
+
+            await File.WriteAllBytesAsync(
+                patternedSourcePath,
+                patternedSource,
+                cancellationToken).ConfigureAwait(false);
+            await File.WriteAllBytesAsync(
+                cutoutSourcePath,
+                cutoutSource,
+                cancellationToken).ConfigureAwait(false);
             var metadata = new TextureMetadata(
                 TextureFileFormat.Tga,
                 "TGA/TRUE-COLOR/32bpp",
@@ -2736,6 +3034,8 @@ public static class TexturePipelineSelfTests
             Assert(classicOutputMetadata is not null, "Classic HD output should be a readable TGA");
             AssertEqual(64, classicOutputMetadata!.Width, "Classic HD smoke output width");
 
+            commandStart = recordingRunner.RealEsrganScales.Count;
+            textureCommandStart = recordingRunner.UpscaylScales.Count;
             var illustratedResult = await processor.ProcessAsync(
                 new NativeTextureProcessRequest(
                     sourcePath,
@@ -2754,6 +3054,39 @@ public static class TexturePipelineSelfTests
                     WrapPadding: 4),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             AssertEqual(64, illustratedResult.Dimensions.OutputWidth, "Illustrated smoke target width");
+            var illustratedLegacyScales = recordingRunner.RealEsrganScales
+                .Skip(commandStart)
+                .ToArray();
+            var illustratedTextureScales = recordingRunner.UpscaylScales
+                .Skip(textureCommandStart)
+                .ToArray();
+            if (tools.HasTextureUpscaler)
+            {
+                AssertEqual(
+                    0,
+                    illustratedLegacyScales.Length,
+                    "Graphic Painted should not start with the legacy anime model when PBRify is available");
+                AssertEqual(
+                    1,
+                    illustratedTextureScales.Length,
+                    "Graphic Painted should use one PBRify reconstruction pass");
+                Assert(
+                    illustratedResult.ProcessingRoute.Contains(
+                        "PBRify",
+                        StringComparison.OrdinalIgnoreCase),
+                    "Graphic Painted should report its PBRify reconstruction base");
+            }
+            else
+            {
+                AssertEqual(
+                    1,
+                    illustratedLegacyScales.Length,
+                    "Graphic Painted should retain one bundled illustrated recovery pass when PBRify is unavailable");
+                AssertEqual(
+                    0,
+                    illustratedTextureScales.Length,
+                    "Graphic Painted must not report an unavailable PBRify pass");
+            }
             Assert(
                 illustratedResult.ProcessingRoute.Contains(
                     "illustrated",
@@ -2770,6 +3103,234 @@ public static class TexturePipelineSelfTests
             Assert(illustratedMetadata is not null, "Illustrated output should be a readable TGA");
             AssertEqual(64, illustratedMetadata!.Width, "Illustrated smoke output width");
 
+            var cutoutMetadata = metadata with
+            {
+                AlphaStatus = TextureAlphaStatus.Explicit,
+                TexconvFormat = "B8G8R8A8_UNORM"
+            };
+            // Some old DDS payloads have generic names and classify as Color,
+            // while runtime alpha inspection correctly identifies their binary
+            // foliage cards. Exercise that exact safety path.
+            var ambiguousCutoutClassification = classification with
+            {
+                Kind = TextureKind.Color,
+                RequiresSeparateAlphaHandling = true
+            };
+            commandStart = recordingRunner.RealEsrganScales.Count;
+            textureCommandStart = recordingRunner.UpscaylScales.Count;
+            var cutoutResult = await processor.ProcessAsync(
+                new NativeTextureProcessRequest(
+                    cutoutSourcePath,
+                    cutoutDestinationPath,
+                    workPath,
+                    cutoutMetadata,
+                    ambiguousCutoutClassification,
+                    new UpscaleOptions(
+                        TexturePreset.Illustrated,
+                        AssetScope.SelectedZone,
+                        MaximumDimension: 64,
+                        GenerateMipMaps: true,
+                        InstallAfterBuild: false,
+                        SelectedZone: "lavastorm",
+                        PaintedTheme: PaintedTheme.ClassicPainted),
+                    WrapPadding: 4),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            AssertEqual(64, cutoutResult.Dimensions.OutputWidth, "Illustrated foliage target width");
+            AssertEqual(
+                1,
+                cutoutResult.ExpectedMipCount,
+                "runtime-detected binary-alpha foliage must retain the exact single-top-level cutout policy");
+            Assert(
+                cutoutResult.ProcessingRoute.Contains(
+                    "illustrated",
+                    StringComparison.OrdinalIgnoreCase)
+                && cutoutResult.ProcessingRoute.Contains(
+                    "finishing",
+                    StringComparison.OrdinalIgnoreCase),
+                "runtime-detected foliage should remain on a truthful painted route");
+            if (tools.HasTextureUpscaler)
+            {
+                AssertEqual(
+                    0,
+                    recordingRunner.RealEsrganScales.Skip(commandStart).Count(),
+                    "Illustrated foliage should retain the PBRify reconstruction when it passes validation");
+                AssertEqual(
+                    1,
+                    recordingRunner.UpscaylScales.Skip(textureCommandStart).Count(),
+                    "Illustrated foliage should use one PBRify reconstruction pass");
+            }
+
+            var cutoutPixels = await TgaPixelBuffer
+                .ReadFileAsync(cutoutDestinationPath, cancellationToken)
+                .ConfigureAwait(false);
+            var cutoutAlpha = cutoutPixels.RgbaPixels.Span
+                .ToArray()
+                .Where((_, index) => index % 4 == 3)
+                .ToArray();
+            var sourceCutoutAlpha = cutoutSource
+                .Skip(18)
+                .Where((_, index) => index % 4 == 3)
+                .ToArray();
+            var sourceCoverage = sourceCutoutAlpha.Count(alpha => alpha >= 128)
+                / (double)sourceCutoutAlpha.Length;
+            var outputCoverage = cutoutAlpha.Count(alpha => alpha >= 128)
+                / (double)cutoutAlpha.Length;
+            Assert(
+                cutoutAlpha.Any(alpha => alpha == byte.MinValue)
+                && cutoutAlpha.Any(alpha => alpha == byte.MaxValue)
+                && Math.Abs(outputCoverage - sourceCoverage) <= 0.01,
+                "Illustrated foliage must preserve its alpha-tested silhouette coverage after final encoding");
+
+            if (tools.HasTextureUpscaler)
+            {
+                NativeTextureProcessRequest CreatePaintedRequest(
+                    string inputPath,
+                    string outputPath,
+                    TextureMetadata requestMetadata,
+                    TextureClassification requestClassification,
+                    bool generateMipMaps = false) => new(
+                        inputPath,
+                        outputPath,
+                        workPath,
+                        requestMetadata,
+                        requestClassification,
+                        new UpscaleOptions(
+                            TexturePreset.Illustrated,
+                            AssetScope.SelectedZone,
+                            MaximumDimension: 64,
+                            GenerateMipMaps: generateMipMaps,
+                            InstallAfterBuild: false,
+                            SelectedZone: "lavastorm",
+                            PaintedTheme: PaintedTheme.ClassicPainted),
+                        WrapPadding: 4);
+
+                var legacyRecoveryRunner = new PaintedRecoveryNativeProcessRunner(
+                    corruptSpecialized: true,
+                    corruptLegacyIllustrated: false,
+                    corruptFaithful: false,
+                    corruptFinalValidation: false);
+                var legacyRecoveryProcessor = new NativeTextureProcessor(
+                    tools,
+                    legacyRecoveryRunner);
+                var legacyRecovery = await legacyRecoveryProcessor.ProcessAsync(
+                    CreatePaintedRequest(
+                        patternedSourcePath,
+                        legacyPaintedRecoveryPath,
+                        metadata,
+                        classification),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                AssertEqual(
+                    1,
+                    legacyRecoveryRunner.SpecializedInvocations,
+                    "a rejected PBRify result should run the specialized worker once");
+                AssertEqual(
+                    1,
+                    legacyRecoveryRunner.LegacyIllustratedInvocations,
+                    "a rejected PBRify result should retry once with the bundled illustrated model");
+                AssertEqual(
+                    0,
+                    legacyRecoveryRunner.FaithfulInvocations,
+                    "a safe legacy illustrated recovery should not fall through to the faithful base");
+                Assert(
+                    legacyRecovery.ProcessingRoute.Contains(
+                        "legacy illustrated reconstruction",
+                        StringComparison.OrdinalIgnoreCase)
+                    && legacyRecovery.ProcessingRoute.Contains(
+                        "finishing",
+                        StringComparison.OrdinalIgnoreCase)
+                    && !legacyRecovery.ProcessingRoute.Contains(
+                        "fallback",
+                        StringComparison.OrdinalIgnoreCase),
+                    "legacy recovery must retain a truthful requested-profile route that repair accepts");
+
+                var conservativeRecoveryRunner = new PaintedRecoveryNativeProcessRunner(
+                    corruptSpecialized: true,
+                    corruptLegacyIllustrated: true,
+                    corruptFaithful: false,
+                    corruptFinalValidation: false);
+                var conservativeRecoveryProcessor = new NativeTextureProcessor(
+                    tools,
+                    conservativeRecoveryRunner);
+                var conservativeRecovery = await conservativeRecoveryProcessor.ProcessAsync(
+                    CreatePaintedRequest(
+                        patternedSourcePath,
+                        conservativePaintedRecoveryPath,
+                        metadata,
+                        classification),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                AssertEqual(
+                    1,
+                    conservativeRecoveryRunner.SpecializedInvocations,
+                    "conservative painted recovery should begin with one PBRify attempt");
+                AssertEqual(
+                    1,
+                    conservativeRecoveryRunner.LegacyIllustratedInvocations,
+                    "conservative painted recovery should try the legacy illustrated base once");
+                AssertEqual(
+                    1,
+                    conservativeRecoveryRunner.FaithfulInvocations,
+                    "conservative painted recovery should terminate with one faithful reconstruction base");
+                Assert(
+                    conservativeRecovery.ProcessingRoute.Contains(
+                        "conservative illustrated recovery",
+                        StringComparison.OrdinalIgnoreCase)
+                    && conservativeRecovery.ProcessingRoute.Contains(
+                        RealEsrganCommandBuilder.LegacyFaithfulModelName,
+                        StringComparison.OrdinalIgnoreCase)
+                    && conservativeRecovery.ProcessingRoute.Contains(
+                        "finishing",
+                        StringComparison.OrdinalIgnoreCase)
+                    && !conservativeRecovery.ProcessingRoute.Contains(
+                        "fallback",
+                        StringComparison.OrdinalIgnoreCase),
+                    "faithful-base recovery must still be styled and reported as the requested Illustrated profile");
+
+                var rejectedCandidateRunner = new PaintedRecoveryNativeProcessRunner(
+                    corruptSpecialized: false,
+                    corruptLegacyIllustrated: false,
+                    corruptFaithful: false,
+                    corruptFinalValidation: true);
+                var rejectedCandidateProcessor = new NativeTextureProcessor(
+                    tools,
+                    rejectedCandidateRunner);
+                var rejectedOutcomes = await rejectedCandidateProcessor.ProcessBatchAsync(
+                    [
+                        CreatePaintedRequest(
+                            cutoutSourcePath,
+                            rejectedPaintedCandidatePath,
+                            cutoutMetadata,
+                            ambiguousCutoutClassification,
+                            generateMipMaps: true)
+                    ],
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                AssertEqual(1, rejectedOutcomes.Count, "painted rejection outcome count");
+                Assert(
+                    !rejectedOutcomes[0].Succeeded
+                    && rejectedOutcomes[0].Error is InvalidDataException,
+                    "all painted bases and adaptive strengths failing final validation must return an error");
+                AssertEqual(
+                    1,
+                    rejectedCandidateRunner.SpecializedInvocations,
+                    "final encoded rejection should try PBRify exactly once");
+                AssertEqual(
+                    1,
+                    rejectedCandidateRunner.LegacyIllustratedInvocations,
+                    "final encoded rejection should try the legacy illustrated base exactly once");
+                AssertEqual(
+                    1,
+                    rejectedCandidateRunner.FaithfulInvocations,
+                    "final encoded rejection should terminate after one conservative faithful-base attempt");
+                Assert(
+                    rejectedCandidateRunner.FinalValidationInvocations >= 4,
+                    "the first safe reconstruction base should exhaust all four bounded finish strengths before failing closed "
+                    + $"(observed {rejectedCandidateRunner.FinalValidationInvocations} final validation attempts)");
+                Assert(
+                    !File.Exists(rejectedPaintedCandidatePath),
+                    "a candidate rejected after final encoding must never be published to the requested destination");
+            }
+
+            commandStart = recordingRunner.RealEsrganScales.Count;
+            textureCommandStart = recordingRunner.UpscaylScales.Count;
             var rusticResult = await processor.ProcessAsync(
                 new NativeTextureProcessRequest(
                     sourcePath,
@@ -2787,6 +3348,14 @@ public static class TexturePipelineSelfTests
                     WrapPadding: 4),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             AssertEqual(64, rusticResult.Dimensions.OutputWidth, "Rustic Painted smoke target width");
+            AssertEqual(
+                1,
+                recordingRunner.RealEsrganScales.Skip(commandStart).Count(),
+                "Rustic Painted revision one should retain its legacy reconstruction model");
+            AssertEqual(
+                0,
+                recordingRunner.UpscaylScales.Skip(textureCommandStart).Count(),
+                "Graphic Painted's PBRify change must not alter Rustic Painted revision one");
             Assert(
                 rusticResult.ProcessingRoute.Contains(
                     "graphic painted",
@@ -2803,9 +3372,16 @@ public static class TexturePipelineSelfTests
             var illustratedPixels = await TgaPixelBuffer
                 .ReadFileAsync(illustratedDestinationPath, cancellationToken)
                 .ConfigureAwait(false);
+            var classicPixels = await TgaPixelBuffer
+                .ReadFileAsync(classicDestinationPath, cancellationToken)
+                .ConfigureAwait(false);
             var rusticPixels = await TgaPixelBuffer
                 .ReadFileAsync(rusticDestinationPath, cancellationToken)
                 .ConfigureAwait(false);
+            Assert(
+                !classicPixels.RgbaPixels.Span.SequenceEqual(
+                    illustratedPixels.RgbaPixels.Span),
+                "Graphic Painted must apply a visible illustrated finish instead of duplicating Texture HD's PBRify pixels");
             Assert(
                 !illustratedPixels.RgbaPixels.Span.SequenceEqual(rusticPixels.RgbaPixels.Span),
                 "Rustic Painted output should be visibly distinct from ungraded Illustrated output");
@@ -2965,6 +3541,169 @@ public static class TexturePipelineSelfTests
     private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
     {
         public void Report(T value) => report(value);
+    }
+
+    private sealed class PaintedRecoveryNativeProcessRunner(
+        bool corruptSpecialized,
+        bool corruptLegacyIllustrated,
+        bool corruptFaithful,
+        bool corruptFinalValidation) : INativeProcessRunner
+    {
+        private readonly NativeProcessRunner inner = new();
+        private int specializedInvocations;
+        private int legacyIllustratedInvocations;
+        private int faithfulInvocations;
+        private int finalValidationInvocations;
+
+        public int SpecializedInvocations => Volatile.Read(ref specializedInvocations);
+        public int LegacyIllustratedInvocations => Volatile.Read(ref legacyIllustratedInvocations);
+        public int FaithfulInvocations => Volatile.Read(ref faithfulInvocations);
+        public int FinalValidationInvocations => Volatile.Read(ref finalValidationInvocations);
+
+        public async Task<NativeProcessResult> RunAsync(
+            NativeProcessCommand command,
+            IProgress<NativeOutputLine>? progress = null,
+            CancellationToken cancellationToken = default)
+        {
+            var executable = Path.GetFileName(command.ExecutablePath);
+            var modelName = GetArgument(command.Arguments, "-n");
+            var isSpecialized = executable.Equals(
+                "upscayl-bin.exe",
+                StringComparison.OrdinalIgnoreCase);
+            var isLegacyIllustrated = executable.Equals(
+                    "realesrgan-ncnn-vulkan.exe",
+                    StringComparison.OrdinalIgnoreCase)
+                && string.Equals(
+                    modelName,
+                    RealEsrganCommandBuilder.IllustratedModelName,
+                    StringComparison.OrdinalIgnoreCase);
+            var isFaithful = executable.Equals(
+                    "realesrgan-ncnn-vulkan.exe",
+                    StringComparison.OrdinalIgnoreCase)
+                && string.Equals(
+                    modelName,
+                    RealEsrganCommandBuilder.LegacyFaithfulModelName,
+                    StringComparison.OrdinalIgnoreCase);
+            var outputDirectory = GetArgument(command.Arguments, "-o");
+            var isFinalValidation = executable.Equals(
+                    "texconv.exe",
+                    StringComparison.OrdinalIgnoreCase)
+                && outputDirectory?.Contains(
+                    "illustrated-final-validation",
+                    StringComparison.OrdinalIgnoreCase) == true;
+
+            if (isSpecialized)
+            {
+                Interlocked.Increment(ref specializedInvocations);
+            }
+            else if (isLegacyIllustrated)
+            {
+                Interlocked.Increment(ref legacyIllustratedInvocations);
+            }
+            else if (isFaithful)
+            {
+                Interlocked.Increment(ref faithfulInvocations);
+            }
+
+            if (isFinalValidation)
+            {
+                Interlocked.Increment(ref finalValidationInvocations);
+            }
+
+            var result = await inner.RunAsync(command, progress, cancellationToken)
+                .ConfigureAwait(false);
+            if ((isSpecialized && corruptSpecialized)
+                || (isLegacyIllustrated && corruptLegacyIllustrated)
+                || (isFaithful && corruptFaithful))
+            {
+                var workerOutput = outputDirectory
+                    ?? throw new InvalidOperationException(
+                        "Neural command did not include an output path.");
+                var outputs = Directory.Exists(workerOutput)
+                    ? Directory.EnumerateFiles(
+                        workerOutput,
+                        "*.png",
+                        SearchOption.TopDirectoryOnly).ToArray()
+                    : [workerOutput];
+                foreach (var output in outputs)
+                {
+                    await ReplacePngWithBlackAsync(output, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+
+            if (isFinalValidation && corruptFinalValidation)
+            {
+                foreach (var output in Directory.EnumerateFiles(
+                             outputDirectory!,
+                             "*.tga",
+                             SearchOption.TopDirectoryOnly))
+                {
+                    await ReplaceTgaWithBlackAsync(output, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+
+            return result;
+        }
+
+        private static string? GetArgument(IReadOnlyList<string> arguments, string name)
+        {
+            for (var index = 0; index + 1 < arguments.Count; index++)
+            {
+                if (arguments[index].Equals(name, StringComparison.Ordinal))
+                {
+                    return arguments[index + 1];
+                }
+            }
+
+            return null;
+        }
+
+        private static async Task ReplacePngWithBlackAsync(
+            string path,
+            CancellationToken cancellationToken)
+        {
+            var source = await TgaPixelBuffer.ReadPngFileAsync(path, cancellationToken)
+                .ConfigureAwait(false);
+            var black = CreateOpaqueBlackTga(source.Width, source.Height);
+            await TgaPixelBuffer.Read(black)
+                .WritePngFileAsync(path, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        private static async Task ReplaceTgaWithBlackAsync(
+            string path,
+            CancellationToken cancellationToken)
+        {
+            var source = await TgaPixelBuffer.ReadFileAsync(path, cancellationToken)
+                .ConfigureAwait(false);
+            await File.WriteAllBytesAsync(
+                    path,
+                    CreateOpaqueBlackTga(source.Width, source.Height),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        private static byte[] CreateOpaqueBlackTga(int width, int height)
+        {
+            var tga = new byte[checked(18 + (width * height * 4))];
+            tga[2] = 2;
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                tga.AsSpan(12, 2),
+                checked((ushort)width));
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                tga.AsSpan(14, 2),
+                checked((ushort)height));
+            tga[16] = 32;
+            tga[17] = 0x28;
+            for (var offset = 18; offset < tga.Length; offset += 4)
+            {
+                tga[offset + 3] = byte.MaxValue;
+            }
+
+            return tga;
+        }
     }
 
     private sealed class FidelityFallbackNativeProcessRunner : INativeProcessRunner
@@ -3172,9 +3911,9 @@ public static class TexturePipelineSelfTests
     private static void TestPaintedProfileReportCompatibility()
     {
         AssertEqual(
-            2,
+            3,
             TextureBuildReport.CurrentIllustratedProfileRevision,
-            "Graphic Painted profile revision should advance independently to revision two");
+            "Graphic Painted profile revision should advance independently to revision three");
         AssertEqual(
             1,
             TextureBuildReport.CurrentRusticPaintedProfileRevision,
@@ -3200,9 +3939,9 @@ public static class TexturePipelineSelfTests
             TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.RusticPainted),
             "unchanged Rustic Painted builds should retain the base resume operation key");
         AssertEqual(
-            $"{TexturePackWorkflow.FreshBuildResumeOperationKey}-illustrated-2",
+            $"{TexturePackWorkflow.FreshBuildResumeOperationKey}-illustrated-3",
             TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.Illustrated),
-            "Graphic Painted revision two should use a fenced resume operation key");
+            "Graphic Painted revision three should use a fenced resume operation key");
 
         var report = new TextureBuildReport(
             TextureBuildReport.CurrentSchemaVersion,

@@ -32,6 +32,9 @@ internal static class StagedBuildEstimateHistorySelfTests
             Assert(
                 legacyPaintedOptions?.PaintedTheme == PaintedTheme.ClassicPainted,
                 "manifests written before painted themes must deserialize to the classic painted finish");
+            Assert(
+                legacyPaintedOptions?.WorldExpansions is null,
+                "manifests written before World expansion selection must retain the legacy all-detected identity");
 
             var paths = new ProjectPaths(installPath, workspacePath);
             var options = new UpscaleOptions(
@@ -112,6 +115,34 @@ internal static class StagedBuildEstimateHistorySelfTests
                     options with { PaintedTheme = PaintedTheme.ComicInk },
                     options),
                 "painted theme metadata must not split history for a non-painted preset");
+            var currentWorldOptions = options with
+            {
+                Scope = AssetScope.WorldOnly,
+                WorldExpansions = WorldExpansion.CurrentEql
+            };
+            Assert(
+                StagedBuildEstimateHistory.OptionsMatch(
+                    currentWorldOptions,
+                    currentWorldOptions),
+                "the same explicit World expansion selection should share exact history");
+            Assert(
+                !StagedBuildEstimateHistory.OptionsMatch(
+                    currentWorldOptions with
+                    {
+                        WorldExpansions = WorldExpansion.CurrentEql | WorldExpansion.Kunark
+                    },
+                    currentWorldOptions),
+                "different World expansion selections must never share timing or size history");
+            Assert(
+                !StagedBuildEstimateHistory.OptionsMatch(
+                    currentWorldOptions with { WorldExpansions = null },
+                    currentWorldOptions),
+                "legacy all-detected World history must remain distinct from an explicit subset");
+            Assert(
+                StagedBuildEstimateHistory.OptionsMatch(
+                    options with { WorldExpansions = null },
+                    options),
+                "non-World history should keep its existing identity");
 
             var paintedCompletedUtc = legacyCompletedUtc.AddHours(2);
             await CreateBuildAsync(

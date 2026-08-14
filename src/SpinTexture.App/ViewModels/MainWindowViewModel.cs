@@ -62,6 +62,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private string _progressCountText = string.Empty;
     private bool _isOptionPreviewSectionSuspended;
     private bool _isEnhancedGameSessionActive;
+    private bool _isSynchronizingWorldExpansions;
+    private bool _isLegacyWorldExpansionSelection;
 
     public MainWindowViewModel(
         IFolderPickerService folderPicker,
@@ -115,11 +117,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 TexturePreset.Illustrated,
                 "Graphic Painted Fantasy",
                 "STYLIZED / BOLD PAINTED PLANES",
-                "Reinterprets safe texture art with stronger painted color planes, graphic contrast, and clean silhouettes.",
+                "Reconstructs safe texture art with preserved material detail, then shapes it into painted color planes, graphic contrast, and clean silhouettes.",
                 "A visible hand-painted art direction without changing models, geometry, or lighting",
-                "Illustrated reconstruction + SpinTexture graphic-paint finish",
-                "Bold color grouping, readable shapes, and reduced photographic noise",
-                "Moderate route; asset-aware safety and faithful fallback"),
+                "PBRify SPAN V4 first + adaptive SpinTexture graphic-paint finish",
+                "Detailed painted forms, readable shapes, and reduced photographic noise",
+                "Moderate route; extra final validation protects fragile foliage and indexed art"),
             new PresetOptionViewModel(
                 TexturePreset.RusticPainted,
                 "Rustic Painted Fantasy",
@@ -134,12 +136,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         ScopeOptions =
         [
             new ScopeOptionViewModel(AssetScope.SelectedZone, "Selected zone", "Build and validate one zone at a time."),
-            new ScopeOptionViewModel(AssetScope.WorldOnly, "World only", "Terrain, architecture, and safe world objects."),
+            new ScopeOptionViewModel(AssetScope.WorldOnly, "World zones", "Selected expansion-era zones plus conservatively included shared world libraries."),
             new ScopeOptionViewModel(AssetScope.CharactersAndEquipmentOnly, "Characters + equipment only", "Race models, armor, weapons, and dedicated wearable-item packs without the world."),
             new ScopeOptionViewModel(
                 AssetScope.WorldCharactersAndEquipment,
-                "World + characters + equipment",
-                "World textures plus playable races, mobs, armor, weapons, and verified equipment materials."),
+                "World zones + all characters & equipment",
+                "Selected world-zone groups plus every detected race, mob, armor, weapon, and verified equipment material."),
             new ScopeOptionViewModel(
                 AssetScope.SpellEffectsOnly,
                 "Spell effects",
@@ -176,6 +178,17 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _selectedPresetOption = PresetOptions.Single(option => option.Value == TexturePreset.ClassicHd);
         _selectedPaintedThemeOption = PaintedThemeOptions.Single(option => option.Value == PaintedTheme.ZoneAware);
         _selectedScopeOption = ScopeOptions.Single(option => option.Value == AssetScope.WorldOnly);
+        WorldExpansionOptions = WorldExpansionCatalog.OrderedGroups
+            .Select(expansion => new WorldExpansionOptionViewModel(
+                expansion,
+                expansion == WorldExpansion.CurrentEql
+                    ? "Current EQL"
+                    : WorldExpansionCatalog.GetDisplayName(expansion),
+                expansion == WorldExpansion.CurrentEql,
+                OnWorldExpansionSelectionChanged))
+            .ToArray();
+        WorldExpansionOptions.Single(option => option.Value == WorldExpansion.CurrentEql)
+            .SetSelectedSilently(true);
         OptionPreview = new TextureOptionPreviewViewModel(_workflow);
         var rememberedInstall = _preferences.Read().LastInstallPath;
         if (!string.IsNullOrWhiteSpace(rememberedInstall)
@@ -205,15 +218,22 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             _ => !IsBusy && IsClientSignaturePresent);
         RestoreCommand = new AsyncRelayCommand(RestoreAsync, CanRestore);
         CancelCommand = new RelayCommand(_ => Cancel(), _ => IsBusy);
+        SelectCurrentEqlCommand = new RelayCommand(
+            _ => SelectWorldExpansions(WorldExpansion.CurrentEql),
+            _ => !IsBusy && HasAnalysis && IsWorldExpansionAvailable(WorldExpansion.CurrentEql));
+        SelectAllDetectedWorldExpansionsCommand = new RelayCommand(
+            _ => SelectAllDetectedWorldExpansions(),
+            _ => !IsBusy && HasAnalysis && WorldExpansionOptions.Any(option => option.IsAvailable));
         UpdateOptionPreviewSelection();
 
         AddLog("INFO", "SpinTexture initialized. Analyze and staged builds never write to the selected client.");
-        AddLog("SAFE", "Default profile: Texture HD • World only • 2,048 px • staged output.");
+        AddLog("SAFE", "Default profile: Texture HD • Current EQL world zones • 2,048 px • staged output.");
     }
 
     public IReadOnlyList<PresetOptionViewModel> PresetOptions { get; }
     public IReadOnlyList<PaintedThemeOptionViewModel> PaintedThemeOptions { get; }
     public IReadOnlyList<ScopeOptionViewModel> ScopeOptions { get; }
+    public IReadOnlyList<WorldExpansionOptionViewModel> WorldExpansionOptions { get; }
     public IReadOnlyList<int> TextureCaps { get; }
     public ObservableCollection<string> Zones { get; } = [];
     public ObservableCollection<LogEntryViewModel> LogEntries { get; } = [];
@@ -230,6 +250,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public RelayCommand OpenNativeGraphicsCommand { get; }
     public AsyncRelayCommand RestoreCommand { get; }
     public RelayCommand CancelCommand { get; }
+    public RelayCommand SelectCurrentEqlCommand { get; }
+    public RelayCommand SelectAllDetectedWorldExpansionsCommand { get; }
 
     public event Action<string>? PreviewGalleryRequested;
     public event Action<string>? PackLibraryRequested;
@@ -427,8 +449,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 }
 
                 OnPropertyChanged(nameof(IsSelectedZoneScope));
+                OnPropertyChanged(nameof(IsWorldExpansionSelectionVisible));
                 OnPropertyChanged(nameof(IsZoneSelectionEnabled));
                 OnPropertyChanged(nameof(ZoneSelectionStatusText));
+                OnPropertyChanged(nameof(SelectedBuildScopeSummary));
                 UpdateEstimate();
                 RefreshCommands();
             }
@@ -436,6 +460,62 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     }
 
     public bool IsSelectedZoneScope => SelectedScopeOption.Value == AssetScope.SelectedZone;
+
+    public bool IsWorldExpansionSelectionVisible =>
+        WorldExpansionSelectionPolicy.SupportsSelection(SelectedScopeOption.Value);
+
+    public bool HasSelectedDetectedWorldExpansion =>
+        WorldExpansionOptions.Any(option => option.IsSelected && option.IsAvailable);
+
+    public bool HasCompleteWorldExpansionSelection =>
+        HasSelectedDetectedWorldExpansion
+        && !WorldExpansionOptions.Any(option => option.IsSelected && !option.IsAvailable);
+
+    public string WorldExpansionSelectionSummary
+    {
+        get
+        {
+            if (!HasAnalysis)
+            {
+                return "Analyze first to discover installed world zones.";
+            }
+
+            var selected = WorldExpansionOptions.Where(option => option.IsSelected).ToArray();
+            var unavailable = selected.Where(option => !option.IsAvailable).ToArray();
+            if (unavailable.Length != 0)
+            {
+                return $"Saved selection requires {FormatExpansionNames(unavailable.Select(option => option.Value))}, which was not found in this client. Analyze the matching installation to resume, or uncheck the missing group to start a new smaller build.";
+            }
+
+            int detectedZones = selected.Where(option => option.IsAvailable)
+                .Sum(option => option.DetectedZoneCount);
+            if (detectedZones == 0)
+            {
+                return "Choose at least one detected group to continue.";
+            }
+
+            string names = FormatExpansionNames(selected.Select(option => option.Value));
+            string legacy = _isLegacyWorldExpansionSelection ? " · legacy all-zones recovery" : string.Empty;
+            return $"{names} · {detectedZones:N0} detected zone{(detectedZones == 1 ? string.Empty : "s")}{legacy}";
+        }
+    }
+
+    public string SelectedBuildScopeSummary
+    {
+        get
+        {
+            if (!IsWorldExpansionSelectionVisible)
+            {
+                return SelectedScopeOption.Name;
+            }
+
+            string expansions = FormatExpansionNames(
+                WorldExpansionOptions.Where(option => option.IsSelected).Select(option => option.Value));
+            return SelectedScopeOption.Value == AssetScope.WorldCharactersAndEquipment
+                ? $"{expansions} world zones + all characters & equipment"
+                : $"{expansions} world zones";
+        }
+    }
 
     // The zone picker doubles as a shortcut: after analysis, selecting any zone
     // switches the scope to Selected zone. This avoids presenting a seemingly
@@ -668,6 +748,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             // a zone. Selecting one will switch the asset scope automatically.
             SelectedZone = null;
             HasAnalysis = true;
+            UpdateWorldExpansionDetection(summary.Zones);
             HasManagedBackup = _workflow.HasRestorableBackup(InstallPath);
             HasStagedPack = _workflow.HasStagedPack(InstallPath);
             await RefreshInstallHealthAsync(cancellationToken, fast: true).ConfigureAwait(true);
@@ -682,6 +763,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     option.Value == recovery.Options.PaintedTheme);
                 SelectedScopeOption = ScopeOptions.Single(option =>
                     option.Value == recovery.Options.Scope);
+                RestoreWorldExpansionSelection(recovery.Options.WorldExpansions);
                 SelectedMaximumDimension = recovery.Options.MaximumDimension;
                 GenerateMipMaps = recovery.Options.GenerateMipMaps;
                 if (recovery.Options.Scope == AssetScope.SelectedZone
@@ -762,7 +844,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 GenerateMipMaps,
                 InstallAfterBuild: false,
                 IsSelectedZoneScope ? SelectedZone : null,
-                PaintedTheme: EffectivePaintedTheme);
+                PaintedTheme: EffectivePaintedTheme,
+                WorldExpansions: EffectiveWorldExpansionSelection);
 
             TexturePackBuildResult result = await _workflow.BuildAsync(
                 InstallPath,
@@ -1118,7 +1201,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _buildStopwatch.Restart();
         _buildProgressTimer.Start();
         ProgressValue = 0;
-        OverallProgressText = $"Overall · {SelectedScopeOption.Name}";
+        OverallProgressText = $"Overall · {SelectedBuildScopeSummary}";
         ProgressCountText = "Planning selected archives";
         ProgressEtaText = $"Pre-build estimate: {EstimatedTimeText}";
     }
@@ -1365,7 +1448,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private bool CanAnalyze() => !IsBusy && Directory.Exists(InstallPath);
 
     private bool CanBuildStaged() =>
-        !IsBusy && HasAnalysis && (!IsSelectedZoneScope || !string.IsNullOrWhiteSpace(SelectedZone));
+        !IsBusy
+        && HasAnalysis
+        && (!IsSelectedZoneScope || !string.IsNullOrWhiteSpace(SelectedZone))
+        && (!IsWorldExpansionSelectionVisible || HasCompleteWorldExpansionSelection);
 
     private bool CanInstallLatestPack() =>
         !IsBusy && HasStagedPack && IsLegalAcknowledged && Directory.Exists(InstallPath);
@@ -1446,10 +1532,165 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
+    private void UpdateWorldExpansionDetection(IEnumerable<string> zoneNames)
+    {
+        var counts = zoneNames
+            .GroupBy(WorldExpansionCatalog.Classify)
+            .ToDictionary(group => group.Key, group => group.Count());
+        foreach (var option in WorldExpansionOptions)
+        {
+            option.UpdateDetectedZoneCount(counts.GetValueOrDefault(option.Value));
+        }
+
+        OnPropertyChanged(nameof(HasSelectedDetectedWorldExpansion));
+        OnPropertyChanged(nameof(HasCompleteWorldExpansionSelection));
+        OnPropertyChanged(nameof(WorldExpansionSelectionSummary));
+        OnPropertyChanged(nameof(SelectedBuildScopeSummary));
+        SelectCurrentEqlCommand.RaiseCanExecuteChanged();
+        SelectAllDetectedWorldExpansionsCommand.RaiseCanExecuteChanged();
+        RefreshCommands();
+    }
+
+    private void RestoreWorldExpansionSelection(WorldExpansion? recoveredSelection)
+    {
+        if (!IsWorldExpansionSelectionVisible)
+        {
+            return;
+        }
+
+        _isSynchronizingWorldExpansions = true;
+        try
+        {
+            _isLegacyWorldExpansionSelection = recoveredSelection is null;
+            foreach (var option in WorldExpansionOptions)
+            {
+                bool selected = recoveredSelection is null
+                    ? option.IsAvailable
+                    : (recoveredSelection.Value & option.Value) == option.Value;
+                option.SetSelectedSilently(selected);
+            }
+        }
+        finally
+        {
+            _isSynchronizingWorldExpansions = false;
+        }
+
+        RefreshWorldExpansionSelectionState();
+    }
+
+    private void SelectWorldExpansions(WorldExpansion selection)
+    {
+        _isSynchronizingWorldExpansions = true;
+        try
+        {
+            _isLegacyWorldExpansionSelection = false;
+            foreach (var option in WorldExpansionOptions)
+            {
+                option.SetSelectedSilently(
+                    option.IsAvailable && (selection & option.Value) == option.Value);
+            }
+        }
+        finally
+        {
+            _isSynchronizingWorldExpansions = false;
+        }
+
+        RefreshWorldExpansionSelectionState();
+    }
+
+    private void SelectAllDetectedWorldExpansions()
+    {
+        _isSynchronizingWorldExpansions = true;
+        try
+        {
+            _isLegacyWorldExpansionSelection = false;
+            foreach (var option in WorldExpansionOptions)
+            {
+                option.SetSelectedSilently(option.IsAvailable);
+            }
+        }
+        finally
+        {
+            _isSynchronizingWorldExpansions = false;
+        }
+
+        RefreshWorldExpansionSelectionState();
+    }
+
+    private void OnWorldExpansionSelectionChanged(WorldExpansionOptionViewModel? _)
+    {
+        if (_isSynchronizingWorldExpansions)
+        {
+            return;
+        }
+
+        _isLegacyWorldExpansionSelection = false;
+        RefreshWorldExpansionSelectionState();
+    }
+
+    private void RefreshWorldExpansionSelectionState()
+    {
+        OnPropertyChanged(nameof(HasSelectedDetectedWorldExpansion));
+        OnPropertyChanged(nameof(HasCompleteWorldExpansionSelection));
+        OnPropertyChanged(nameof(WorldExpansionSelectionSummary));
+        OnPropertyChanged(nameof(SelectedBuildScopeSummary));
+        UpdateEstimate();
+        RefreshCommands();
+    }
+
+    private bool IsWorldExpansionAvailable(WorldExpansion expansion) =>
+        WorldExpansionOptions.Any(option => option.Value == expansion && option.IsAvailable);
+
+    private WorldExpansion SelectedWorldExpansionFlags =>
+        WorldExpansionOptions
+            .Where(option => option.IsSelected)
+            .Aggregate(WorldExpansion.None, (current, option) => current | option.Value);
+
+    private WorldExpansion? EffectiveWorldExpansionSelection =>
+        IsWorldExpansionSelectionVisible
+            ? _isLegacyWorldExpansionSelection
+                ? null
+                : SelectedWorldExpansionFlags
+            : null;
+
+    private static string FormatExpansionNames(IEnumerable<WorldExpansion> expansions)
+    {
+        var names = expansions
+            .Distinct()
+            .Select(expansion => expansion == WorldExpansion.CurrentEql
+                ? "Current EQL"
+                : WorldExpansionCatalog.GetDisplayName(expansion))
+            .ToArray();
+        return names.Length switch
+        {
+            0 => "No expansion selected",
+            1 => names[0],
+            2 => string.Join(" + ", names),
+            _ => $"{names.Length:N0} expansion groups"
+        };
+    }
+
     private void ClearAnalysis()
     {
         _scanSummary = null;
+        _isLegacyWorldExpansionSelection = false;
+        _isSynchronizingWorldExpansions = true;
+        try
+        {
+            foreach (var expansion in WorldExpansionOptions)
+            {
+                expansion.SetSelectedSilently(expansion.Value == WorldExpansion.CurrentEql);
+            }
+        }
+        finally
+        {
+            _isSynchronizingWorldExpansions = false;
+        }
         Zones.Clear();
+        foreach (var expansion in WorldExpansionOptions)
+        {
+            expansion.UpdateDetectedZoneCount(0);
+        }
         _selectedZone = null;
         HasAnalysis = false;
         HasManagedBackup = false;
@@ -1465,6 +1706,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(SelectedZone));
         OnPropertyChanged(nameof(IsZoneSelectionEnabled));
         OnPropertyChanged(nameof(ZoneSelectionStatusText));
+        OnPropertyChanged(nameof(HasSelectedDetectedWorldExpansion));
+        OnPropertyChanged(nameof(HasCompleteWorldExpansionSelection));
+        OnPropertyChanged(nameof(WorldExpansionSelectionSummary));
+        OnPropertyChanged(nameof(SelectedBuildScopeSummary));
         OnPropertyChanged(nameof(ArchiveCountText));
         OnPropertyChanged(nameof(PackedTextureCountText));
         OnPropertyChanged(nameof(LooseTextureCountText));
@@ -1480,6 +1725,19 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
 
+        if (IsWorldExpansionSelectionVisible && !HasCompleteWorldExpansionSelection)
+        {
+            EstimatedOutputText = HasSelectedDetectedWorldExpansion
+                ? "Saved group is missing"
+                : "Choose a detected group";
+            EstimatedArchivesText = "0 selected zones";
+            EstimatedTimeText = "—";
+            EstimateBasisText = HasSelectedDetectedWorldExpansion
+                ? "The saved expansion selection is not fully present in this client. Analyze the matching installation to resume, or uncheck the missing group for a new build."
+                : "Select at least one detected world group before building.";
+            return;
+        }
+
         var estimateOptions = new UpscaleOptions(
             SelectedPresetOption.Value,
             SelectedScopeOption.Value,
@@ -1487,18 +1745,26 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             GenerateMipMaps,
             InstallAfterBuild: false,
             IsSelectedZoneScope ? SelectedZone : null,
-            PaintedTheme: EffectivePaintedTheme);
+            PaintedTheme: EffectivePaintedTheme,
+            WorldExpansions: EffectiveWorldExpansionSelection);
         if (TryUpdateEstimateFromHistory(estimateOptions))
         {
             return;
         }
 
+        int detectedWorldZones = WorldExpansionOptions.Sum(option => option.DetectedZoneCount);
+        int selectedWorldZones = WorldExpansionOptions
+            .Where(option => option.IsSelected)
+            .Sum(option => option.DetectedZoneCount);
+        double selectedWorldRatio = detectedWorldZones == 0
+            ? 1d
+            : Math.Clamp((double)selectedWorldZones / detectedWorldZones, 0d, 1d);
         double byteScopeFactor = SelectedScopeOption.Value switch
         {
             AssetScope.SelectedZone => 0.018,
-            AssetScope.WorldOnly => 0.34,
+            AssetScope.WorldOnly => 0.08 + 0.26 * selectedWorldRatio,
             AssetScope.CharactersAndEquipmentOnly => 0.60,
-            AssetScope.WorldCharactersAndEquipment => 0.78,
+            AssetScope.WorldCharactersAndEquipment => 0.60 + 0.18 * selectedWorldRatio,
             AssetScope.AllSafeTextures => 1.0,
             AssetScope.SpellEffectsOnly => 0.035,
             _ => 0.34
@@ -1640,7 +1906,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             GenerateMipMaps,
             InstallAfterBuild: false,
             IsSelectedZoneScope ? SelectedZone : null,
-            PaintedTheme: EffectivePaintedTheme);
+            PaintedTheme: EffectivePaintedTheme,
+            WorldExpansions: EffectiveWorldExpansionSelection);
         OptionPreview.UpdateSelection(
             InstallPath,
             previewOptions,
@@ -1675,6 +1942,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         OpenNativeGraphicsCommand.RaiseCanExecuteChanged();
         RestoreCommand.RaiseCanExecuteChanged();
         CancelCommand.RaiseCanExecuteChanged();
+        SelectCurrentEqlCommand.RaiseCanExecuteChanged();
+        SelectAllDetectedWorldExpansionsCommand.RaiseCanExecuteChanged();
     }
 
     private static string FormatBytes(long bytes)

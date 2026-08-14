@@ -475,7 +475,8 @@ internal static class StagedPackSourceRepairSelfTests
                 2048,
                 GenerateMipMaps: true,
                 InstallAfterBuild: false,
-                PaintedTheme: PaintedTheme.DarkGothic);
+                PaintedTheme: PaintedTheme.DarkGothic,
+                WorldExpansions: WorldExpansion.CurrentEql);
             var baselineManifestPath = Path.Combine(baselineDirectory, "manifest.json");
             await new ManifestStore().WriteBuildManifestAsync(
                     baselineManifestPath,
@@ -654,6 +655,10 @@ internal static class StagedPackSourceRepairSelfTests
                 options,
                 repairedManifest.Options,
                 "source repair manifest must preserve complete painted options");
+            AssertEqual(
+                WorldExpansion.CurrentEql,
+                repairedManifest.Options.WorldExpansions!.Value,
+                "source repair must preserve the explicit Current EQL World selection");
             foreach (var relativePath in relativePaths)
             {
                 var entry = repairedManifest.Entries.Single(candidate =>

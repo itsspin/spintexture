@@ -293,10 +293,11 @@ public sealed class StagedPackCatalogService
         BuildManifest manifest)
     {
         ArgumentNullException.ThrowIfNull(manifest);
-        if (manifest.SchemaVersion != BuildManifest.CurrentSchemaVersion)
+        if (!BuildManifest.IsSupportedSchemaVersion(manifest.SchemaVersion))
         {
             throw new InvalidDataException(
-                $"Unsupported build manifest schema {manifest.SchemaVersion}; schema 1 was required.");
+                $"Unsupported build manifest schema {manifest.SchemaVersion}; schemas "
+                + $"{BuildManifest.MinimumSupportedSchemaVersion}-{BuildManifest.CurrentSchemaVersion} are supported.");
         }
 
         var directoryId = Path.GetFileName(buildDirectory);
@@ -330,6 +331,15 @@ public sealed class StagedPackCatalogService
         {
             throw new InvalidDataException("A selected-zone pack does not identify its zone.");
         }
+
+        if (manifest.SchemaVersion < 2
+            && manifest.Options.WorldExpansions is not null)
+        {
+            throw new InvalidDataException(
+                "Build manifest schema 1 cannot carry an explicit World expansion selection.");
+        }
+
+        WorldExpansionSelectionPolicy.Validate(manifest.Options);
 
         if (manifest.Entries is null || manifest.Entries.Count == 0)
         {

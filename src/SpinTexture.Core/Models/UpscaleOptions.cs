@@ -42,7 +42,10 @@ public sealed record UpscaleOptions(
     bool InstallAfterBuild,
     string? SelectedZone = null,
     IReadOnlyList<TextureOverride>? TextureOverrides = null,
-    PaintedTheme PaintedTheme = PaintedTheme.ClassicPainted)
+    PaintedTheme PaintedTheme = PaintedTheme.ClassicPainted,
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    WorldExpansion? WorldExpansions = null)
 {
     public static UpscaleOptions Recommended => new(
         TexturePreset.ClassicHd,
@@ -50,4 +53,43 @@ public sealed record UpscaleOptions(
         2048,
         GenerateMipMaps: true,
         InstallAfterBuild: false);
+}
+
+/// <summary>
+/// Defines and validates the optional era filter carried by a World build.
+/// A null value is the compatibility identity for manifests and recovery
+/// checkpoints written before era filtering existed: it deliberately means
+/// every discovered World zone plus the shared World archives.
+/// </summary>
+public static class WorldExpansionSelectionPolicy
+{
+    public static bool SupportsSelection(AssetScope scope) => scope is
+        AssetScope.WorldOnly or AssetScope.WorldCharactersAndEquipment;
+
+    public static WorldExpansion ResolveSelectedOrAll(WorldExpansion? selection) =>
+        selection ?? WorldExpansion.All;
+
+    public static void Validate(UpscaleOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (options.WorldExpansions is not { } selection)
+        {
+            return;
+        }
+
+        if (!SupportsSelection(options.Scope))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "World expansion selection is available only for World builds.");
+        }
+
+        if (selection == WorldExpansion.None
+            || (selection & ~WorldExpansion.All) != WorldExpansion.None)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "Select at least one supported World expansion.");
+        }
+    }
 }

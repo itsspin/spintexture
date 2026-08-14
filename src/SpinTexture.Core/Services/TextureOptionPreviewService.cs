@@ -561,7 +561,7 @@ public sealed class TextureOptionPreviewService
             paths.InstallPath,
             options);
         var characterAndEquipmentArchives = TexturePackWorkflow
-            .ResolveCharacterAndEquipmentArchives(paths.InstallPath)
+            .ResolveCharacterAndEquipmentArchives(paths.InstallPath, options)
             .Select(Path.GetFullPath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var orderedArchives = PrioritizeArchives(
@@ -1563,6 +1563,7 @@ public sealed class TextureOptionPreviewService
             options.MaximumDimension.ToString(CultureInfo.InvariantCulture),
             options.GenerateMipMaps ? "mips" : "top-only",
             options.SelectedZone?.Trim().ToLowerInvariant() ?? string.Empty,
+            options.WorldExpansions?.ToString() ?? "legacy-all-world",
             options.PaintedTheme.ToString(),
             sampleSeed.ToString(CultureInfo.InvariantCulture),
             SerializeOverrides(options.TextureOverrides),
@@ -1632,7 +1633,8 @@ public sealed class TextureOptionPreviewService
             }
         }
 
-        if (candidates.Any(item => item.ResolvedOptions.Preset == TexturePreset.ClassicHd)
+        if (candidates.Any(item => item.ResolvedOptions.Preset is
+                TexturePreset.ClassicHd or TexturePreset.Illustrated)
             && tools.HasTextureUpscaler)
         {
             AddRequiredFile(files, tools.TextureUpscalerPath);
@@ -1918,6 +1920,7 @@ public sealed class TextureOptionPreviewService
         }
 
         TextureOverridePolicy.ValidateAll(options.TextureOverrides);
+        WorldExpansionSelectionPolicy.Validate(options);
     }
 
     private static JsonSerializerOptions CreateCacheJsonOptions()

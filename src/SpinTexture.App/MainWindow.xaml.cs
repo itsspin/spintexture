@@ -7,6 +7,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using SpinTexture.App.Services;
 using SpinTexture.App.ViewModels;
+using SpinTexture.Core.Models;
 using SpinTexture.Core.Services;
 
 namespace SpinTexture.App;
@@ -132,6 +133,56 @@ public partial class MainWindow : Window
             || RevealPercentFromPointer(110d, 100d) != 100d)
         {
             throw new InvalidDataException("The live preview reveal controls did not round-trip or clamp correctly.");
+        }
+
+        if (WorldExpansionCard.Visibility != Visibility.Visible
+            || WorldExpansionItems.Items.Count != WorldExpansionCatalog.OrderedGroups.Count
+            || !_viewModel.WorldExpansionOptions.Single(option =>
+                    option.Value == WorldExpansion.CurrentEql).IsSelected)
+        {
+            throw new InvalidDataException(
+                "The World scope did not show all expansion groups with Current EQL selected by default.");
+        }
+
+        var currentExpansion = _viewModel.WorldExpansionOptions.Single(option =>
+            option.Value == WorldExpansion.CurrentEql);
+        var missingExpansion = _viewModel.WorldExpansionOptions.Single(option =>
+            option.Value == WorldExpansion.Kunark);
+        currentExpansion.UpdateDetectedZoneCount(1);
+        missingExpansion.SetSelectedSilently(true);
+        if (_viewModel.HasCompleteWorldExpansionSelection)
+        {
+            throw new InvalidDataException(
+                "A recovered World selection incorrectly accepted a selected expansion missing from the client.");
+        }
+        missingExpansion.SetSelectedSilently(false);
+        currentExpansion.UpdateDetectedZoneCount(0);
+
+        ScopeOptionViewModel originalScope = _viewModel.SelectedScopeOption;
+        _viewModel.SelectedScopeOption = _viewModel.ScopeOptions.Single(option =>
+            option.Value == AssetScope.WorldCharactersAndEquipment);
+        Dispatcher.Invoke(() => { }, DispatcherPriority.DataBind);
+        if (WorldExpansionCard.Visibility != Visibility.Visible)
+        {
+            throw new InvalidDataException(
+                "The World expansion checklist was hidden for the combined World scope.");
+        }
+
+        _viewModel.SelectedScopeOption = _viewModel.ScopeOptions.Single(option =>
+            option.Value == AssetScope.CharactersAndEquipmentOnly);
+        Dispatcher.Invoke(() => { }, DispatcherPriority.DataBind);
+        if (WorldExpansionCard.Visibility != Visibility.Collapsed)
+        {
+            throw new InvalidDataException(
+                "The World expansion checklist remained visible for a character-only scope.");
+        }
+
+        _viewModel.SelectedScopeOption = originalScope;
+        Dispatcher.Invoke(() => { }, DispatcherPriority.DataBind);
+        if (WorldExpansionCard.Visibility != Visibility.Visible)
+        {
+            throw new InvalidDataException(
+                "The World expansion checklist did not return with the World scope.");
         }
 
         if (BuildPage.ExtentWidth > BuildPage.ViewportWidth + 2d)

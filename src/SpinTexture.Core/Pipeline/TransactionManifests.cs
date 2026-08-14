@@ -10,7 +10,15 @@ public sealed record BuildManifest(
     UpscaleOptions Options,
     IReadOnlyList<BuildManifestEntry> Entries)
 {
-    public const int CurrentSchemaVersion = 1;
+    // Schema 2 adds an explicit World-expansion subset to UpscaleOptions.
+    // Readers retain schema-1 support for every staged pack already built,
+    // while older SpinTexture releases reject schema-2 packs instead of
+    // silently forgetting their World selection during repair.
+    public const int MinimumSupportedSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
+
+    public static bool IsSupportedSchemaVersion(int schemaVersion) =>
+        schemaVersion is >= MinimumSupportedSchemaVersion and <= CurrentSchemaVersion;
 }
 
 public sealed record BuildManifestEntry(
