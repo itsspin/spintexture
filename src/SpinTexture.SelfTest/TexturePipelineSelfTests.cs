@@ -1147,7 +1147,7 @@ public static class TexturePipelineSelfTests
             mipCount: 1,
             preserveAlphaCoverage: true);
         Assert(command.Arguments.Contains("-wrap"), "texconv encode should use wrap sampling");
-        Assert(command.Arguments.Contains("--keep-coverage"), "cutout encoding should preserve alpha coverage");
+        Assert(command.Arguments.Contains("-keepcoverage"), "cutout encoding should preserve alpha coverage");
         Assert(command.Arguments.Contains("BC1_UNORM"), "DDS compression should be preserved");
         AssertEqual("1", GetCommandArgument(command.Arguments, "-m")!, "cutout texconv mip count");
 

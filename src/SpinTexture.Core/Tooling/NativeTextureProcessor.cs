@@ -450,7 +450,10 @@ public sealed class NativeTextureProcessor
         var hasSoftTranslucentAlpha = request.Metadata.HasAlpha
             && decoded.HasSoftTranslucentAlpha();
         var colorSource = preserveAlphaCoverage
-            ? decoded.DilateRgbIntoTransparentPixels()
+            // Dilate only pixels the fidelity gate treats as invisible
+            // (alpha < 8). The old 128 threshold overwrote the antialiased
+            // fringe's real RGB, charging spurious error against the gate.
+            ? decoded.DilateRgbIntoTransparentPixels(visibleThreshold: 8)
             : decoded;
         var opaque = colorSource.WithOpaqueAlpha();
         var bordered = request.WrapEdges
