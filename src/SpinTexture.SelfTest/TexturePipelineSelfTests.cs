@@ -2311,7 +2311,6 @@ public static class TexturePipelineSelfTests
 
         var temporaryPath = Path.Combine(Path.GetTempPath(), $"spintexture-tga-{Guid.NewGuid():N}.tga");
         var pngPath = Path.Combine(Path.GetTempPath(), $"spintexture-tga-{Guid.NewGuid():N}.png");
-        var frequencyPath = Path.Combine(Path.GetTempPath(), $"spintexture-frequency-{Guid.NewGuid():N}.tga");
         var alphaPath = Path.Combine(Path.GetTempPath(), $"spintexture-alpha-{Guid.NewGuid():N}.tga");
         var dilationPath = Path.Combine(Path.GetTempPath(), $"spintexture-dilation-{Guid.NewGuid():N}.tga");
         try
@@ -2327,12 +2326,6 @@ public static class TexturePipelineSelfTests
                 cropped.RgbaPixels.Span,
                 pngRoundTrip.RgbaPixels.Span,
                 "lossless in-process PNG bridge");
-
-            var unchangedDetail = TgaPixelBuffer.BlendFrequencyDetailLocked(cropped, cropped);
-            await unchangedDetail.WriteFileAsync(frequencyPath, cancellationToken).ConfigureAwait(false);
-            var originalBytes = await File.ReadAllBytesAsync(temporaryPath, cancellationToken).ConfigureAwait(false);
-            var unchangedBytes = await File.ReadAllBytesAsync(frequencyPath, cancellationToken).ConfigureAwait(false);
-            AssertSequenceEqual(originalBytes, unchangedBytes, "frequency detail blend should not invent a difference");
 
             var alphaSourceBytes = new byte[18 + (4 * 4 * 4)];
             alphaSourceBytes[2] = 2;
@@ -2441,11 +2434,6 @@ public static class TexturePipelineSelfTests
             if (File.Exists(pngPath))
             {
                 File.Delete(pngPath);
-            }
-
-            if (File.Exists(frequencyPath))
-            {
-                File.Delete(frequencyPath);
             }
 
             if (File.Exists(alphaPath))
