@@ -735,6 +735,77 @@ public sealed class TgaPixelBuffer
         return new TgaPixelBuffer(width, height, output);
     }
 
+    /// <summary>
+    /// Deterministic area-weighted downscale (equivalent to a box/FANT
+    /// reduction). Used so cutout alpha can be restored and coverage-matched
+    /// at the exact final resolution instead of the neural resolution.
+    /// </summary>
+    public TgaPixelBuffer ResizeArea(int targetWidth, int targetHeight)
+    {
+        if (targetWidth <= 0 || targetHeight <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetWidth));
+        }
+
+        if (targetWidth > Width || targetHeight > Height)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(targetWidth),
+                "Area resize only reduces; enlargement is the neural worker's job.");
+        }
+
+        if (targetWidth == Width && targetHeight == Height)
+        {
+            return new TgaPixelBuffer(Width, Height, (byte[])_rgba.Clone());
+        }
+
+        var horizontalScale = (double)Width / targetWidth;
+        var verticalScale = (double)Height / targetHeight;
+        var output = new byte[checked(targetWidth * targetHeight * 4)];
+        for (var targetY = 0; targetY < targetHeight; targetY++)
+        {
+            var top = targetY * verticalScale;
+            var bottom = (targetY + 1) * verticalScale;
+            var firstY = Math.Max(0, (int)Math.Floor(top));
+            var lastY = Math.Min(Height - 1, (int)Math.Ceiling(bottom) - 1);
+            for (var targetX = 0; targetX < targetWidth; targetX++)
+            {
+                var left = targetX * horizontalScale;
+                var right = (targetX + 1) * horizontalScale;
+                var firstX = Math.Max(0, (int)Math.Floor(left));
+                var lastX = Math.Min(Width - 1, (int)Math.Ceiling(right) - 1);
+                double red = 0;
+                double green = 0;
+                double blue = 0;
+                double alpha = 0;
+                double totalWeight = 0;
+                for (var y = firstY; y <= lastY; y++)
+                {
+                    var weightY = Math.Max(0, Math.Min(bottom, y + 1d) - Math.Max(top, y));
+                    for (var x = firstX; x <= lastX; x++)
+                    {
+                        var weight = weightY
+                            * Math.Max(0, Math.Min(right, x + 1d) - Math.Max(left, x));
+                        var offset = ((y * Width) + x) * 4;
+                        red += _rgba[offset] * weight;
+                        green += _rgba[offset + 1] * weight;
+                        blue += _rgba[offset + 2] * weight;
+                        alpha += _rgba[offset + 3] * weight;
+                        totalWeight += weight;
+                    }
+                }
+
+                var target = ((targetY * targetWidth) + targetX) * 4;
+                output[target] = ClampByte(red / totalWeight);
+                output[target + 1] = ClampByte(green / totalWeight);
+                output[target + 2] = ClampByte(blue / totalWeight);
+                output[target + 3] = ClampByte(alpha / totalWeight);
+            }
+        }
+
+        return new TgaPixelBuffer(targetWidth, targetHeight, output);
+    }
+
     public TgaPixelBuffer WithScaledAlphaFrom(
         TgaPixelBuffer source,
         bool preserveCoverage,

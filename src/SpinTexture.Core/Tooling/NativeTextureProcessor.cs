@@ -122,7 +122,11 @@ public sealed class NativeTextureProcessor
                 var dimensions = UpscaleDimensions.Calculate(
                     request.Metadata.Width,
                     request.Metadata.Height,
-                    request.Options.MaximumDimension);
+                    request.Options.MaximumDimension,
+                    dimensionAlignment:
+                        request.Metadata.TexconvFormat?.StartsWith("BC", StringComparison.OrdinalIgnoreCase) == true
+                            ? 4
+                            : 1);
                 var started = DateTimeOffset.UtcNow;
 
                 if (!dimensions.RequiresUpscale)
@@ -1266,6 +1270,23 @@ public sealed class NativeTextureProcessor
             TgaPixelBuffer image,
             string? destinationPath = null)
         {
+            if (job.PreserveAlphaCoverage
+                && (image.Width > job.Dimensions.OutputWidth
+                    || image.Height > job.Dimensions.OutputHeight))
+            {
+                // texconv's resize would resample alpha again without any
+                // coverage constraint (-keepcoverage only shapes mips), letting
+                // thin cutout strands drift at the final resolution. Reduce on
+                // the CPU and restore coverage-matched alpha at the exact
+                // output size instead.
+                image = image
+                    .ResizeArea(job.Dimensions.OutputWidth, job.Dimensions.OutputHeight)
+                    .WithScaledAlphaFrom(
+                        job.Decoded,
+                        preserveCoverage: true,
+                        wrapEdges: job.Request.WrapEdges);
+            }
+
             var mergedPath = Path.Combine(job.OperationDirectory, "merged.tga");
             await image.WriteFileAsync(mergedPath, cancellationToken).ConfigureAwait(false);
             return await EncodeToDestinationAsync(
