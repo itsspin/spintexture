@@ -4062,9 +4062,9 @@ public static class TexturePipelineSelfTests
     private static void TestPaintedProfileReportCompatibility()
     {
         AssertEqual(
-            3,
+            4,
             TextureBuildReport.CurrentIllustratedProfileRevision,
-            "Graphic Painted profile revision should advance independently to revision three");
+            "Graphic Painted profile revision should advance independently to revision four (painterly stylizer)");
         AssertEqual(
             1,
             TextureBuildReport.CurrentRusticPaintedProfileRevision,
@@ -4090,9 +4090,9 @@ public static class TexturePipelineSelfTests
             TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.RusticPainted),
             "unchanged Rustic Painted builds should retain the base resume operation key");
         AssertEqual(
-            $"{TexturePackWorkflow.FreshBuildResumeOperationKey}-illustrated-3",
+            $"{TexturePackWorkflow.FreshBuildResumeOperationKey}-illustrated-4",
             TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.Illustrated),
-            "Graphic Painted revision three should use a fenced resume operation key");
+            "Graphic Painted revision four should use a fenced resume operation key");
 
         var report = new TextureBuildReport(
             TextureBuildReport.CurrentSchemaVersion,
