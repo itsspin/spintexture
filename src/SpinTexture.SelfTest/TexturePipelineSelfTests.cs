@@ -78,6 +78,9 @@ public static class TexturePipelineSelfTests
         await StagedPackStorageSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Verified staged-pack storage migration tests passed.")
             .ConfigureAwait(false);
+        await StagedPackMetadataSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
+        await output.WriteLineAsync("Staged-pack metadata sidecar and debris-cleanup tests passed.")
+            .ConfigureAwait(false);
         await SelectedPackSwitchSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Selected staged-pack switch tests passed.")
             .ConfigureAwait(false);

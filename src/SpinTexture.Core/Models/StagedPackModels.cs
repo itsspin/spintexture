@@ -55,6 +55,12 @@ public sealed record StagedPackInfo(
     string Summary,
     IReadOnlyList<StagedPackArtifactInfo> Artifacts)
 {
+    /// <summary>
+    /// Optional user-authored sidecar metadata (display name, notes). Never
+    /// participates in identity, validation, or install decisions.
+    /// </summary>
+    public Services.StagedPackUserMetadata? UserMetadata { get; init; }
+
     public bool IsReady => State == StagedPackValidationState.Ready;
     public bool IsMetadataValid => State is
         StagedPackValidationState.MetadataValid or
@@ -64,6 +70,17 @@ public sealed record StagedPackInfo(
         .Where(artifact => artifact.IsValid)
         .Sum(artifact => artifact.Entry.StagedLength);
 }
+
+public sealed record StagedPackDebrisInfo(
+    string Directory,
+    string Name,
+    long Bytes,
+    DateTimeOffset LastWriteUtc);
+
+public sealed record StagedPackDebrisCleanupResult(
+    int DeletedDirectories,
+    long ReclaimedBytes,
+    IReadOnlyList<string> Failures);
 
 public enum StagedPackCompositionConflictKind
 {
