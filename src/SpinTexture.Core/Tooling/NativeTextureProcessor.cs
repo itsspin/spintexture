@@ -1619,17 +1619,18 @@ public sealed class NativeTextureProcessor
         }
 
         if (fidelity.EnhancedStatistics.Samples == 0
-            || fidelity.MeanLuminanceDrift > 10
-            || fidelity.MaximumMeanChannelDrift > 20
+            || fidelity.MeanLuminanceDrift > 14
+            || fidelity.MaximumMeanChannelDrift > 26
             // Graphic abstraction deliberately reorganizes fine texels, so a
-            // faithful-mode PSNR floor rejects healthy illustrated output. Keep
-            // a low catastrophic floor and require the coarse scene layout to
-            // remain strongly correlated instead.
-            || fidelity.RoundTripLuminancePsnr < 12.5
-            || fidelity.CoarseLuminanceCorrelation < 0.72
+            // faithful-mode PSNR floor rejects healthy illustrated output.
+            // These bounds catch catastrophic results (black frames, washed
+            // images, lost scene layout) while allowing a committed painted
+            // art direction with ink accents and vibrance.
+            || fidelity.RoundTripLuminancePsnr < 10.5
+            || fidelity.CoarseLuminanceCorrelation < 0.62
             || (fidelity.SourceEdgeEnergy >= 0.5
-                && fidelity.EdgeEnergyRatio is < 0.18 or > 2.25)
-            || fidelity.ExtremeLuminanceGrowth > 0.02)
+                && fidelity.EdgeEnergyRatio is < 0.12 or > 2.6)
+            || fidelity.ExtremeLuminanceGrowth > 0.035)
         {
             throw new InvalidDataException(
                 "The graphic-painted output exceeded its bounded fidelity limits "
@@ -1646,27 +1647,23 @@ public sealed class NativeTextureProcessor
         NativeTextureProcessRequest request,
         bool preserveAlphaCoverage)
     {
-        var strength = request.Options.Scope switch
+        // The user's stylization-strength slider is the authority; the old
+        // hidden per-scope table quietly watered the art direction down.
+        var strength = request.Options.ResolvedPaintedStyle.Strength;
+        if (request.Options.Scope == AssetScope.SpellEffectsOnly)
         {
-            // Animated effects benefit from cleaner shapes, but retaining their
-            // timing silhouettes matters more than strong material flattening.
-            AssetScope.SpellEffectsOnly => 0.44,
-            AssetScope.CharactersAndEquipmentOnly => 0.72,
-            AssetScope.WorldCharactersAndEquipment => 0.76,
-            AssetScope.AllSafeTextures => 0.76,
-            _ => 0.78
-        };
+            // Animated effects keep their timing silhouettes readable.
+            strength *= 0.55;
+        }
 
         if (request.Classification.Kind == TextureKind.Cutout || preserveAlphaCoverage)
         {
-            // Foliage, hair, fences, decals, and other alpha-tested cards rely
-            // on fine internal edges as well as their outer silhouette. A
-            // restrained finish keeps the requested painted plane treatment
-            // without turning those small structures into broad soft blobs.
-            strength *= 0.58;
+            // Alpha-tested cards keep fine internal edges; a light touch, not
+            // the old 42% cut that made foliage look unstyled.
+            strength *= 0.80;
         }
 
-        return strength;
+        return Math.Clamp(strength, 0, 1);
     }
 
     private static double GetRusticPaintedStrength(NativeTextureProcessRequest request)
@@ -1692,21 +1689,18 @@ public sealed class NativeTextureProcessor
         NativeTextureProcessRequest request,
         bool preserveAlphaCoverage)
     {
-        var strength = request.Options.Scope switch
+        var strength = request.Options.ResolvedPaintedStyle.Strength * 0.92;
+        if (request.Options.Scope == AssetScope.SpellEffectsOnly)
         {
-            AssetScope.SpellEffectsOnly => 0.30,
-            AssetScope.CharactersAndEquipmentOnly => 0.66,
-            AssetScope.WorldCharactersAndEquipment => 0.72,
-            AssetScope.AllSafeTextures => 0.70,
-            _ => 0.78
-        };
+            strength *= 0.50;
+        }
 
         if (request.Classification.Kind == TextureKind.Cutout || preserveAlphaCoverage)
         {
-            strength *= 0.62;
+            strength *= 0.85;
         }
 
-        return strength;
+        return Math.Clamp(strength, 0, 1);
     }
 
     private static (TgaPixelBuffer Image, double StrengthScale) ApplyValidatedPaintedTheme(

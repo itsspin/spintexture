@@ -31,6 +31,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private ScanSummary? _scanSummary;
     private PresetOptionViewModel _selectedPresetOption;
     private PaintedThemeOptionViewModel _selectedPaintedThemeOption;
+    private double _paintedStylizationStrength;
     private double _paintedStrokeSize;
     private double _paintedStrokeStrength;
     private double _paintedDetailPreservation;
@@ -198,6 +199,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         var rememberedPreferences = _preferences.Read();
         var rememberedStyle = (rememberedPreferences.PaintedStyle
             ?? PaintedStyleSettings.Default).Clamped();
+        _paintedStylizationStrength = rememberedStyle.Strength;
         _paintedStrokeSize = rememberedStyle.StrokeSize;
         _paintedStrokeStrength = rememberedStyle.StrokeStrength;
         _paintedDetailPreservation = rememberedStyle.DetailPreservation;
@@ -449,6 +451,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public bool IsGraphicPaintedSelected =>
         SelectedPresetOption.Value == TexturePreset.Illustrated;
 
+    public double PaintedStylizationStrength
+    {
+        get => _paintedStylizationStrength;
+        set => SetPaintedStyleComponent(ref _paintedStylizationStrength, value);
+    }
+
     public double PaintedStrokeSize
     {
         get => _paintedStrokeSize;
@@ -501,11 +509,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private void ResetPaintedStyle()
     {
         var defaults = PaintedStyleSettings.Default;
+        _paintedStylizationStrength = defaults.Strength;
         _paintedStrokeSize = defaults.StrokeSize;
         _paintedStrokeStrength = defaults.StrokeStrength;
         _paintedDetailPreservation = defaults.DetailPreservation;
         _paintedColorSimplification = defaults.ColorSimplification;
         _paintedCanvasGrain = defaults.CanvasGrain;
+        OnPropertyChanged(nameof(PaintedStylizationStrength));
         OnPropertyChanged(nameof(PaintedStrokeSize));
         OnPropertyChanged(nameof(PaintedStrokeStrength));
         OnPropertyChanged(nameof(PaintedDetailPreservation));
@@ -540,7 +550,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _paintedStrokeStrength,
         _paintedDetailPreservation,
         _paintedColorSimplification,
-        _paintedCanvasGrain).Clamped();
+        _paintedCanvasGrain,
+        _paintedStylizationStrength).Clamped();
 
     private PaintedStyleSettings? EffectivePaintedStyle
     {
