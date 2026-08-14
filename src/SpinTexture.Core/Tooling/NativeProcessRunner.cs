@@ -54,13 +54,15 @@ public sealed class NativeProcessRunner : INativeProcessRunner
 
         using var process = new Process { StartInfo = startInfo };
         var stopwatch = Stopwatch.StartNew();
-        long lastActivityTimestamp = Stopwatch.GetTimestamp();
+        long lastActivityTimestamp = 0;
 
         cancellationToken.ThrowIfCancellationRequested();
         if (!process.Start())
         {
             throw new InvalidOperationException($"Could not start {command.DisplayName ?? executablePath}.");
         }
+
+        Interlocked.Exchange(ref lastActivityTimestamp, Stopwatch.GetTimestamp());
 
         var standardOutput = DrainAsync(
             process.StandardOutput,
@@ -155,7 +157,7 @@ public sealed class NativeProcessRunner : INativeProcessRunner
                 await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
                 throw new NativeProcessInactivityException(
                     $"{command.DisplayName ?? command.ExecutablePath} stopped responding for "
-                    + $"{inactivityTimeout.TotalMinutes:0} minutes. The worker was stopped so this batch can be retried safely.",
+                    + $"{FormatInactivityTimeout(inactivityTimeout)}. The worker was stopped so this batch can be retried safely.",
                     command,
                     quietFor);
             }
@@ -173,6 +175,11 @@ public sealed class NativeProcessRunner : INativeProcessRunner
 
         await exitTask.ConfigureAwait(false);
     }
+
+    private static string FormatInactivityTimeout(TimeSpan timeout) =>
+        timeout < TimeSpan.FromMinutes(1)
+            ? $"{timeout.TotalSeconds:0.##} seconds"
+            : $"{timeout.TotalMinutes:0.##} minutes";
 
     private static string ResolveWorkingDirectory(string? requested, string executablePath)
     {

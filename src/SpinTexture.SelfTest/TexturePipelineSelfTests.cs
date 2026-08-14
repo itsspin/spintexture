@@ -1135,24 +1135,16 @@ public static class TexturePipelineSelfTests
             Assert(
                 exception.InactiveDuration >= TimeSpan.FromMilliseconds(100),
                 "inactivity exception should report the quiet interval");
+            Assert(
+                exception.Message.Contains("seconds", StringComparison.Ordinal)
+                && !exception.Message.Contains("0 minutes", StringComparison.Ordinal),
+                "sub-minute inactivity diagnostics should report seconds instead of zero minutes");
         }
 
         var activityLines = new List<string>();
-        var powershell = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.System),
-            "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe");
-        Assert(File.Exists(powershell), "Windows PowerShell should exist for native activity tests");
         var activeCommand = new NativeProcessCommand(
-            powershell,
-            [
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "[Console]::Out.WriteLine('one'); [Console]::Out.Flush(); Start-Sleep -Milliseconds 2500; [Console]::Out.WriteLine('two'); [Console]::Out.Flush(); Start-Sleep -Milliseconds 2500; [Console]::Out.WriteLine('three'); [Console]::Out.Flush()"
-            ],
+            ping,
+            ["-n", "7", "127.0.0.1"],
             DisplayName: "active self-test worker",
             InactivityTimeout: TimeSpan.FromSeconds(4));
         var activeResult = await runner.RunAsync(
@@ -1161,7 +1153,9 @@ public static class TexturePipelineSelfTests
                 cancellationToken)
             .ConfigureAwait(false);
         Assert(activeResult.Succeeded, "periodically active native process should complete");
-        AssertEqual(3, activityLines.Count, "periodic native output should reset inactivity and be forwarded");
+        Assert(
+            activityLines.Count >= 7,
+            "periodic native output should reset inactivity and be forwarded");
 
         var noTimeoutResult = await runner.RunAsync(
                 new NativeProcessCommand(
