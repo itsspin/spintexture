@@ -140,11 +140,20 @@ public sealed class EverQuestTextureScanner
         foreach (var filePath in Directory.EnumerateFiles(root, "*", options))
         {
             var relativePath = Path.GetRelativePath(root, filePath);
-            var firstSegment = relativePath.Split(
+            var segments = relativePath.Split(
                 new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
-                2,
-                StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+                StringSplitOptions.RemoveEmptyEntries);
+            var firstSegment = segments.FirstOrDefault();
             if (firstSegment is not null && IgnoredTopLevelDirectories.Contains(firstSegment))
+            {
+                continue;
+            }
+
+            // UI atlases are addressed by EQUI XML in absolute pixel
+            // coordinates of their authored size; resizing one breaks icon and
+            // gauge rendering, so the loose scan never surfaces UI directories.
+            if (segments.Length > 1
+                && segments[..^1].Any(segment => UiDirectorySegments.Contains(segment)))
             {
                 continue;
             }
@@ -155,4 +164,9 @@ public sealed class EverQuestTextureScanner
             }
         }
     }
+
+    private static readonly HashSet<string> UiDirectorySegments = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "uifiles", "atlas", "ui", "fonts"
+    };
 }
