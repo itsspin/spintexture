@@ -617,7 +617,7 @@ public sealed class NativeTextureProcessor
         var workerThreads = SelectNeuralWorkerThreads(
             Environment.ProcessorCount,
             jobs.Count,
-            jobs.Max(job => EstimateNeuralOutputPixels(job.Request, job.Dimensions)));
+            jobs.Max(EstimateNeuralOutputPixels));
         try
         {
             try
@@ -848,7 +848,7 @@ public sealed class NativeTextureProcessor
         CancellationToken cancellationToken)
     {
         var maximumOutputPixels = jobs.Max(
-            job => EstimateNeuralOutputPixels(job.Request, job.Dimensions));
+            EstimateNeuralOutputPixels);
         var availableMemory = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
         if (availableMemory <= 0)
         {
@@ -1351,7 +1351,7 @@ public sealed class NativeTextureProcessor
         long currentOutputPixels = 0;
         foreach (var job in jobs.OrderBy(candidate => candidate.RequestIndex))
         {
-            var outputPixels = EstimateNeuralOutputPixels(job.Request, job.Dimensions);
+            var outputPixels = EstimateNeuralOutputPixels(job);
             if (current.Count > 0
                 && (current.Count >= MaximumNeuralBatchItems
                     || currentOutputPixels + outputPixels > MaximumNeuralBatchOutputPixels))
@@ -1373,11 +1373,18 @@ public sealed class NativeTextureProcessor
         return chunks;
     }
 
+    private static long EstimateNeuralOutputPixels(PreparedColorJob job) =>
+        EstimateNeuralOutputPixels(job.Request, job.Dimensions, job.EffectivePreset);
+
     private static long EstimateNeuralOutputPixels(
         NativeTextureProcessRequest request,
-        UpscaleDimensions dimensions)
+        UpscaleDimensions dimensions,
+        TexturePreset? effectivePreset = null)
     {
-        var neuralScale = ShouldUseTextureSpecializedReconstruction(request.Options.Preset)
+        // A soft-alpha texture is silently downgraded to the Faithful worker,
+        // which may run at a smaller legacy scale; sizing batches by the
+        // requested preset would overstate its output.
+        var neuralScale = ShouldUseTextureSpecializedReconstruction(effectivePreset ?? request.Options.Preset)
             ? UpscaylCommandBuilder.ModelScale
             : dimensions.RequiredNeuralScale;
         var borderedWidth = checked(
