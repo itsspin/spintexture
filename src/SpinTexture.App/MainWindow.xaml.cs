@@ -2,6 +2,8 @@ using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using SpinTexture.App.Services;
 using SpinTexture.App.ViewModels;
@@ -21,6 +23,7 @@ public partial class MainWindow : Window
     private bool _shutdownDrainComplete;
     private bool _shutdownDrainRunning;
     private bool _closedCleanupComplete;
+    private bool _isDraggingLiveComparison;
 
     internal bool CanStartUpdate => !_viewModel.IsBusy && CanLeaveCurrentSection();
 
@@ -75,24 +78,132 @@ public partial class MainWindow : Window
             throw new InvalidDataException("The live preview comparison surface collapsed below its usable minimum width.");
         }
 
-        double expectedRevealWidth = LiveComparisonSurface.ActualWidth * 0.35d;
-        if (Math.Abs(EnhancedRevealLayer.ActualWidth - expectedRevealWidth) > 2d)
+        if (LiveComparisonSurface.ActualHeight < 400d)
         {
-            throw new InvalidDataException("The live preview enhanced reveal width binding is invalid.");
+            throw new InvalidDataException("The live preview comparison surface did not retain its larger inspection area.");
+        }
+
+        if (ComparisonViewbox.ActualWidth <= 0d
+            || ComparisonViewbox.ActualHeight <= 0d
+            || ComparisonImageStage.ActualWidth <= 0d
+            || ComparisonImageStage.ActualHeight <= 0d
+            || !ReferenceEquals(VisualTreeHelper.GetParent(OriginalPreviewImage), ComparisonImageStage)
+            || !ReferenceEquals(VisualTreeHelper.GetParent(EnhancedPreviewImage), ComparisonImageStage)
+            || OriginalPreviewImage.Stretch != Stretch.Fill
+            || EnhancedPreviewImage.Stretch != Stretch.Fill
+            || !double.IsNaN(OriginalPreviewImage.Width)
+            || !double.IsNaN(EnhancedPreviewImage.Width))
+        {
+            throw new InvalidDataException("The original and enhanced preview images do not share one layout slot.");
+        }
+
+        if (EnhancedPreviewImage.Clip is not RectangleGeometry revealClip)
+        {
+            throw new InvalidDataException("The live preview enhanced image is missing its reveal clip.");
+        }
+
+        double expectedRevealWidth = ComparisonImageStage.ActualWidth * 0.35d;
+        if (Math.Abs(revealClip.Rect.Width - expectedRevealWidth) > 2d
+            || Math.Abs(revealClip.Rect.Height - ComparisonImageStage.ActualHeight) > 2d)
+        {
+            throw new InvalidDataException("The live preview enhanced overlay clip binding is invalid.");
         }
 
         double dividerPosition = Canvas.GetLeft(RevealDivider);
-        double expectedDividerPosition = LiveComparisonSurface.ActualWidth * 0.65d;
+        double expectedDividerPosition = ComparisonInteractionSurface.ActualWidth * 0.35d;
         if (double.IsNaN(dividerPosition)
             || Math.Abs(dividerPosition - expectedDividerPosition) > 2d)
         {
             throw new InvalidDataException("The live preview reveal divider binding is invalid.");
         }
 
+        RevealSlider.Value = 73d;
+        Dispatcher.Invoke(() => { }, DispatcherPriority.DataBind);
+        if (Math.Abs(_viewModel.OptionPreview.RevealPercent - 73d) > 0.1d)
+        {
+            throw new InvalidDataException("The live preview slider did not update its reveal state.");
+        }
+
+        _viewModel.OptionPreview.RevealPercent = 27d;
+        Dispatcher.Invoke(() => { }, DispatcherPriority.DataBind);
+        if (Math.Abs(RevealSlider.Value - 27d) > 0.1d
+            || RevealPercentFromPointer(-10d, 100d) != 0d
+            || RevealPercentFromPointer(50d, 100d) != 50d
+            || RevealPercentFromPointer(110d, 100d) != 100d)
+        {
+            throw new InvalidDataException("The live preview reveal controls did not round-trip or clamp correctly.");
+        }
+
         if (BuildPage.ExtentWidth > BuildPage.ViewportWidth + 2d)
         {
             throw new InvalidDataException("The expanded live preview introduced horizontal overflow at minimum width.");
         }
+    }
+
+    private void OnLiveComparisonMouseLeftButtonDown(
+        object sender,
+        MouseButtonEventArgs e)
+    {
+        _isDraggingLiveComparison = true;
+        ComparisonInteractionSurface.CaptureMouse();
+        UpdateLiveComparisonReveal(e.GetPosition(ComparisonInteractionSurface));
+        e.Handled = true;
+    }
+
+    private void OnLiveComparisonMouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_isDraggingLiveComparison || e.LeftButton != MouseButtonState.Pressed)
+        {
+            return;
+        }
+
+        UpdateLiveComparisonReveal(e.GetPosition(ComparisonInteractionSurface));
+        e.Handled = true;
+    }
+
+    private void OnLiveComparisonMouseLeftButtonUp(
+        object sender,
+        MouseButtonEventArgs e)
+    {
+        if (!_isDraggingLiveComparison)
+        {
+            return;
+        }
+
+        UpdateLiveComparisonReveal(e.GetPosition(ComparisonInteractionSurface));
+        _isDraggingLiveComparison = false;
+        ComparisonInteractionSurface.ReleaseMouseCapture();
+        e.Handled = true;
+    }
+
+    private void OnLiveComparisonLostMouseCapture(object sender, MouseEventArgs e) =>
+        _isDraggingLiveComparison = false;
+
+    private void UpdateLiveComparisonReveal(Point position)
+    {
+        _viewModel.OptionPreview.RevealPercent = RevealPercentFromPointer(
+            position.X,
+            ComparisonInteractionSurface.ActualWidth);
+    }
+
+    internal static double RevealPercentFromPointer(double pointerX, double width)
+    {
+        if (!double.IsFinite(width) || width <= 0d || double.IsNaN(pointerX))
+        {
+            return 0d;
+        }
+
+        if (double.IsPositiveInfinity(pointerX))
+        {
+            return 100d;
+        }
+
+        if (double.IsNegativeInfinity(pointerX))
+        {
+            return 0d;
+        }
+
+        return Math.Clamp(pointerX / width * 100d, 0d, 100d);
     }
 
     public MainWindow()

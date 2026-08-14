@@ -296,7 +296,20 @@ public partial class App : Application
         }
         catch
         {
-            return null;
+            try
+            {
+                var fallbackPath = Path.Combine(
+                    Path.GetTempPath(),
+                    "SpinTexture-startup-error.log");
+                File.WriteAllText(
+                    fallbackPath,
+                    $"{DateTimeOffset.UtcNow:O}{Environment.NewLine}{exception}");
+                return fallbackPath;
+            }
+            catch
+            {
+                return null;
+            }
         }
     }
 

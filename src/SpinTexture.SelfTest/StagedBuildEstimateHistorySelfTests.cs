@@ -113,6 +113,51 @@ internal static class StagedBuildEstimateHistorySelfTests
                     options),
                 "painted theme metadata must not split history for a non-painted preset");
 
+            var paintedCompletedUtc = legacyCompletedUtc.AddHours(2);
+            await CreateBuildAsync(
+                    paths,
+                    "build-stale-illustrated-profile",
+                    paintedOptions,
+                    paintedCompletedUtc,
+                    [2_048],
+                    TextureBuildReport.CurrentSchemaVersion,
+                    900,
+                    paintedCompletedUtc.AddMinutes(-15),
+                    paintedCompletedUtc.AddMinutes(-15),
+                    false,
+                    false,
+                    0,
+                    TextureProcessingPipeline.CurrentRevision,
+                    cancellationToken,
+                    paintedProfileRevision: TextureBuildReport.CurrentIllustratedProfileRevision - 1)
+                .ConfigureAwait(false);
+            Assert(
+                StagedBuildEstimateHistory.FindLatest(paths, paintedOptions) is null,
+                "stale Graphic Painted profile timing must not calibrate the revision-two route");
+
+            var rusticOptions = paintedOptions with { Preset = TexturePreset.RusticPainted };
+            await CreateBuildAsync(
+                    paths,
+                    "build-current-rustic-profile",
+                    rusticOptions,
+                    paintedCompletedUtc.AddMinutes(1),
+                    [4_096],
+                    TextureBuildReport.CurrentSchemaVersion,
+                    1_200,
+                    paintedCompletedUtc.AddMinutes(-19),
+                    paintedCompletedUtc.AddMinutes(-19),
+                    false,
+                    false,
+                    0,
+                    TextureProcessingPipeline.CurrentRevision,
+                    cancellationToken,
+                    paintedProfileRevision: TextureBuildReport.CurrentRusticPaintedProfileRevision)
+                .ConfigureAwait(false);
+            AssertEqual(
+                "build-current-rustic-profile",
+                StagedBuildEstimateHistory.FindLatest(paths, rusticOptions)?.BuildId,
+                "current Rustic Painted revision-one timing remains valid history");
+
             var reportedCompletedUtc = legacyCompletedUtc.AddDays(1);
             await CreateBuildAsync(
                     paths,
@@ -247,7 +292,8 @@ internal static class StagedBuildEstimateHistorySelfTests
         bool isSourceMismatchRepair,
         int reusedTextures,
         int texturePipelineRevision,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int paintedProfileRevision = 0)
     {
         paths.EnsureWorkspaceDirectories();
         var buildDirectory = Path.Combine(paths.StagingPath, buildId);
@@ -291,7 +337,8 @@ internal static class StagedBuildEstimateHistorySelfTests
             DurationSeconds = durationSeconds,
             IsIncrementalRepair = isIncrementalRepair,
             IsSourceMismatchRepair = isSourceMismatchRepair,
-            TexturePipelineRevision = texturePipelineRevision
+            TexturePipelineRevision = texturePipelineRevision,
+            PaintedProfileRevision = paintedProfileRevision
         };
 
         await WriteJsonAsync(

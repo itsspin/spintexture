@@ -15,6 +15,8 @@ internal static class PaintedRepairSafetySelfTests
     {
         await TestOrdinaryCombinedRepairPreservesPaintedIdentityAsync(cancellationToken)
             .ConfigureAwait(false);
+        await TestLegacyPaintedManualReprocessFailsClosedAsync(cancellationToken)
+            .ConfigureAwait(false);
         foreach (var failure in Enum.GetValues<PaintedFailure>())
         {
             await TestRequestedProfileFailureStopsRepairAsync(failure, cancellationToken)
@@ -27,6 +29,136 @@ internal static class PaintedRepairSafetySelfTests
             .ConfigureAwait(false);
         await TestFailureCannotPublishMixedReplacementAsync(cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    private static async Task TestLegacyPaintedManualReprocessFailsClosedAsync(
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-painted-stale-manual-{Guid.NewGuid():N}");
+        var installPath = Path.Combine(root, "EverQuest");
+        var workspacePath = Path.Combine(root, "Workspace");
+        Directory.CreateDirectory(installPath);
+        try
+        {
+            var paths = new ProjectPaths(installPath, workspacePath);
+            await File.WriteAllBytesAsync(
+                    Path.Combine(installPath, "eqgame.exe"),
+                    "synthetic-eqgame"u8.ToArray(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await File.WriteAllTextAsync(
+                    Path.Combine(installPath, "paintzone.xmi"),
+                    "synthetic-zone-marker",
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            var archivePath = Path.Combine(installPath, "paintzone.s3d");
+            await WriteArchiveAsync(
+                    archivePath,
+                    [new("surface.tga", CreateTarga(32, 32, seed: 61))],
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var enhancedArchive = Path.Combine(root, "enhanced-paintzone.s3d");
+            await WriteArchiveAsync(
+                    enhancedArchive,
+                    [new("surface.tga", CreateTarga(128, 128, seed: 62))],
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            var options = new UpscaleOptions(
+                TexturePreset.Illustrated,
+                AssetScope.WorldOnly,
+                MaximumDimension: 1024,
+                GenerateMipMaps: false,
+                InstallAfterBuild: false,
+                PaintedTheme: PaintedTheme.DarkGothic);
+            var baseline = await new StagedBuildService().BuildAsync(
+                    new StagedBuildRequest(
+                        paths,
+                        options,
+                        [
+                            new StagedBuildItem(
+                                "paintzone.s3d",
+                                new DelegateStagedArtifactBuilder(async (context, token) =>
+                                {
+                                    var bytes = await File.ReadAllBytesAsync(enhancedArchive, token)
+                                        .ConfigureAwait(false);
+                                    await File.WriteAllBytesAsync(context.DestinationPath, bytes, token)
+                                        .ConfigureAwait(false);
+                                }))
+                        ],
+                        "legacy-painted-manual-baseline"),
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            await using (var reportStream = new FileStream(
+                Path.Combine(baseline.BuildDirectory, "texture-report.json"),
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None))
+            {
+                await JsonSerializer.SerializeAsync(
+                        reportStream,
+                        new TextureBuildReport(
+                            TextureBuildReport.CurrentSchemaVersion,
+                            baseline.BuildId,
+                            DateTimeOffset.UtcNow,
+                            installPath,
+                            baseline.BuildDirectory,
+                            1,
+                            new TextureBuildStatistics(
+                                1,
+                                1,
+                                0,
+                                1,
+                                1,
+                                new Dictionary<string, int>(),
+                                []))
+                        {
+                            TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
+                            PaintedProfileRevision =
+                                TextureBuildReport.CurrentIllustratedProfileRevision - 1
+                        },
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            var baselineFingerprint = await FileIntegrity.FingerprintAsync(
+                    Path.Combine(baseline.BuildDirectory, "payload", "paintzone.s3d"),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var failure = await AssertThrowsAsync<InvalidOperationException>(
+                    () => new TexturePackWorkflow(clientClosedGuard: () => { })
+                        .RepairStagedPackAsync(
+                            paths,
+                            baseline.ManifestPath,
+                            cancellationToken: cancellationToken,
+                            textureOverrides:
+                            [
+                                new TextureOverride(
+                                    "paintzone.s3d",
+                                    "surface.tga",
+                                    TextureOverrideAction.Reprocess,
+                                    TexturePreset.Illustrated)
+                            ]),
+                    "a stale painted pack must reject a mixed-revision manual redo")
+                .ConfigureAwait(false);
+            Assert(
+                failure.Message.Contains("will not mix", StringComparison.OrdinalIgnoreCase),
+                "stale painted redo should explain that algorithm revisions cannot be mixed");
+            AssertEqual(
+                baselineFingerprint,
+                await FileIntegrity.FingerprintAsync(
+                        Path.Combine(baseline.BuildDirectory, "payload", "paintzone.s3d"),
+                        cancellationToken)
+                    .ConfigureAwait(false),
+                "stale painted redo leaves the immutable baseline unchanged");
+        }
+        finally
+        {
+            DeleteTree(root);
+        }
     }
 
     private static async Task TestFilteredChangedPaintedMemberFailsClosedAsync(
@@ -361,7 +493,7 @@ internal static class PaintedRepairSafetySelfTests
                                 []))
                         {
                             TexturePipelineRevision = 0,
-                            PaintedProfileRevision = TextureBuildReport.CurrentPaintedProfileRevision
+                            PaintedProfileRevision = TextureBuildReport.CurrentIllustratedProfileRevision
                         },
                         cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
@@ -389,7 +521,7 @@ internal static class PaintedRepairSafetySelfTests
             AssertEqual(0, repaired.Report.Statistics.EnhancedTextures, "valid painted members must not be regenerated");
             AssertEqual(0, repaired.Report.Statistics.FallbackTextures, "painted repair fallback count");
             AssertEqual(
-                TextureBuildReport.CurrentPaintedProfileRevision,
+                TextureBuildReport.CurrentIllustratedProfileRevision,
                 repaired.Report.PaintedProfileRevision,
                 "ordinary repair must retain painted profile provenance");
             foreach (var archiveName in archiveNames)

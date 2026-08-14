@@ -23,6 +23,7 @@ public interface ITextureWorkflowService
         string installPath,
         UpscaleOptions options,
         ScanSummary? analysis,
+        ulong sampleSeed,
         IProgress<ProgressUpdate>? progress,
         CancellationToken cancellationToken);
 
@@ -92,6 +93,7 @@ public sealed class TextureWorkflowService : ITextureWorkflowService
         string installPath,
         UpscaleOptions options,
         ScanSummary? analysis,
+        ulong sampleSeed,
         IProgress<ProgressUpdate>? progress,
         CancellationToken cancellationToken) =>
         optionPreviewService.GenerateAsync(
@@ -99,14 +101,16 @@ public sealed class TextureWorkflowService : ITextureWorkflowService
             options,
             analysis,
             progress,
-            cancellationToken);
+            cancellationToken,
+            sampleSeed);
 
     public Task<RecoverableStagedBuild?> FindRecoverableBuildAsync(
         string installPath,
         CancellationToken cancellationToken) =>
         new StagedBuildService().FindRecoverableBuildAsync(
             WorkspaceLocator.ForInstall(installPath, workspaceRoot),
-            TexturePackWorkflow.FreshBuildResumeOperationKey,
+            (UpscaleOptions options) =>
+                TexturePackWorkflow.GetFreshBuildResumeOperationKey(options.Preset),
             cancellationToken);
 
     public async Task RestoreAsync(

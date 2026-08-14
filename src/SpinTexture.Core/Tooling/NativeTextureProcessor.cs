@@ -1023,16 +1023,20 @@ public sealed class NativeTextureProcessor
         }
 
         ValidateNeuralOutputForPreset(key.WorkerPreset, fidelity);
+        double? paintedThemeScale = null;
         if (key.WorkerPreset == TexturePreset.Illustrated)
         {
-            var painted = cropped.ApplyGraphicPaintedFinish(
+            var graphicPainted = cropped.ApplyGraphicPaintedFinish(
                 GetGraphicPaintedStrength(job.Request),
                 job.Request.WrapEdges);
-            painted = painted.ApplyPaintedTheme(
+            ValidateGraphicPaintedOutput(CalculateFidelityMetrics(job.Decoded, graphicPainted));
+            var themed = ApplyValidatedPaintedTheme(
+                job.Decoded,
+                graphicPainted,
                 job.Request.Options.PaintedTheme,
                 GetPaintedThemeStrength(job.Request));
-            ValidateGraphicPaintedOutput(CalculateFidelityMetrics(job.Decoded, painted));
-            cropped = painted;
+            cropped = themed.Image;
+            paintedThemeScale = themed.StrengthScale;
         }
         else if (key.WorkerPreset == TexturePreset.RusticPainted)
         {
@@ -1060,13 +1064,16 @@ public sealed class NativeTextureProcessor
         return new NativeTextureProcessResult(
             job.Request.DestinationPath,
             job.Dimensions,
-            GetProcessingRoute(job, key),
+            GetProcessingRoute(job, key, paintedThemeScale),
             DateTimeOffset.UtcNow - job.Started,
             mipResult.MipCount,
             mipResult.UsedCutoutFloor);
     }
 
-    private static string GetProcessingRoute(PreparedColorJob job, NeuralBatchKey key)
+    private static string GetProcessingRoute(
+        PreparedColorJob job,
+        NeuralBatchKey key,
+        double? paintedThemeScale)
     {
         if (job.HasSoftTranslucentAlpha)
         {
@@ -1084,7 +1091,7 @@ public sealed class NativeTextureProcessor
         {
             TexturePreset.MaximumDetail => "Batched Real-ESRGAN maximum-detail reconstruction with TTA",
             TexturePreset.Illustrated =>
-                $"Batched Real-ESRGAN illustrated reconstruction with {FormatPaintedTheme(job.Request.Options.PaintedTheme)} finishing",
+                $"Batched Real-ESRGAN illustrated reconstruction with {FormatPaintedTheme(job.Request.Options.PaintedTheme)} finishing{FormatPaintedThemeScale(paintedThemeScale)}",
             TexturePreset.RusticPainted =>
                 "Batched graphic painted reconstruction with bounded rustic grading",
             TexturePreset.Faithful when job.EffectivePreset != TexturePreset.Faithful =>
@@ -1284,15 +1291,20 @@ public sealed class NativeTextureProcessor
         // users selected this profile to see. Alpha is still restored separately
         // in RunNeuralColorPassAsync, including cutout coverage preservation.
         var finalImage = primary.Image;
+        double? paintedThemeScale = null;
         if (effectivePreset == TexturePreset.Illustrated)
         {
-            finalImage = finalImage.ApplyGraphicPaintedFinish(
+            var graphicPainted = finalImage.ApplyGraphicPaintedFinish(
                 GetGraphicPaintedStrength(request),
                 request.WrapEdges);
-            finalImage = finalImage.ApplyPaintedTheme(
+            ValidateGraphicPaintedOutput(CalculateFidelityMetrics(decoded, graphicPainted));
+            var themed = ApplyValidatedPaintedTheme(
+                decoded,
+                graphicPainted,
                 request.Options.PaintedTheme,
                 GetPaintedThemeStrength(request));
-            ValidateGraphicPaintedOutput(CalculateFidelityMetrics(decoded, finalImage));
+            finalImage = themed.Image;
+            paintedThemeScale = themed.StrengthScale;
         }
         else if (effectivePreset == TexturePreset.RusticPainted)
         {
@@ -1326,7 +1338,7 @@ public sealed class NativeTextureProcessor
             TexturePreset.MaximumDetail =>
                 "Real-ESRGAN maximum-detail reconstruction with TTA",
             TexturePreset.Illustrated =>
-                $"Real-ESRGAN illustrated reconstruction with {FormatPaintedTheme(request.Options.PaintedTheme)} finishing",
+                $"Real-ESRGAN illustrated reconstruction with {FormatPaintedTheme(request.Options.PaintedTheme)} finishing{FormatPaintedThemeScale(paintedThemeScale)}",
             TexturePreset.RusticPainted =>
                 "Real-ESRGAN graphic painted reconstruction with bounded rustic grading",
             _ =>
@@ -1601,11 +1613,11 @@ public sealed class NativeTextureProcessor
     {
         var strength = request.Options.Scope switch
         {
-            AssetScope.SpellEffectsOnly => 0.24,
-            AssetScope.CharactersAndEquipmentOnly => 0.52,
-            AssetScope.WorldCharactersAndEquipment => 0.58,
-            AssetScope.AllSafeTextures => 0.55,
-            _ => 0.62
+            AssetScope.SpellEffectsOnly => 0.30,
+            AssetScope.CharactersAndEquipmentOnly => 0.66,
+            AssetScope.WorldCharactersAndEquipment => 0.72,
+            AssetScope.AllSafeTextures => 0.70,
+            _ => 0.78
         };
 
         if (request.Classification.Kind == TextureKind.Cutout)
@@ -1615,6 +1627,54 @@ public sealed class NativeTextureProcessor
 
         return strength;
     }
+
+    private static (TgaPixelBuffer Image, double StrengthScale) ApplyValidatedPaintedTheme(
+        TgaPixelBuffer source,
+        TgaPixelBuffer graphicPainted,
+        PaintedTheme theme,
+        double requestedStrength)
+    {
+        if (theme == PaintedTheme.ClassicPainted)
+        {
+            // The shared graphic-painted result was validated immediately
+            // before this call. Classic adds no palette direction, so avoid a
+            // redundant full-resolution clone and second fidelity scan.
+            return (graphicPainted, 1d);
+        }
+
+        // The common graphic-painted reconstruction is already validated. A
+        // palette direction may sit just beyond the aggregate gate on one
+        // unusual texture, so reduce only that theme treatment before allowing
+        // the normal faithful fallback to replace the complete illustrated
+        // route. This keeps Comic Ink and the zone palettes visible far more
+        // consistently without accepting unsafe output.
+        double[] scales = [1d, 0.8d, 0.6d];
+        InvalidDataException? lastFailure = null;
+        foreach (var scale in scales)
+        {
+            var themed = graphicPainted.ApplyPaintedTheme(
+                theme,
+                requestedStrength * scale);
+            try
+            {
+                ValidateGraphicPaintedOutput(CalculateFidelityMetrics(source, themed));
+                return (themed, scale);
+            }
+            catch (InvalidDataException exception)
+            {
+                lastFailure = exception;
+            }
+        }
+
+        throw new InvalidDataException(
+            $"The {FormatPaintedTheme(theme)} treatment exceeded its bounded fidelity limits even at reduced strength.",
+            lastFailure);
+    }
+
+    private static string FormatPaintedThemeScale(double? scale) =>
+        scale is { } value && value < 0.999d
+            ? $" at {value:P0} safety strength"
+            : string.Empty;
 
     private static string FormatPaintedTheme(PaintedTheme theme) => theme switch
     {

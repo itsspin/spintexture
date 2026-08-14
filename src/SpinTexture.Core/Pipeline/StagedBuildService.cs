@@ -18,13 +18,38 @@ public sealed class StagedBuildService
         _manifestStore = manifestStore ?? new ManifestStore();
     }
 
-    public async Task<RecoverableStagedBuild?> FindRecoverableBuildAsync(
+    public Task<RecoverableStagedBuild?> FindRecoverableBuildAsync(
         ProjectPaths paths,
         string resumeOperationKey,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(paths);
         var operationKey = PathGuard.ValidateIdentifier(resumeOperationKey, "operation");
+        return FindRecoverableBuildCoreAsync(
+            paths,
+            _ => operationKey,
+            cancellationToken);
+    }
+
+    public Task<RecoverableStagedBuild?> FindRecoverableBuildAsync(
+        ProjectPaths paths,
+        Func<UpscaleOptions, string> resumeOperationKeyResolver,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(resumeOperationKeyResolver);
+        return FindRecoverableBuildCoreAsync(
+            paths,
+            options => PathGuard.ValidateIdentifier(
+                resumeOperationKeyResolver(options),
+                "operation"),
+            cancellationToken);
+    }
+
+    private async Task<RecoverableStagedBuild?> FindRecoverableBuildCoreAsync(
+        ProjectPaths paths,
+        Func<UpscaleOptions, string> resumeOperationKeyResolver,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
         if (!Directory.Exists(paths.StagingPath))
         {
             return null;
@@ -47,6 +72,7 @@ public sealed class StagedBuildService
             {
                 var checkpoint = await ReadCheckpointAsync(checkpointPath, cancellationToken)
                     .ConfigureAwait(false);
+                var operationKey = resumeOperationKeyResolver(checkpoint.Options);
                 if (!checkpoint.ResumeOperationKey.Equals(operationKey, StringComparison.Ordinal))
                 {
                     continue;
@@ -56,7 +82,7 @@ public sealed class StagedBuildService
                     checkpoint.InstallPath,
                     checkpoint.Options,
                     checkpoint.RequireAllItems,
-                    checkpoint.ResumeOperationKey,
+                    operationKey,
                     checkpoint.Items);
                 ValidateCheckpoint(
                     checkpoint,
@@ -64,7 +90,7 @@ public sealed class StagedBuildService
                     checkpoint.Items,
                     calculatedPlan,
                     checkpoint.RequireAllItems,
-                    operationKey,
+                    checkpoint.ResumeOperationKey,
                     directory);
                 var completedByPath = checkpoint.CompletedArtifacts.ToDictionary(
                     item => item.RelativeInstallPath,

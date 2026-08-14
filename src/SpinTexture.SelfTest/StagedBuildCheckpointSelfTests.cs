@@ -16,6 +16,7 @@ internal static class StagedBuildCheckpointSelfTests
         await TestFinalizerRejectsCorruptPreviewAsync(cancellationToken).ConfigureAwait(false);
         await TestLockedCheckpointNeverPublishesAsync(cancellationToken).ConfigureAwait(false);
         await TestRecoveryDiscoverySkipsReparseDirectoryAsync(cancellationToken).ConfigureAwait(false);
+        await TestFreshBuildProfileRecoveryResolverAsync(cancellationToken).ConfigureAwait(false);
         await TestCancellationRetainsCheckpointAsync(cancellationToken).ConfigureAwait(false);
         await TestTamperedPayloadRebuildsOnlyArtifactAsync(cancellationToken).ConfigureAwait(false);
         await TestChangedPlanNeverResumesAsync(cancellationToken).ConfigureAwait(false);
@@ -294,6 +295,103 @@ internal static class StagedBuildCheckpointSelfTests
             cancellationToken).ConfigureAwait(false);
         Assert(recovery is null,
             "recovery discovery never reads a checkpoint through a staged-library reparse directory");
+    }
+
+    private static async Task TestFreshBuildProfileRecoveryResolverAsync(
+        CancellationToken cancellationToken)
+    {
+        static string ResolveFreshKey(UpscaleOptions options) =>
+            TexturePackWorkflow.GetFreshBuildResumeOperationKey(options.Preset);
+
+        using (var fixture = await Fixture.CreateAsync("fresh-base-key", cancellationToken)
+                   .ConfigureAwait(false))
+        {
+            var counts = new int[2];
+            await AssertThrowsAsync<IOException>(() => new StagedBuildService().BuildAsync(
+                new StagedBuildRequest(
+                    fixture.Paths,
+                    fixture.Options,
+                    CreateBuilders(fixture, counts, index =>
+                    {
+                        if (index == 1)
+                        {
+                            throw new IOException("simulated base-profile interruption");
+                        }
+                    }),
+                    ResumeOperationKey: TexturePackWorkflow.GetFreshBuildResumeOperationKey(
+                        fixture.Options.Preset)),
+                cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+            var recovery = await new StagedBuildService().FindRecoverableBuildAsync(
+                    fixture.Paths,
+                    ResolveFreshKey,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            Assert(
+                recovery is { VerifiedArtifacts: 1 }
+                && recovery.Options.Preset == fixture.Options.Preset,
+                "the preset-aware resolver finds a valid checkpoint that retains the base operation key");
+        }
+
+        using (var fixture = await Fixture.CreateAsync("fresh-illustrated-key", cancellationToken)
+                   .ConfigureAwait(false))
+        {
+            var illustratedOptions = fixture.Options with { Preset = TexturePreset.Illustrated };
+            var counts = new int[2];
+            await AssertThrowsAsync<IOException>(() => new StagedBuildService().BuildAsync(
+                new StagedBuildRequest(
+                    fixture.Paths,
+                    illustratedOptions,
+                    CreateBuilders(fixture, counts, index =>
+                    {
+                        if (index == 1)
+                        {
+                            throw new IOException("simulated illustrated-profile interruption");
+                        }
+                    }),
+                    ResumeOperationKey: TexturePackWorkflow.GetFreshBuildResumeOperationKey(
+                        illustratedOptions.Preset)),
+                cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+            var recovery = await new StagedBuildService().FindRecoverableBuildAsync(
+                    fixture.Paths,
+                    ResolveFreshKey,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            Assert(
+                recovery is { VerifiedArtifacts: 1 }
+                && recovery.Options.Preset == TexturePreset.Illustrated,
+                "the same preset-aware resolver accepts the revision-fenced Graphic Painted checkpoint");
+        }
+
+        using (var fixture = await Fixture.CreateAsync("stale-illustrated-base-key", cancellationToken)
+                   .ConfigureAwait(false))
+        {
+            var illustratedOptions = fixture.Options with { Preset = TexturePreset.Illustrated };
+            var counts = new int[2];
+            await AssertThrowsAsync<IOException>(() => new StagedBuildService().BuildAsync(
+                new StagedBuildRequest(
+                    fixture.Paths,
+                    illustratedOptions,
+                    CreateBuilders(fixture, counts, index =>
+                    {
+                        if (index == 1)
+                        {
+                            throw new IOException("simulated pre-revision illustrated interruption");
+                        }
+                    }),
+                    ResumeOperationKey: TexturePackWorkflow.FreshBuildResumeOperationKey),
+                cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+            var recovery = await new StagedBuildService().FindRecoverableBuildAsync(
+                    fixture.Paths,
+                    ResolveFreshKey,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            Assert(
+                recovery is null,
+                "a pre-revision Graphic Painted checkpoint must not mix old and new art algorithms");
+        }
     }
 
     private static async Task TestRestartResumeAndFinalizationAsync(CancellationToken cancellationToken)

@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Security.Cryptography;
 using System.Windows.Media.Imaging;
 using SpinTexture.App.Services;
 using SpinTexture.Core.Models;
@@ -32,6 +33,7 @@ public sealed class TextureOptionPreviewViewModel : ObservableObject, IDisposabl
     private string progressText = "Preview generation is idle";
     private string errorText = string.Empty;
     private double revealPercent = 50d;
+    private ulong sampleSeed = CreateSampleSeed();
 
     public TextureOptionPreviewViewModel(ITextureWorkflowService workflow)
     {
@@ -43,6 +45,9 @@ public sealed class TextureOptionPreviewViewModel : ObservableObject, IDisposabl
         RefreshCommand = new RelayCommand(
             _ => ScheduleRefresh(TimeSpan.Zero),
             _ => IsExpanded && IsReady && !IsSuspended && !IsLoading);
+        NewSamplesCommand = new RelayCommand(
+            _ => SelectNewSamples(),
+            _ => IsExpanded && IsReady && !IsSuspended && !IsLoading);
         ShowOriginalCommand = new RelayCommand(_ => RevealPercent = 0d);
         ShowSplitCommand = new RelayCommand(_ => RevealPercent = 50d);
         ShowEnhancedCommand = new RelayCommand(_ => RevealPercent = 100d);
@@ -52,6 +57,7 @@ public sealed class TextureOptionPreviewViewModel : ObservableObject, IDisposabl
 
     public RelayCommand ToggleExpandedCommand { get; }
     public RelayCommand RefreshCommand { get; }
+    public RelayCommand NewSamplesCommand { get; }
     public RelayCommand ShowOriginalCommand { get; }
     public RelayCommand ShowSplitCommand { get; }
     public RelayCommand ShowEnhancedCommand { get; }
@@ -71,6 +77,7 @@ public sealed class TextureOptionPreviewViewModel : ObservableObject, IDisposabl
             OnPropertyChanged(nameof(ShowExpandedHint));
             ToggleExpandedCommand.RaiseCanExecuteChanged();
             RefreshCommand.RaiseCanExecuteChanged();
+            NewSamplesCommand.RaiseCanExecuteChanged();
         }
     }
 
@@ -89,6 +96,7 @@ public sealed class TextureOptionPreviewViewModel : ObservableObject, IDisposabl
             OnPropertyChanged(nameof(ToggleButtonText));
             ToggleExpandedCommand.RaiseCanExecuteChanged();
             RefreshCommand.RaiseCanExecuteChanged();
+            NewSamplesCommand.RaiseCanExecuteChanged();
         }
     }
 
@@ -107,6 +115,7 @@ public sealed class TextureOptionPreviewViewModel : ObservableObject, IDisposabl
             OnPropertyChanged(nameof(ShowEmptyState));
             OnPropertyChanged(nameof(ShowExpandedHint));
             RefreshCommand.RaiseCanExecuteChanged();
+            NewSamplesCommand.RaiseCanExecuteChanged();
         }
     }
 
@@ -118,6 +127,7 @@ public sealed class TextureOptionPreviewViewModel : ObservableObject, IDisposabl
             if (SetProperty(ref isSuspended, value))
             {
                 RefreshCommand.RaiseCanExecuteChanged();
+                NewSamplesCommand.RaiseCanExecuteChanged();
             }
         }
     }
@@ -162,7 +172,9 @@ public sealed class TextureOptionPreviewViewModel : ObservableObject, IDisposabl
 
     public string ProfileChipText => request is null
         ? "Current profile"
-        : PresetDisplayName(request.Options.Preset);
+        : request.Options.Preset == TexturePreset.Illustrated
+            ? $"{PresetDisplayName(request.Options.Preset)} / {ThemeDisplayName(request.Options.PaintedTheme)}"
+            : PresetDisplayName(request.Options.Preset);
 
     public string CapChipText => request is null
         ? "Output ceiling"
@@ -412,9 +424,15 @@ public sealed class TextureOptionPreviewViewModel : ObservableObject, IDisposabl
             : "Selecting representative source textures...";
 
         long version = ++requestVersion;
+        ulong pendingSampleSeed = sampleSeed;
         var cancellation = new CancellationTokenSource();
         refreshCancellation = cancellation;
-        Task nextRefresh = RefreshAsync(request, delay, version, cancellation);
+        Task nextRefresh = RefreshAsync(
+            request,
+            pendingSampleSeed,
+            delay,
+            version,
+            cancellation);
         activeRefresh = Task.WhenAll(activeRefresh, nextRefresh);
     }
 
@@ -433,6 +451,7 @@ public sealed class TextureOptionPreviewViewModel : ObservableObject, IDisposabl
 
     private async Task RefreshAsync(
         PreviewRequestState pendingRequest,
+        ulong pendingSampleSeed,
         TimeSpan delay,
         long version,
         CancellationTokenSource cancellation)
@@ -460,6 +479,7 @@ public sealed class TextureOptionPreviewViewModel : ObservableObject, IDisposabl
                 pendingRequest.InstallPath,
                 pendingRequest.Options,
                 pendingRequest.Analysis,
+                pendingSampleSeed,
                 progress,
                 cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
@@ -542,6 +562,20 @@ public sealed class TextureOptionPreviewViewModel : ObservableObject, IDisposabl
         CancellationTokenSource? previous = refreshCancellation;
         refreshCancellation = null;
         previous?.Cancel();
+    }
+
+    private void SelectNewSamples()
+    {
+        sampleSeed = sampleSeed == ulong.MaxValue ? 0UL : sampleSeed + 1UL;
+        StatusText = "Choosing another varied set of safe textures from this asset selection.";
+        ScheduleRefresh(TimeSpan.Zero);
+    }
+
+    private static ulong CreateSampleSeed()
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        RandomNumberGenerator.Fill(bytes);
+        return BitConverter.ToUInt64(bytes);
     }
 
     private void OnStateChanged()
@@ -664,17 +698,21 @@ public sealed class TextureOptionPreviewSampleViewModel
     public string ThemeText => DescribeTheme(
         RequestedPreset,
         ActualPreset,
+        RequestedTheme,
         ResolvedTheme,
         UsedFallback);
 
     internal static string DescribeTheme(
         TexturePreset requestedPreset,
         TexturePreset actualPreset,
+        PaintedTheme requestedTheme,
         PaintedTheme resolvedTheme,
         bool usedFallback) => actualPreset switch
     {
         TexturePreset.Illustrated =>
-            $"Theme: {TextureOptionPreviewViewModel.ThemeDisplayName(resolvedTheme)}",
+            requestedTheme == PaintedTheme.ZoneAware
+                ? $"Theme: Follow each zone -> {TextureOptionPreviewViewModel.ThemeDisplayName(resolvedTheme)}"
+                : $"Theme: {TextureOptionPreviewViewModel.ThemeDisplayName(resolvedTheme)}",
         TexturePreset.RusticPainted =>
             "Rustic painted grading applied",
         _ when usedFallback
@@ -689,6 +727,7 @@ public sealed class TextureOptionPreviewSampleViewModel
                 TexturePreset.Illustrated,
                 TexturePreset.Illustrated,
                 PaintedTheme.DarkGothic,
+                PaintedTheme.DarkGothic,
                 usedFallback: false)
             .Equals("Theme: Dark gothic", StringComparison.Ordinal))
         {
@@ -698,6 +737,7 @@ public sealed class TextureOptionPreviewSampleViewModel
         if (!DescribeTheme(
                 TexturePreset.RusticPainted,
                 TexturePreset.RusticPainted,
+                PaintedTheme.ClassicPainted,
                 PaintedTheme.ClassicPainted,
                 usedFallback: false)
             .Equals("Rustic painted grading applied", StringComparison.Ordinal))
@@ -709,12 +749,32 @@ public sealed class TextureOptionPreviewSampleViewModel
                 TexturePreset.Illustrated,
                 TexturePreset.Faithful,
                 PaintedTheme.DarkGothic,
+                PaintedTheme.DarkGothic,
                 usedFallback: true)
             .Equals("Painted theme not applied - source palette retained", StringComparison.Ordinal))
         {
             throw new InvalidDataException("The live preview claimed a painted theme after a faithful fallback.");
         }
+
+        if (!DescribeTheme(
+                TexturePreset.Illustrated,
+                TexturePreset.Illustrated,
+                PaintedTheme.ZoneAware,
+                PaintedTheme.LightStorybook,
+                usedFallback: false)
+            .Equals("Theme: Follow each zone -> Light storybook", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("The live preview hid the concrete theme selected by Follow each zone.");
+        }
     }
+
+    public string TabStatusText => UsedFallback
+        ? "Original Clarity fallback"
+        : ActualPreset == TexturePreset.Illustrated
+            ? RequestedTheme == PaintedTheme.ZoneAware
+                ? $"Follow zone -> {TextureOptionPreviewViewModel.ThemeDisplayName(ResolvedTheme)}"
+                : TextureOptionPreviewViewModel.ThemeDisplayName(ResolvedTheme)
+            : PresetDisplayName(ActualPreset);
 
     private static string PresetDisplayName(TexturePreset preset) => preset switch
     {

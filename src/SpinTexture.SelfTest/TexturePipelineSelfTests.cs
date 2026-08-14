@@ -1733,6 +1733,57 @@ public static class TexturePipelineSelfTests
             neutralGothicLuma < neutralBaselineLuma,
             "the complete painted pipeline should still darken subdued neutral city materials");
 
+        // Production theme strength must make the choices visibly different on
+        // an ordinary material field, not merely produce different hashes. The
+        // fixture mixes warm stone, muted wood, cool masonry, and modest color
+        // accents without relying on any bundled game artwork.
+        const int materialSize = 32;
+        var materialBytes = new byte[18 + (materialSize * materialSize * 4)];
+        materialBytes[2] = 2;
+        BinaryPrimitives.WriteUInt16LittleEndian(materialBytes.AsSpan(12), materialSize);
+        BinaryPrimitives.WriteUInt16LittleEndian(materialBytes.AsSpan(14), materialSize);
+        materialBytes[16] = 32;
+        materialBytes[17] = 0x28;
+        for (var y = 0; y < materialSize; y++)
+        {
+            for (var x = 0; x < materialSize; x++)
+            {
+                var value = 38 + ((x * 9 + y * 5 + ((x / 4 + y / 4) % 2 * 24)) % 150);
+                var red = Math.Clamp(value + 18 - (y / 3), 8, 242);
+                var green = Math.Clamp(value - 2 + (x / 5), 8, 238);
+                var blue = Math.Clamp(value - 24 + ((x + y) % 13), 6, 226);
+                var offset = 18 + (((y * materialSize) + x) * 4);
+                materialBytes[offset] = (byte)blue;
+                materialBytes[offset + 1] = (byte)green;
+                materialBytes[offset + 2] = (byte)red;
+                materialBytes[offset + 3] = byte.MaxValue;
+            }
+        }
+
+        var productionBase = TgaPixelBuffer.Read(materialBytes)
+            .ApplyGraphicPaintedFinish(strength: 0.94, wrapEdges: true);
+        var productionLight = productionBase.ApplyPaintedTheme(
+            PaintedTheme.LightStorybook,
+            strength: 0.78);
+        var productionDark = productionBase.ApplyPaintedTheme(
+            PaintedTheme.DarkGothic,
+            strength: 0.78);
+        var productionComic = productionBase.ApplyPaintedTheme(
+            PaintedTheme.ComicInk,
+            strength: 0.78);
+        var lightDarkDelta = MeanAbsoluteVisibleRgbDelta(productionLight, productionDark);
+        var lightComicDelta = MeanAbsoluteVisibleRgbDelta(productionLight, productionComic);
+        Assert(
+            lightDarkDelta >= 7,
+            $"Light Storybook and Dark Gothic should be visibly distinct at production strength (delta {lightDarkDelta:0.00})");
+        Assert(
+            lightComicDelta >= 3.25,
+            $"Light Storybook and Comic Ink should be visibly distinct at production strength (delta {lightComicDelta:0.00})");
+        Assert(
+            productionLight.CalculateVisibleColorStatistics().MeanLuminance
+                - productionDark.CalculateVisibleColorStatistics().MeanLuminance >= 5,
+            "Light Storybook should average at least five luminance levels above Dark Gothic at production strength");
+
         var zoneAware = new UpscaleOptions(
             TexturePreset.Illustrated,
             AssetScope.WorldOnly,
@@ -1794,6 +1845,30 @@ public static class TexturePipelineSelfTests
         {
             var direct = Math.Abs(left - right);
             return Math.Min(direct, 360 - direct);
+        }
+
+        static double MeanAbsoluteVisibleRgbDelta(
+            TgaPixelBuffer left,
+            TgaPixelBuffer right)
+        {
+            var leftPixels = left.RgbaPixels.Span;
+            var rightPixels = right.RgbaPixels.Span;
+            long total = 0;
+            long samples = 0;
+            for (var offset = 0; offset < leftPixels.Length; offset += 4)
+            {
+                if (leftPixels[offset + 3] == 0 || rightPixels[offset + 3] == 0)
+                {
+                    continue;
+                }
+
+                total += Math.Abs(leftPixels[offset] - rightPixels[offset]);
+                total += Math.Abs(leftPixels[offset + 1] - rightPixels[offset + 1]);
+                total += Math.Abs(leftPixels[offset + 2] - rightPixels[offset + 2]);
+                samples += 3;
+            }
+
+            return samples == 0 ? 0 : (double)total / samples;
         }
     }
 
@@ -3097,17 +3172,37 @@ public static class TexturePipelineSelfTests
     private static void TestPaintedProfileReportCompatibility()
     {
         AssertEqual(
-            TextureBuildReport.CurrentPaintedProfileRevision,
+            2,
+            TextureBuildReport.CurrentIllustratedProfileRevision,
+            "Graphic Painted profile revision should advance independently to revision two");
+        AssertEqual(
+            1,
+            TextureBuildReport.CurrentRusticPaintedProfileRevision,
+            "Rustic Painted should retain its revision-one profile identity");
+        AssertEqual(
+            TextureBuildReport.CurrentIllustratedProfileRevision,
             TexturePackWorkflow.GetFreshPaintedProfileRevision(TexturePreset.Illustrated),
             "fresh Graphic Painted builds should record the current painted profile");
         AssertEqual(
-            TextureBuildReport.CurrentPaintedProfileRevision,
+            TextureBuildReport.CurrentRusticPaintedProfileRevision,
             TexturePackWorkflow.GetFreshPaintedProfileRevision(TexturePreset.RusticPainted),
             "fresh Rustic Painted builds should record the current painted profile");
         AssertEqual(
             0,
             TexturePackWorkflow.GetFreshPaintedProfileRevision(TexturePreset.MaximumDetail),
             "non-painted builds must not claim painted-profile provenance");
+        AssertEqual(
+            TexturePackWorkflow.FreshBuildResumeOperationKey,
+            TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.MaximumDetail),
+            "non-painted fresh builds should retain the base resume operation key");
+        AssertEqual(
+            TexturePackWorkflow.FreshBuildResumeOperationKey,
+            TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.RusticPainted),
+            "unchanged Rustic Painted builds should retain the base resume operation key");
+        AssertEqual(
+            $"{TexturePackWorkflow.FreshBuildResumeOperationKey}-illustrated-2",
+            TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.Illustrated),
+            "Graphic Painted revision two should use a fenced resume operation key");
 
         var report = new TextureBuildReport(
             TextureBuildReport.CurrentSchemaVersion,
@@ -3125,12 +3220,12 @@ public static class TexturePipelineSelfTests
                 new Dictionary<string, int>(),
                 []))
         {
-            PaintedProfileRevision = TextureBuildReport.CurrentPaintedProfileRevision
+            PaintedProfileRevision = TextureBuildReport.CurrentIllustratedProfileRevision
         };
         var json = JsonSerializer.Serialize(report);
         var current = JsonSerializer.Deserialize<TextureBuildReport>(json);
         AssertEqual(
-            TextureBuildReport.CurrentPaintedProfileRevision,
+            TextureBuildReport.CurrentIllustratedProfileRevision,
             current?.PaintedProfileRevision ?? -1,
             "current painted profile revision should round-trip through the report");
 
