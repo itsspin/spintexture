@@ -42,7 +42,9 @@ public sealed class NativeTextureProcessor
     private readonly DirectXTexCommandBuilder _directXTex;
     private readonly RealEsrganCommandBuilder _realEsrgan;
     private readonly UpscaylCommandBuilder _upscayl;
+    private readonly ArtisticWorkerCommandBuilder _artisticWorker = new();
     private int textureUpscalerUnavailable;
+    private int artisticWorkerUnavailable;
 
     public NativeTextureProcessor(
         ExternalToolPaths tools,
@@ -551,6 +553,18 @@ public sealed class NativeTextureProcessor
         PreparedColorJob job,
         TextureUpscaleModelSelection? specializedModel)
     {
+        if (job.EffectivePreset == TexturePreset.Illustrated
+            && Volatile.Read(ref artisticWorkerUnavailable) == 0
+            && _tools.HasArtisticWorker)
+        {
+            return new NeuralBatchKey(
+                NeuralWorkerKind.ExternalArtistic,
+                "external-artistic",
+                TexturePreset.Illustrated,
+                ArtisticWorkerCommandBuilder.WorkerScale,
+                job.Request.RealEsrganTileSize);
+        }
+
         if (ShouldUseTextureSpecializedReconstruction(job.EffectivePreset)
             && Volatile.Read(ref textureUpscalerUnavailable) == 0
             && specializedModel is not null)
@@ -698,6 +712,39 @@ public sealed class NativeTextureProcessor
                     cancellationToken).ConfigureAwait(false);
             }
         }
+        catch (NativeProcessException) when (key.WorkerKind == NeuralWorkerKind.ExternalArtistic)
+        {
+            Interlocked.Exchange(ref artisticWorkerUnavailable, 1);
+            nativeProgress?.Report(new NativeOutputLine(
+                NativeOutputStream.StandardError,
+                "The external artistic painted worker could not run; continuing this build with the built-in painterly stylization."));
+            await ExecuteStandardPaintedGroupsAsync(
+                    jobs,
+                    outcomes,
+                    batchDirectory,
+                    executionState,
+                    nativeProgress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+        catch (Exception exception) when (
+            IsPerTextureFailure(exception)
+            && key.WorkerKind == NeuralWorkerKind.ExternalArtistic)
+        {
+            nativeProgress?.Report(new NativeOutputLine(
+                NativeOutputStream.StandardError,
+                $"The external artistic worker returned unusable output; retrying this batch with the built-in painterly stylization. {exception.Message}"));
+            await ExecuteStandardPaintedGroupsAsync(
+                    jobs,
+                    outcomes,
+                    batchDirectory,
+                    executionState,
+                    nativeProgress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
         catch (NativeProcessException) when (key.WorkerKind == NeuralWorkerKind.TextureSpecialized)
         {
             Interlocked.Exchange(ref textureUpscalerUnavailable, 1);
@@ -798,6 +845,7 @@ public sealed class NativeTextureProcessor
         }
 
         var legacyPaintedRetries = new List<PreparedColorJob>();
+        var standardPaintedRetries = new List<PreparedColorJob>();
         var faithfulRetries = new List<PreparedColorJob>();
         try
         {
@@ -819,6 +867,13 @@ public sealed class NativeTextureProcessor
                             ?? throw new InvalidDataException(
                                 "Parallel texture completion returned neither output nor an error."),
                         Error: null);
+                }
+                else if (key.WorkerKind == NeuralWorkerKind.ExternalArtistic)
+                {
+                    nativeProgress?.Report(new NativeOutputLine(
+                        NativeOutputStream.StandardError,
+                        $"{Path.GetFileName(job.Request.SourcePath)} failed the painted fidelity gate on the artistic worker's output; queued for the built-in painterly stylization. {completion.Error.Message}"));
+                    standardPaintedRetries.Add(job);
                 }
                 else if (key.WorkerPreset != TexturePreset.Faithful)
                 {
@@ -849,6 +904,17 @@ public sealed class NativeTextureProcessor
         finally
         {
             TryDeleteOwnedChildDirectory(batchDirectory, invocation.GroupDirectory, "neural-");
+        }
+
+        if (standardPaintedRetries.Count > 0)
+        {
+            await ExecuteStandardPaintedGroupsAsync(
+                standardPaintedRetries,
+                outcomes,
+                batchDirectory,
+                executionState,
+                nativeProgress,
+                cancellationToken).ConfigureAwait(false);
         }
 
         if (legacyPaintedRetries.Count > 0)
@@ -1015,6 +1081,67 @@ public sealed class NativeTextureProcessor
             .ConfigureAwait(false);
     }
 
+    private async Task ExecuteStandardPaintedGroupsAsync(
+        IReadOnlyList<PreparedColorJob> jobs,
+        NativeTextureProcessOutcome?[] outcomes,
+        string batchDirectory,
+        NeuralBatchExecutionState executionState,
+        IProgress<NativeOutputLine>? nativeProgress,
+        CancellationToken cancellationToken)
+    {
+        // Regroup exactly as a build without the artistic worker would have:
+        // the specialized game-texture model when available, else the bundled
+        // detail model. The artistic worker is never re-selected here because
+        // its per-build availability flag or this retry path excluded it.
+        var specializedModel = Volatile.Read(ref textureUpscalerUnavailable) == 0
+                               && _tools.HasTextureUpscaler
+            ? _upscayl.FindTextureModel(_tools.TextureModelsPath!)
+            : null;
+        foreach (var group in jobs
+                     .OrderBy(job => job.RequestIndex)
+                     .GroupBy(job => CreateStandardPaintedKey(job, specializedModel)))
+        {
+            foreach (var chunk in ChunkNeuralJobs(group))
+            {
+                await ExecuteNeuralGroupAsync(
+                    chunk,
+                    group.Key,
+                    outcomes,
+                    batchDirectory,
+                    executionState,
+                    nativeProgress,
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private NeuralBatchKey CreateStandardPaintedKey(
+        PreparedColorJob job,
+        TextureUpscaleModelSelection? specializedModel)
+    {
+        if (ShouldUseTextureSpecializedReconstruction(job.EffectivePreset)
+            && Volatile.Read(ref textureUpscalerUnavailable) == 0
+            && specializedModel is not null)
+        {
+            return new NeuralBatchKey(
+                NeuralWorkerKind.TextureSpecialized,
+                specializedModel.Name,
+                job.EffectivePreset,
+                UpscaylCommandBuilder.ModelScale,
+                job.Request.RealEsrganTileSize);
+        }
+
+        var model = _realEsrgan.ResolveModel(
+            _tools.RealEsrganModelsPath!,
+            job.EffectivePreset);
+        return new NeuralBatchKey(
+            NeuralWorkerKind.LegacyRealEsrgan,
+            model.Name,
+            job.EffectivePreset,
+            job.Dimensions.RequiredNeuralScale,
+            job.Request.RealEsrganTileSize);
+    }
+
     private async Task ExecuteLegacyPaintedFallbackGroupsAsync(
         IReadOnlyList<PreparedColorJob> jobs,
         NativeTextureProcessOutcome?[] outcomes,
@@ -1073,6 +1200,10 @@ public sealed class NativeTextureProcessor
 
             var command = key.WorkerKind switch
             {
+                NeuralWorkerKind.ExternalArtistic => _artisticWorker.CreateStylize(
+                    _tools.ArtisticWorkerPath!,
+                    inputDirectory,
+                    outputDirectory),
                 NeuralWorkerKind.TextureSpecialized => _upscayl.CreateUpscale(
                     _tools.TextureUpscalerPath!,
                     _tools.TextureModelsPath!,
@@ -1232,10 +1363,14 @@ public sealed class NativeTextureProcessor
             InvalidDataException? lastPaintedFailure = null;
             // The stylization passes are strength-independent, so run them
             // once and probe the descending-strength ladder with cheap blends.
-            var stylized = reconstruction.ApplyPaintedStylizationFull(
-                job.Request.WrapEdges,
-                key.NeuralScale,
-                job.Request.Options.ResolvedPaintedStyle);
+            // An external artistic worker's output already carries the full
+            // art direction, so only the theme treatment applies on top.
+            var stylized = key.WorkerKind == NeuralWorkerKind.ExternalArtistic
+                ? reconstruction
+                : reconstruction.ApplyPaintedStylizationFull(
+                    job.Request.WrapEdges,
+                    key.NeuralScale,
+                    job.Request.Options.ResolvedPaintedStyle);
             double[] finishScales = [1d, 0.75d, 0.5d, 0.25d];
             foreach (var finishScale in finishScales)
             {
@@ -1371,6 +1506,11 @@ public sealed class NativeTextureProcessor
             return key.WorkerKind == NeuralWorkerKind.TextureSpecialized
                 ? $"Batched game-texture reconstruction ({key.ModelName})"
                 : "Batched faithful Real-ESRNet reconstruction (game-texture fallback)";
+        }
+
+        if (key.WorkerKind == NeuralWorkerKind.ExternalArtistic)
+        {
+            return $"Batched external artistic illustrated reconstruction with {FormatPaintedTheme(job.Request.Options.PaintedTheme)} finishing{FormatGraphicPaintedScale(graphicPaintedScale)}{FormatPaintedThemeScale(paintedThemeScale)}";
         }
 
         return key.WorkerPreset switch
@@ -2490,7 +2630,8 @@ public sealed class NativeTextureProcessor
     private enum NeuralWorkerKind
     {
         TextureSpecialized,
-        LegacyRealEsrgan
+        LegacyRealEsrgan,
+        ExternalArtistic
     }
 
     private sealed record NeuralBatchKey(

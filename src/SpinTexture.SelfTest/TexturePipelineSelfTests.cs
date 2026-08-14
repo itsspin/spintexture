@@ -97,6 +97,7 @@ public static class TexturePipelineSelfTests
         await output.WriteLineAsync("Credential-free enhanced game launch tests passed.")
             .ConfigureAwait(false);
         TestTextureModelSelection();
+        TestArtisticWorkerCommand();
         TestPresetAwareFidelityGate();
         TestPaintedFinalValidationPolicyAndCappedMetrics();
         await output.WriteLineAsync("Texture model discovery and preset fidelity-gate tests passed.").ConfigureAwait(false);
@@ -2194,6 +2195,29 @@ public static class TexturePipelineSelfTests
         var replacement = Reserve("lavastorm.s3d", "replacement-material.dds");
         Assert(replacement.Accepted, "failed previews should release their family and archive share");
         AssertEqual(lava.Index, replacement.Index, "released preview indices should be reused deterministically");
+    }
+
+    private static void TestArtisticWorkerCommand()
+    {
+        var command = new ArtisticWorkerCommandBuilder().CreateStylize(
+            Path.Combine(Path.GetTempPath(), "artistic", "worker.bat"),
+            Path.Combine(Path.GetTempPath(), "in"),
+            Path.Combine(Path.GetTempPath(), "out"));
+        AssertEqual(
+            "4",
+            GetCommandArgument(command.Arguments, "-s")!,
+            "the artistic worker contract is fixed at 4x");
+        AssertEqual(
+            "png",
+            GetCommandArgument(command.Arguments, "-f")!,
+            "the artistic worker exchanges PNG batches");
+        Assert(
+            command.InactivityTimeout == ArtisticWorkerCommandBuilder.WorkerInactivityTimeout,
+            "diffusion pipelines get a long inactivity allowance");
+        Assert(
+            GetCommandArgument(command.Arguments, "-i") is not null
+            && GetCommandArgument(command.Arguments, "-o") is not null,
+            "the artistic worker receives input and output directories");
     }
 
     private static async Task TestPaintedStylizerAsync(CancellationToken cancellationToken)
