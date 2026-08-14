@@ -337,6 +337,14 @@ public static class TexturePipelineSelfTests
             new TextureSemanticClassifier().Classify("longsword.dds", metadata).Kind,
             "compact normal tokens must not match substrings inside ordinary color names");
         AssertEqual(
+            TextureKind.Color,
+            new TextureSemanticClassifier().Classify("wall1n.dds", metadata).Kind,
+            "trailing variant letters after digits must not divert diffuse art into the normal-map path");
+        AssertEqual(
+            TextureKind.Color,
+            new TextureSemanticClassifier().Classify("qrc2n.dds", metadata).Kind,
+            "legacy digit-letter variant names remain ordinary color textures");
+        AssertEqual(
             TextureKind.UserInterface,
             new TextureSemanticClassifier().Classify(
                 "Interface\\ornament01.dds",
