@@ -492,24 +492,58 @@ public sealed class NativeTextureProcessor
                                && _tools.HasTextureUpscaler
             ? _upscayl.FindTextureModel(_tools.TextureModelsPath!)
             : null;
-        var executionState = new NeuralBatchExecutionState();
-        var groups = jobs
+        using var executionState = new NeuralBatchExecutionState();
+        var chunks = jobs
             .OrderBy(job => job.RequestIndex)
-            .GroupBy(job => CreateNeuralBatchKey(job, specializedModel));
+            .GroupBy(job => CreateNeuralBatchKey(job, specializedModel))
+            .SelectMany(group => ChunkNeuralJobs(group)
+                .Select(chunk => (group.Key, Chunk: chunk)))
+            .ToArray();
 
-        foreach (var group in groups)
+        // Keep at most two chunks in flight: the GPU gate serializes actual
+        // inference, so this overlaps one chunk's CPU decoding/stylizing/
+        // encoding with the next chunk's GPU pass instead of letting the GPU
+        // idle through every CPU phase.
+        Task? inFlight = null;
+        foreach (var (key, chunk) in chunks)
         {
-            foreach (var chunk in ChunkNeuralJobs(group))
+            var current = ExecuteNeuralGroupAsync(
+                chunk,
+                key,
+                outcomes,
+                batchDirectory,
+                executionState,
+                nativeProgress,
+                cancellationToken);
+            if (inFlight is not null)
             {
-                await ExecuteNeuralGroupAsync(
-                    chunk,
-                    group.Key,
-                    outcomes,
-                    batchDirectory,
-                    executionState,
-                    nativeProgress,
-                    cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await inFlight.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Never leave the concurrent chunk running against batch
+                    // directories the caller is about to clean up.
+                    try
+                    {
+                        await current.ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // The first failure is the actionable one.
+                    }
+
+                    throw;
+                }
             }
+
+            inFlight = current;
+        }
+
+        if (inFlight is not null)
+        {
+            await inFlight.ConfigureAwait(false);
         }
     }
 
@@ -1018,7 +1052,7 @@ public sealed class NativeTextureProcessor
     {
         var groupDirectory = Path.Combine(
             batchDirectory,
-            $"neural-{executionState.NextGroupId++:D6}");
+            $"neural-{executionState.GetNextGroupId():D6}");
         var inputDirectory = Path.Combine(groupDirectory, "input");
         var outputDirectory = Path.Combine(groupDirectory, "output");
         Directory.CreateDirectory(inputDirectory);
@@ -1068,7 +1102,15 @@ public sealed class NativeTextureProcessor
                 NativeTextureWorkPhase.GpuInference,
                 0,
                 jobs.Count));
-            await RunCheckedAsync(command, nativeProgress, cancellationToken).ConfigureAwait(false);
+            await executionState.GpuGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await RunCheckedAsync(command, nativeProgress, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                executionState.GpuGate.Release();
+            }
             nativeProgress?.Report(new NativeOutputLine(
                 NativeOutputStream.StandardOutput,
                 $"GPU batch complete; encoding and validating {jobs.Count:N0} texture(s).",
@@ -1142,21 +1184,28 @@ public sealed class NativeTextureProcessor
             || (key.WorkerKind == NeuralWorkerKind.TextureSpecialized
                 && IsPaintedPreset(key.WorkerPreset)))
         {
-            var anchored = cropped.AnchorVisibleChannelMeansFrom(job.Decoded);
-            var anchoredFidelity = CalculateFidelityMetrics(job.Decoded, anchored.Image);
-            var anchorReducesError =
-                anchoredFidelity.RoundTripMeanSquaredError < fidelity.RoundTripMeanSquaredError
-                && anchoredFidelity.MeanLuminanceDrift <= fidelity.MeanLuminanceDrift
-                && anchoredFidelity.MaximumMeanChannelDrift <= fidelity.MaximumMeanChannelDrift;
-            var anchorRepairsDrift =
-                (fidelity.MeanLuminanceDrift > 6 || fidelity.MaximumMeanChannelDrift > 12)
-                && anchoredFidelity.MeanLuminanceDrift <= 6
-                && anchoredFidelity.MaximumMeanChannelDrift <= 12
-                && anchoredFidelity.RoundTripLuminancePsnr >= 27.5;
-            if (anchorReducesError || anchorRepairsDrift)
+            // Anchoring clamps to a 0.90-1.10 gain, so with near-zero measured
+            // drift it is a guaranteed no-op; skip its full-image rescan.
+            var anchorWorthwhile = fidelity.MeanLuminanceDrift > 1.25
+                || fidelity.MaximumMeanChannelDrift > 2.5;
+            if (anchorWorthwhile)
             {
-                cropped = anchored.Image;
-                fidelity = anchoredFidelity;
+                var anchored = cropped.AnchorVisibleChannelMeansFrom(job.Decoded);
+                var anchoredFidelity = CalculateFidelityMetrics(job.Decoded, anchored.Image);
+                var anchorReducesError =
+                    anchoredFidelity.RoundTripMeanSquaredError < fidelity.RoundTripMeanSquaredError
+                    && anchoredFidelity.MeanLuminanceDrift <= fidelity.MeanLuminanceDrift
+                    && anchoredFidelity.MaximumMeanChannelDrift <= fidelity.MaximumMeanChannelDrift;
+                var anchorRepairsDrift =
+                    (fidelity.MeanLuminanceDrift > 6 || fidelity.MaximumMeanChannelDrift > 12)
+                    && anchoredFidelity.MeanLuminanceDrift <= 6
+                    && anchoredFidelity.MaximumMeanChannelDrift <= 12
+                    && anchoredFidelity.RoundTripLuminancePsnr >= 27.5;
+                if (anchorReducesError || anchorRepairsDrift)
+                {
+                    cropped = anchored.Image;
+                    fidelity = anchoredFidelity;
+                }
             }
         }
 
@@ -2501,8 +2550,19 @@ public sealed class NativeTextureProcessor
         double EdgeEnergyRatio,
         double ExtremeLuminanceGrowth);
 
-    private sealed class NeuralBatchExecutionState
+    private sealed class NeuralBatchExecutionState : IDisposable
     {
-        public int NextGroupId { get; set; }
+        private int nextGroupId;
+
+        /// <summary>
+        /// Serializes GPU worker launches. CPU preparation and post-processing
+        /// of one chunk may overlap the next chunk's inference, but two Vulkan
+        /// workers must never compete for VRAM.
+        /// </summary>
+        public SemaphoreSlim GpuGate { get; } = new(1, 1);
+
+        public int GetNextGroupId() => Interlocked.Increment(ref nextGroupId);
+
+        public void Dispose() => GpuGate.Dispose();
     }
 }
