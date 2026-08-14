@@ -45,7 +45,21 @@ Requirements:
   rebuild individual textures and must reproduce the recorded pack exactly.
 - Exit code 0 on success; any other exit code triggers the safe fallback.
 
-## Installing a worker
+## One-click setup (recommended)
+
+The **Set Up Diffusion Repaint (~2.9 GB)** button in the Graphic Painted
+panel installs everything automatically: the stable-diffusion.cpp **Vulkan**
+build (AMD, NVIDIA, and Intel GPUs — no CUDA, no Python), the DreamShaper 8
+painterly checkpoint, and ControlNet v1.1 Tile. Every download is pinned to
+an exact size and SHA-256 and refused on any mismatch; an interrupted setup
+resumes safely when re-run. After download, SpinTexture generates the worker
+scripts and verifies them on your PC by repainting a test image twice —
+checking exact 4x output and byte-identical determinism — before the worker
+is enabled. Advanced settings (prompt, denoise strength, steps, seed,
+maximum diffusion resolution) live in
+`Tools\artistic-worker\worker-config.json`.
+
+## Installing a custom worker manually
 
 Either set the environment variable:
 

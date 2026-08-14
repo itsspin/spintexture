@@ -4,7 +4,11 @@ using System.Globalization;
 using System.IO;
 using System.Windows.Threading;
 using SpinTexture.App.Services;
+using SpinTexture.Core;
+using SpinTexture.Core.Imaging;
 using SpinTexture.Core.Models;
+using SpinTexture.Core.Textures;
+using SpinTexture.Core.Tooling;
 using SpinTexture.Core.Pipeline;
 using SpinTexture.Core.Services;
 
@@ -15,6 +19,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private readonly IFolderPickerService _folderPicker;
     private readonly ITextureWorkflowService _workflow;
     private readonly IUserDialogService _dialogs;
+    private readonly ArtisticWorkerSetupService _artisticWorkerSetup = new();
+    private string _artisticWorkerStatusText = string.Empty;
     private readonly IEnhancedLauncherService _enhancedLauncher;
     private readonly AppPreferencesStore _preferences;
     private string _installPath = string.Empty;
@@ -234,6 +240,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             _ => !IsBusy && IsClientSignaturePresent);
         RestoreCommand = new AsyncRelayCommand(RestoreAsync, CanRestore);
         CancelCommand = new RelayCommand(_ => Cancel(), _ => IsBusy);
+        SetupArtisticWorkerCommand = new AsyncRelayCommand(
+            SetupArtisticWorkerAsync,
+            () => !IsBusy);
+        RemoveArtisticWorkerCommand = new AsyncRelayCommand(
+            RemoveArtisticWorkerAsync,
+            () => !IsBusy && _artisticWorkerSetup.GetStatus().IsInstalled);
+        RefreshArtisticWorkerStatus();
         SelectCurrentEqlCommand = new RelayCommand(
             _ => SelectWorldExpansions(WorldExpansion.CurrentEql),
             _ => !IsBusy && HasAnalysis && IsWorldExpansionAvailable(WorldExpansion.CurrentEql));
@@ -2063,6 +2076,167 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
+    public AsyncRelayCommand SetupArtisticWorkerCommand { get; }
+    public AsyncRelayCommand RemoveArtisticWorkerCommand { get; }
+
+    public string ArtisticWorkerStatusText
+    {
+        get => _artisticWorkerStatusText;
+        private set => SetProperty(ref _artisticWorkerStatusText, value);
+    }
+
+    private void RefreshArtisticWorkerStatus()
+    {
+        var status = _artisticWorkerSetup.GetStatus();
+        ArtisticWorkerStatusText = status switch
+        {
+            { IsInstalled: false } =>
+                "Not installed. One click downloads a pinned, SHA-256-verified toolchain (~2.9 GB): "
+                + "stable-diffusion.cpp (Vulkan \u2014 AMD, NVIDIA, and Intel GPUs), the DreamShaper 8 painterly model, "
+                + "and ControlNet Tile. The worker is verified on this PC before it is enabled.",
+            { IsEnabled: true } =>
+                "Installed and verified. Graphic Painted builds now repaint each texture with the diffusion worker; "
+                + "the painted theme still applies, the style sliders do not. Builds take several times longer \u2014 try one zone first.",
+            var disabled =>
+                $"Installed but disabled: {disabled.DisabledReason} Run setup again to retry verification."
+        };
+        RemoveArtisticWorkerCommand?.RaiseCanExecuteChanged();
+    }
+
+    private async Task SetupArtisticWorkerAsync(CancellationToken cancellationToken)
+    {
+        if (!_dialogs.ConfirmArtisticWorkerSetup(ArtisticWorkerSetupService.TotalDownloadBytes))
+        {
+            return;
+        }
+
+        IsBusy = true;
+        try
+        {
+            // The bundled Real-ESRGAN provides the sharp 4x base the diffusion
+            // repaint works from; resolve it from the portable layout even
+            // before a client is analyzed.
+            var discoveryInstall = !string.IsNullOrWhiteSpace(InstallPath) && Directory.Exists(InstallPath)
+                ? InstallPath
+                : AppContext.BaseDirectory;
+            var tools = new ToolchainDiscovery().Discover(new ProjectPaths(
+                discoveryInstall,
+                Path.Combine(Path.GetTempPath(), "SpinTexture", "artistic-setup")));
+            if (!tools.HasRealEsrgan)
+            {
+                _dialogs.ShowArtisticWorkerNotice(
+                    "The bundled Real-ESRGAN worker was not found next to SpinTexture; reinstall the portable package first.",
+                    isError: true);
+                return;
+            }
+
+            AddLog("INFO", "Artistic worker setup started. Downloads are pinned and SHA-256 verified; re-running setup resumes safely.");
+            var progress = new Progress<ProgressUpdate>(update =>
+            {
+                StatusText = update.Message;
+            });
+            await _artisticWorkerSetup.SetupAsync(
+                    tools.RealEsrganPath!,
+                    tools.RealEsrganModelsPath!,
+                    progress,
+                    cancellationToken)
+                .ConfigureAwait(true);
+
+            AddLog("INFO", "Verifying the worker on this PC: repainting a test image twice and checking exact 4x, deterministic output. The first run loads the model and can take a few minutes.");
+            StatusText = "Verifying the artistic worker on this GPU...";
+            var failure = await _artisticWorkerSetup.VerifyAsync(
+                    new NativeProcessRunner(),
+                    WriteVerificationImageAsync,
+                    ReadImageSizeAsync,
+                    cancellationToken)
+                .ConfigureAwait(true);
+            if (failure is not null)
+            {
+                AddLog("WARN", $"Artistic worker verification failed: {failure}");
+                _dialogs.ShowArtisticWorkerNotice(
+                    $"The worker was installed but did not pass verification, so it stays disabled and builds are unaffected.\n\n{failure}",
+                    isError: true);
+            }
+            else
+            {
+                AddLog("SAFE", "Artistic worker verified and enabled. Graphic Painted Fantasy now uses the diffusion repaint; build one zone first to judge the look and speed.");
+                _dialogs.ShowArtisticWorkerNotice(
+                    "The artistic worker is verified and enabled. Choose Graphic Painted Fantasy and build a single zone to try it.",
+                    isError: false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            AddLog("WARN", "Artistic worker setup was cancelled; run setup again to resume the remaining downloads.");
+        }
+        catch (Exception exception) when (exception is IOException
+            or UnauthorizedAccessException
+            or InvalidDataException
+            or System.Net.Http.HttpRequestException
+            or InvalidOperationException)
+        {
+            AddLog("WARN", $"Artistic worker setup failed: {exception.Message}");
+            _dialogs.ShowArtisticWorkerNotice(
+                $"Setup did not complete: {exception.Message}\n\nNothing was enabled. Run setup again to resume; verified components are kept.",
+                isError: true);
+        }
+        finally
+        {
+            IsBusy = false;
+            RefreshArtisticWorkerStatus();
+        }
+    }
+
+    private async Task RemoveArtisticWorkerAsync(CancellationToken cancellationToken)
+    {
+        if (!_dialogs.ConfirmArtisticWorkerRemove())
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.Run(_artisticWorkerSetup.Remove, cancellationToken).ConfigureAwait(true);
+            AddLog("INFO", "Artistic worker removed. Graphic Painted Fantasy uses the built-in painterly stylization again.");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            _dialogs.ShowArtisticWorkerNotice(
+                $"The worker could not be fully removed: {exception.Message}",
+                isError: true);
+        }
+
+        RefreshArtisticWorkerStatus();
+    }
+
+    private static async Task WriteVerificationImageAsync(string path, int size)
+    {
+        var bgra = new byte[size * size * 4];
+        for (var y = 0; y < size; y++)
+        {
+            for (var x = 0; x < size; x++)
+            {
+                var offset = ((y * size) + x) * 4;
+                var wave = Math.Sin(x * Math.PI * 4 / size) * Math.Cos(y * Math.PI * 4 / size);
+                var hash = (uint)((x * 374761393) + (y * 668265263));
+                hash = (hash ^ (hash >> 13)) * 1274126177u;
+                var noise = (hash & 0x3F) - 32.0;
+                bgra[offset] = (byte)Math.Clamp(96 + (72 * wave) + noise, 0, 255);
+                bgra[offset + 1] = (byte)Math.Clamp(120 + (64 * wave) + noise, 0, 255);
+                bgra[offset + 2] = (byte)Math.Clamp(150 + (56 * wave) + noise, 0, 255);
+                bgra[offset + 3] = byte.MaxValue;
+            }
+        }
+
+        await Task.Run(() => new PixelImage(size, size, bgra).SavePng(path)).ConfigureAwait(false);
+    }
+
+    private static async Task<(int Width, int Height)> ReadImageSizeAsync(string path)
+    {
+        var image = await TgaPixelBuffer.ReadPngFileAsync(path).ConfigureAwait(false);
+        return (image.Width, image.Height);
+    }
+
     private void RefreshCommands()
     {
         BrowseCommand.RaiseCanExecuteChanged();
@@ -2078,6 +2252,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         CancelCommand.RaiseCanExecuteChanged();
         SelectCurrentEqlCommand.RaiseCanExecuteChanged();
         SelectAllDetectedWorldExpansionsCommand.RaiseCanExecuteChanged();
+        SetupArtisticWorkerCommand.RaiseCanExecuteChanged();
+        RemoveArtisticWorkerCommand.RaiseCanExecuteChanged();
     }
 
     private static string FormatBytes(long bytes)

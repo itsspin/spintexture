@@ -899,6 +899,25 @@
                                     </Grid>
                                     <TextBlock Margin="0,9,0,0" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap"
                                                Text="Style sliders shape the painterly finish for new Graphic Painted builds and are recorded in the pack so repairs reproduce the same look. Use Live Settings Preview to judge them on your own textures." />
+
+                                    <Border Margin="0,12,0,0" Padding="11" CornerRadius="6"
+                                            Background="#100D16" BorderBrush="#4E3A6A" BorderThickness="1">
+                                        <StackPanel>
+                                            <TextBlock Text="DIFFUSION REPAINT (EXPERIMENTAL)" Style="{StaticResource FieldLabelStyle}" />
+                                            <TextBlock Text="{Binding ArtisticWorkerStatusText}" Margin="0,6,0,0"
+                                                       Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" LineHeight="17" />
+                                            <WrapPanel Margin="0,9,0,0">
+                                                <Button Content="Set Up Diffusion Repaint (~2.9 GB)"
+                                                        Command="{Binding SetupArtisticWorkerCommand}"
+                                                        Background="#231A33" BorderBrush="#4E3A6A" Padding="10,4"
+                                                        AutomationProperties.Name="Set up diffusion repaint worker" />
+                                                <Button Content="Remove" Margin="8,0,0,0"
+                                                        Command="{Binding RemoveArtisticWorkerCommand}"
+                                                        Padding="10,4"
+                                                        AutomationProperties.Name="Remove diffusion repaint worker" />
+                                            </WrapPanel>
+                                        </StackPanel>
+                                    </Border>
                                 </StackPanel>
                             </Border>
 

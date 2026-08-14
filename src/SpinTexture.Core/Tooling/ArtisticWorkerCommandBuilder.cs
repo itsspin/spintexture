@@ -25,14 +25,28 @@ public sealed class ArtisticWorkerCommandBuilder
         ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(inputDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        var contractArguments = new List<string>
+        {
+            "-i", inputDirectory,
+            "-o", outputDirectory,
+            "-s", WorkerScale.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            "-f", "png"
+        };
+
+        // Batch scripts cannot be started directly with UseShellExecute=false;
+        // route them through the command interpreter explicitly.
+        var isBatchScript = Path.GetExtension(executablePath) is { } extension
+            && (extension.Equals(".bat", StringComparison.OrdinalIgnoreCase)
+                || extension.Equals(".cmd", StringComparison.OrdinalIgnoreCase));
+        var fileName = isBatchScript
+            ? Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe"
+            : executablePath;
+        var arguments = isBatchScript
+            ? new List<string> { "/d", "/c", Path.GetFullPath(executablePath) }.Concat(contractArguments).ToList()
+            : contractArguments;
         return new NativeProcessCommand(
-            executablePath,
-            [
-                "-i", inputDirectory,
-                "-o", outputDirectory,
-                "-s", WorkerScale.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                "-f", "png"
-            ],
+            fileName,
+            arguments,
             Path.GetDirectoryName(Path.GetFullPath(executablePath)),
             DisplayName: "External artistic painted worker",
             InactivityTimeout: WorkerInactivityTimeout);

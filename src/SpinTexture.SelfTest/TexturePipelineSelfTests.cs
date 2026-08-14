@@ -2199,8 +2199,9 @@ public static class TexturePipelineSelfTests
 
     private static void TestArtisticWorkerCommand()
     {
+        var scriptPath = Path.Combine(Path.GetTempPath(), "artistic", "worker.bat");
         var command = new ArtisticWorkerCommandBuilder().CreateStylize(
-            Path.Combine(Path.GetTempPath(), "artistic", "worker.bat"),
+            scriptPath,
             Path.Combine(Path.GetTempPath(), "in"),
             Path.Combine(Path.GetTempPath(), "out"));
         AssertEqual(
@@ -2218,6 +2219,63 @@ public static class TexturePipelineSelfTests
             GetCommandArgument(command.Arguments, "-i") is not null
             && GetCommandArgument(command.Arguments, "-o") is not null,
             "the artistic worker receives input and output directories");
+        Assert(
+            command.ExecutablePath.EndsWith("cmd.exe", StringComparison.OrdinalIgnoreCase)
+            && command.Arguments.Contains("/c")
+            && command.Arguments.Contains(Path.GetFullPath(scriptPath)),
+            "batch workers must run through the command interpreter");
+        var direct = new ArtisticWorkerCommandBuilder().CreateStylize(
+            Path.Combine(Path.GetTempPath(), "artistic", "worker.exe"),
+            Path.Combine(Path.GetTempPath(), "in"),
+            Path.Combine(Path.GetTempPath(), "out"));
+        Assert(
+            direct.ExecutablePath.EndsWith("worker.exe", StringComparison.OrdinalIgnoreCase),
+            "executable workers run directly");
+
+        foreach (var component in ArtisticWorkerSetupService.Components)
+        {
+            Assert(
+                component.Url.StartsWith("https://", StringComparison.Ordinal),
+                $"artistic component {component.Name} must download over HTTPS");
+            Assert(
+                component.Sha256.Length == 64
+                && component.Sha256.All(Uri.IsHexDigit),
+                $"artistic component {component.Name} must pin a SHA-256");
+            Assert(component.SizeBytes > 0, $"artistic component {component.Name} must pin its size");
+        }
+
+        var setupRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-artistic-{Guid.NewGuid():N}");
+        try
+        {
+            var setup = new ArtisticWorkerSetupService(setupRoot);
+            Directory.CreateDirectory(setup.WorkerDirectory);
+            setup.WriteWorkerScripts(
+                Path.Combine(setupRoot, "realesrgan-ncnn-vulkan.exe"),
+                Path.Combine(setupRoot, "models"));
+            var generatedScript = File.ReadAllText(Path.Combine(setup.WorkerDirectory, "worker.ps1"));
+            Assert(
+                generatedScript.Contains("--seed", StringComparison.Ordinal)
+                && generatedScript.Contains("control_v11f1e_sd15_tile_fp16.safetensors", StringComparison.Ordinal)
+                && generatedScript.Contains("DreamShaper_8_pruned.safetensors", StringComparison.Ordinal)
+                && generatedScript.Contains("$targetW = $w * 4", StringComparison.Ordinal),
+                "the generated worker script pins seed, models, and the exact-4x contract");
+            Assert(
+                File.Exists(Path.Combine(setup.WorkerDirectory, "worker.bat"))
+                && File.Exists(Path.Combine(setup.WorkerDirectory, "worker-config.json")),
+                "worker shim and editable config are generated");
+            Assert(
+                setup.GetStatus() is { IsInstalled: true, IsEnabled: true },
+                "generated scripts report as installed and enabled");
+        }
+        finally
+        {
+            if (Directory.Exists(setupRoot))
+            {
+                Directory.Delete(setupRoot, recursive: true);
+            }
+        }
     }
 
     private static async Task TestPaintedStylizerAsync(CancellationToken cancellationToken)
