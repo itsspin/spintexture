@@ -1202,7 +1202,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         }
     }
 
-    private static string? GetPreservedReason(
+    internal static string? GetPreservedReason(
         TextureMetadata metadata,
         TextureClassification classification,
         int maximumDimension)

@@ -19,6 +19,13 @@ public interface ITextureWorkflowService
         IProgress<ProgressUpdate> progress,
         CancellationToken cancellationToken);
 
+    Task<TextureOptionPreviewResult> GenerateOptionPreviewAsync(
+        string installPath,
+        UpscaleOptions options,
+        ScanSummary? analysis,
+        IProgress<ProgressUpdate>? progress,
+        CancellationToken cancellationToken);
+
     Task<RecoverableStagedBuild?> FindRecoverableBuildAsync(
         string installPath,
         CancellationToken cancellationToken);
@@ -48,11 +55,16 @@ public interface ITextureWorkflowService
 public sealed class TextureWorkflowService : ITextureWorkflowService
 {
     private readonly TexturePackWorkflow workflow;
+    private readonly TextureOptionPreviewService optionPreviewService;
     private readonly string? workspaceRoot;
 
-    public TextureWorkflowService(TexturePackWorkflow? workflow = null, string? workspaceRoot = null)
+    public TextureWorkflowService(
+        TexturePackWorkflow? workflow = null,
+        string? workspaceRoot = null,
+        TextureOptionPreviewService? optionPreviewService = null)
     {
         this.workflow = workflow ?? new TexturePackWorkflow();
+        this.optionPreviewService = optionPreviewService ?? new TextureOptionPreviewService();
         this.workspaceRoot = workspaceRoot;
     }
 
@@ -75,6 +87,19 @@ public sealed class TextureWorkflowService : ITextureWorkflowService
         LastBuildDirectory = result.StagedBuild.BuildDirectory;
         return result;
     }
+
+    public Task<TextureOptionPreviewResult> GenerateOptionPreviewAsync(
+        string installPath,
+        UpscaleOptions options,
+        ScanSummary? analysis,
+        IProgress<ProgressUpdate>? progress,
+        CancellationToken cancellationToken) =>
+        optionPreviewService.GenerateAsync(
+            WorkspaceLocator.ForInstall(installPath, workspaceRoot),
+            options,
+            analysis,
+            progress,
+            cancellationToken);
 
     public Task<RecoverableStagedBuild?> FindRecoverableBuildAsync(
         string installPath,

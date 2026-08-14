@@ -2482,6 +2482,10 @@ public sealed class TexturePackWorkflow
         string installPath,
         UpscaleOptions options) => SelectArchives(installPath, options);
 
+    internal static IReadOnlyList<string> ResolveCharacterAndEquipmentArchives(
+        string installPath) => DiscoverArchiveScopes(installPath)
+        .CharacterAndEquipmentArchives;
+
     private static ArchiveScopes DiscoverArchiveScopes(string installPath)
     {
         var allArchives = Directory.EnumerateFiles(installPath, "*", SearchOption.TopDirectoryOnly)

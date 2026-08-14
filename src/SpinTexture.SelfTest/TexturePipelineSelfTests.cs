@@ -30,6 +30,9 @@ public static class TexturePipelineSelfTests
         TestHeaderSniffingAndClassification();
         TestArtDirectionAndEffectPolicies();
         TestPaintedThemeAccentPreservation();
+        await TextureOptionPreviewSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
+        await output.WriteLineAsync("Genuine live option-preview safety and cache tests passed.")
+            .ConfigureAwait(false);
         CelestialTextureSafetyPolicySelfTests.Run();
         await LooseTextureSafetyRepairSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
         await CelestialPackRepairSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);

@@ -60,6 +60,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private string _overallProgressText = "No overall job is running";
     private string _progressEtaText = "Choose an asset set to see its estimate";
     private string _progressCountText = string.Empty;
+    private bool _isOptionPreviewSectionSuspended;
+    private bool _isEnhancedGameSessionActive;
 
     public MainWindowViewModel(
         IFolderPickerService folderPicker,
@@ -174,6 +176,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _selectedPresetOption = PresetOptions.Single(option => option.Value == TexturePreset.ClassicHd);
         _selectedPaintedThemeOption = PaintedThemeOptions.Single(option => option.Value == PaintedTheme.ZoneAware);
         _selectedScopeOption = ScopeOptions.Single(option => option.Value == AssetScope.WorldOnly);
+        OptionPreview = new TextureOptionPreviewViewModel(_workflow);
         var rememberedInstall = _preferences.Read().LastInstallPath;
         if (!string.IsNullOrWhiteSpace(rememberedInstall)
             && Directory.Exists(rememberedInstall)
@@ -202,6 +205,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             _ => !IsBusy && IsClientSignaturePresent);
         RestoreCommand = new AsyncRelayCommand(RestoreAsync, CanRestore);
         CancelCommand = new RelayCommand(_ => Cancel(), _ => IsBusy);
+        UpdateOptionPreviewSelection();
 
         AddLog("INFO", "SpinTexture initialized. Analyze and staged builds never write to the selected client.");
         AddLog("SAFE", "Default profile: Texture HD • World only • 2,048 px • staged output.");
@@ -213,6 +217,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public IReadOnlyList<int> TextureCaps { get; }
     public ObservableCollection<string> Zones { get; } = [];
     public ObservableCollection<LogEntryViewModel> LogEntries { get; } = [];
+    public TextureOptionPreviewViewModel OptionPreview { get; }
 
     public RelayCommand BrowseCommand { get; }
     public AsyncRelayCommand AnalyzeCommand { get; }
@@ -357,6 +362,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _isBusy, value))
             {
+                UpdateOptionPreviewSuspension();
                 RefreshCommands();
             }
         }
@@ -642,6 +648,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private async Task AnalyzeAsync(CancellationToken cancellationToken)
     {
         BeginOperation("ANALYZE", "Reading archive and loose-texture inventory");
+        await OptionPreview.WaitForIdleAsync().ConfigureAwait(true);
         AddLog("SCAN", "Started read-only client analysis.");
 
         try
@@ -740,6 +747,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         const string operation = "STAGED BUILD";
         BeginOperation(operation, "Preparing immutable staged output");
+        await OptionPreview.WaitForIdleAsync().ConfigureAwait(true);
         BeginStagedBuildProgress();
         AddLog("SAFE", "Started staged-pack workflow. The live client remains immutable.");
 
@@ -842,6 +850,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
 
         BeginOperation("INSTALL PACK", "Verifying the staged pack and original client files");
+        await OptionPreview.WaitForIdleAsync().ConfigureAwait(true);
         try
         {
             await RefreshInstallHealthAsync(cancellationToken).ConfigureAwait(true);
@@ -901,6 +910,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private async Task PlayEnhancedAsync(CancellationToken cancellationToken)
     {
         BeginOperation("VERIFY + PLAY", "Verifying that the enhanced archives are still active");
+        await OptionPreview.WaitForIdleAsync().ConfigureAwait(true);
         try
         {
             await RefreshInstallHealthAsync(cancellationToken, fast: true).ConfigureAwait(true);
@@ -923,6 +933,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             }
 
             await _enhancedLauncher.LaunchAsync(InstallPath, cancellationToken).ConfigureAwait(true);
+            _isEnhancedGameSessionActive = true;
             AddLog("PLAY", "Started eqgame.exe with the no-patch option. The verified enhanced archives remain installed.");
             StatusText = "EverQuest started with SpinTexture enhancements active";
             CurrentStage = "PLAYING";
@@ -953,6 +964,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
 
         BeginOperation("RESTORE", "Verifying managed backup");
+        await OptionPreview.WaitForIdleAsync().ConfigureAwait(true);
         try
         {
             await _workflow.RestoreAsync(InstallPath, new Progress<ProgressUpdate>(HandleProgress), cancellationToken);
@@ -989,6 +1001,80 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         IsBusy = false;
         RefreshCommands();
+    }
+
+    public async Task SuspendOptionPreviewForExternalWorkflowAsync()
+    {
+        _isOptionPreviewSectionSuspended = true;
+        UpdateOptionPreviewSuspension();
+        await OptionPreview.WaitForIdleAsync().ConfigureAwait(true);
+    }
+
+    public async Task DrainOptionPreviewForShutdownAsync()
+    {
+        _isOptionPreviewSectionSuspended = true;
+        OptionPreview.SetSuspended(
+            true,
+            "Live preview is stopping before SpinTexture closes.");
+        await OptionPreview.WaitForIdleAsync().ConfigureAwait(true);
+    }
+
+    public void ResumeOptionPreviewForBuildSection()
+    {
+        _isOptionPreviewSectionSuspended = false;
+        if (_isEnhancedGameSessionActive && !IsEverQuestRunning())
+        {
+            _isEnhancedGameSessionActive = false;
+        }
+
+        UpdateOptionPreviewSuspension();
+    }
+
+    private void UpdateOptionPreviewSuspension()
+    {
+        string? reason = IsBusy
+            ? "Live preview is paused while the active workflow finishes."
+            : _isOptionPreviewSectionSuspended
+                ? "Live preview is paused while Pack or Texture Review can run texture work."
+                : _isEnhancedGameSessionActive
+                    ? "Live preview stays paused while EverQuest is running. After closing the game, choose Build to re-enable it."
+                    : null;
+        OptionPreview.SetSuspended(reason is not null, reason);
+    }
+
+    private static bool IsEverQuestRunning()
+    {
+        Process[] processes;
+        try
+        {
+            processes = Process.GetProcessesByName("eqgame");
+        }
+        catch (InvalidOperationException)
+        {
+            return true;
+        }
+
+        try
+        {
+            return processes.Any(process =>
+            {
+                try
+                {
+                    return !process.HasExited;
+                }
+                catch (InvalidOperationException)
+                {
+                    return true;
+                }
+            });
+        }
+        finally
+        {
+            foreach (Process process in processes)
+            {
+                process.Dispose();
+            }
+        }
     }
 
     private void HandleProgress(ProgressUpdate update)
@@ -1383,10 +1469,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(PackedTextureCountText));
         OnPropertyChanged(nameof(LooseTextureCountText));
         OnPropertyChanged(nameof(SourceFootprintText));
+        UpdateOptionPreviewSelection();
     }
 
     private void UpdateEstimate()
     {
+        UpdateOptionPreviewSelection();
         if (_scanSummary is null)
         {
             return;
@@ -1543,6 +1631,24 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         ? SelectedPaintedThemeOption.Value
         : PaintedTheme.ClassicPainted;
 
+    private void UpdateOptionPreviewSelection()
+    {
+        var previewOptions = new UpscaleOptions(
+            SelectedPresetOption.Value,
+            SelectedScopeOption.Value,
+            SelectedMaximumDimension,
+            GenerateMipMaps,
+            InstallAfterBuild: false,
+            IsSelectedZoneScope ? SelectedZone : null,
+            PaintedTheme: EffectivePaintedTheme);
+        OptionPreview.UpdateSelection(
+            InstallPath,
+            previewOptions,
+            _scanSummary,
+            IsClientSignaturePresent,
+            HasAnalysis);
+    }
+
     private void AddLog(string level, string message)
     {
         LogEntries.Add(new LogEntryViewModel(
@@ -1609,5 +1715,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         InstallLatestPackCommand.Dispose();
         PlayEnhancedCommand.Dispose();
         RestoreCommand.Dispose();
+        OptionPreview.Dispose();
     }
 }

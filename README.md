@@ -74,11 +74,12 @@ Start with one zone. It is the fastest way to confirm visual quality, GPU stabil
 2. Under **Asset Set**, choose **Selected zone**, then select **lavastorm**.
 3. Choose **Texture HD**. It is the recommended faithful-detail route for a first world build.
 4. Set **Upscale ceiling (longest edge)** to **2,048 px** and leave **Generate DDS mip chains** enabled.
-5. Review the estimated time and disk use, acknowledge the install notice, then click **Build Staged Pack**. Building writes only to SpinTexture's managed pack library; it does not install anything into EverQuest.
+5. Optionally open **Live Settings Preview**. SpinTexture selects up to three safe examples from the selected client source, or SHA-verifies its managed original backup when an enhanced pack is active, and renders them with the exact selected processing route. Drag the Original/Enhanced reveal or switch samples to compare the result. Nothing is uploaded, installed, or written to the live client.
+6. Review the estimated time and disk use, acknowledge the install notice, then click **Build Staged Pack**. Building writes only to SpinTexture's managed pack library; it does not install anything into EverQuest.
    The footer tracks overall job progress across the complete selected asset set, including artifact count, elapsed time, and a live ETA that recalibrates from the measured speed of the current PC as archives finish.
-6. Open **Review** when the build completes. Use **Fit** to judge the whole texture and **1:1** to inspect the pixels that will actually be installed. Protected or fidelity-rejected textures remain original by design.
-7. Open **Packs**, check the new Lavastorm pack, and click **Install Checked Packs**. Keep EverQuest and LaunchPad closed while SpinTexture verifies sources, creates exact backups, and atomically installs the selected archives.
-8. Click **Play Enhanced EQ**. SpinTexture performs a quick integrity check and starts the enhanced client; it does not rerun the upscaler or recopy every archive each time you play.
+7. Open **Review** when the build completes. Use **Fit** to judge the whole texture and **1:1** to inspect the pixels that will actually be installed. Protected or fidelity-rejected textures remain original by design.
+8. Open **Packs**, check the new Lavastorm pack, and click **Install Checked Packs**. Keep EverQuest and LaunchPad closed while SpinTexture verifies sources, creates exact backups, and atomically installs the selected archives.
+9. Click **Play Enhanced EQ**. SpinTexture performs a quick integrity check and starts the enhanced client; it does not rerun the upscaler or recopy every archive each time you play.
 
 > [!IMPORTANT]
 > LaunchPad validates game archives and can replace enhanced textures with the originals whenever it starts. Use **Play Enhanced EQ** or the install-specific desktop shortcut for normal enhanced play. The shortcut starts `eqgame.exe patchme` through SpinTexture's verifier and never reads, stores, forwards, or reuses LaunchPad credentials or login tickets. Manual-login behavior can vary, so prove this path with the small zone build before creating a full-client pack.
@@ -184,6 +185,12 @@ SpinTexture does not force every image to 4,096×4,096. **Upscale ceiling (longe
 - **4,096 px** benefits only textures whose source longest edge is greater than 512 px. Eligible 1,024 px sources can contain four times as many top-level pixels as their 2K result, increasing processing time, VRAM pressure, and disk use. It does not improve a 512 px or smaller source beyond its normal 4× result.
 
 Mipmaps are separate from the upscale ceiling. When **Generate DDS mip chains** is enabled, SpinTexture writes progressively smaller copies of eligible DDS textures so EverQuest can choose a stable level at distance; this reduces shimmer but does not add close-up detail or make the top level larger. Opaque DDS textures receive a complete verified chain. Alpha-tested foliage, armor, and model cutouts keep only the enhanced top level because generated lower levels can collapse or create angle-dependent halos in the legacy renderer. BMP, TGA, and other non-DDS outputs do not receive generated mip chains.
+
+### Live settings preview
+
+After client analysis, **Live Settings Preview** can generate up to three representative comparisons without building a pack. It reads the selected client source, or SHA-verifies its managed original backup when an enhanced pack is active, processes it through the same production model and safety checks as a staged build, and stores only bounded local preview data under that installation profile. The comparison identifies the actual route, resolved zone-aware theme, source and result dimensions, mip count, and any Original Clarity safety fallback. It never bundles or uploads EverQuest texture art and never writes to the game directory.
+
+The preview updates after it has been explicitly opened and a profile, painted theme, scope, ceiling, or mip option changes. A 2K-to-4K change can correctly produce the same top image for a small source because neural enlargement is limited to one meaningful 4x pass; the preview explains this case instead of implying extra detail. Mip generation also does not alter the displayed top level, so its effect is reported as distance-level metadata. Sky, water, translucent materials, particles, animation controls, masks, indexed palette controls, and other renderer-sensitive assets are intentionally excluded from these color examples.
 
 ## What it protects
 

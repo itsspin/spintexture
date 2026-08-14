@@ -93,6 +93,7 @@ public partial class App : Application
                 window.Measure(new Size(1440, 900));
                 window.Arrange(new Rect(0, 0, 1440, 900));
                 window.UpdateLayout();
+                window.RunLivePreviewLayoutSmoke(new Size(1160, 760));
                 window.Close();
 
                 using var graphics = new NativeGraphicsWindow(
