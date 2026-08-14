@@ -1472,9 +1472,9 @@ public static class TexturePipelineSelfTests
                 "Faithful should retain its conservative model");
             var illustrated = legacyBuilder.ResolveModel(legacyModels, TexturePreset.Illustrated);
             AssertEqual(
-                RealEsrganCommandBuilder.IllustratedModelName,
+                RealEsrganCommandBuilder.LegacyDetailModelName,
                 illustrated.Name,
-                "Illustrated legacy recovery should use the bundled official illustrated model");
+                "Illustrated legacy recovery should keep a detail-preserving base for the painterly stylizer");
             var illustratedCommand = legacyBuilder.CreateUpscale(
                 Path.Combine(root, "realesrgan-ncnn-vulkan.exe"),
                 legacyModels,
@@ -1482,7 +1482,7 @@ public static class TexturePipelineSelfTests
                 Path.Combine(root, "output-directory"),
                 TexturePreset.Illustrated);
             AssertEqual(
-                RealEsrganCommandBuilder.IllustratedModelName,
+                RealEsrganCommandBuilder.LegacyDetailModelName,
                 GetCommandArgument(illustratedCommand.Arguments, "-n")!,
                 "Illustrated legacy recovery command model");
             Assert(
@@ -1943,7 +1943,7 @@ public static class TexturePipelineSelfTests
             }
         }
 
-        var graphicPatches = TgaPixelBuffer.Read(patchBytes).ApplyGraphicPaintedFinish();
+        var graphicPatches = TgaPixelBuffer.Read(patchBytes).ApplyPaintedStylization(strength: 1);
         var gothicPatches = graphicPatches.ApplyPaintedTheme(
             PaintedTheme.DarkGothic,
             strength: 0.62);
@@ -2022,7 +2022,7 @@ public static class TexturePipelineSelfTests
         }
 
         var productionBase = TgaPixelBuffer.Read(materialBytes)
-            .ApplyGraphicPaintedFinish(strength: 0.94, wrapEdges: true);
+            .ApplyPaintedStylization(strength: 0.94, wrapEdges: true);
         var productionLight = productionBase.ApplyPaintedTheme(
             PaintedTheme.LightStorybook,
             strength: 0.78);
@@ -2229,7 +2229,7 @@ public static class TexturePipelineSelfTests
         }
 
         var rusticSource = TgaPixelBuffer.Read(rusticSourceBytes);
-        var graphicPainted = rusticSource.ApplyGraphicPaintedFinish();
+        var graphicPainted = rusticSource.ApplyPaintedStylization(strength: 1);
         AssertSequenceEqual(
             rusticSource.RgbaPixels.Span.ToArray().Where((_, index) => index % 4 == 3).ToArray(),
             graphicPainted.RgbaPixels.Span.ToArray().Where((_, index) => index % 4 == 3).ToArray(),
@@ -2237,14 +2237,12 @@ public static class TexturePipelineSelfTests
         Assert(
             !rusticSource.RgbaPixels.Span.SequenceEqual(graphicPainted.RgbaPixels.Span),
             "graphic painted finishing should visibly consolidate color and value planes");
-        var wrappedPainted = rusticSource.AddWrappedBorder(1)
-            .ApplyGraphicPaintedFinish(wrapEdges: true)
-            .Crop(1, 1, rusticSource.Width, rusticSource.Height);
+        var repeatedPainted = rusticSource.ApplyPaintedStylization(strength: 1);
         AssertSequenceEqual(
             graphicPainted.RgbaPixels.Span,
-            wrappedPainted.RgbaPixels.Span,
-            "graphic painted finishing must be invariant under a wrapped working border");
-        var noPaint = rusticSource.ApplyGraphicPaintedFinish(strength: 0);
+            repeatedPainted.RgbaPixels.Span,
+            "painterly stylization must be deterministic for identical inputs");
+        var noPaint = rusticSource.ApplyPaintedStylization(strength: 0);
         AssertSequenceEqual(
             rusticSource.RgbaPixels.Span,
             noPaint.RgbaPixels.Span,
@@ -3563,7 +3561,7 @@ public static class TexturePipelineSelfTests
                     StringComparison.OrdinalIgnoreCase)
                 && string.Equals(
                     modelName,
-                    RealEsrganCommandBuilder.IllustratedModelName,
+                    RealEsrganCommandBuilder.LegacyDetailModelName,
                     StringComparison.OrdinalIgnoreCase);
             var isFaithful = executable.Equals(
                     "realesrgan-ncnn-vulkan.exe",

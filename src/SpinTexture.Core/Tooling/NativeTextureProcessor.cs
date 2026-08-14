@@ -1174,16 +1174,22 @@ public sealed class NativeTextureProcessor
                     $"illustrated-encoded-candidate{Path.GetExtension(job.Request.DestinationPath)}")
                 : job.Request.DestinationPath;
             InvalidDataException? lastPaintedFailure = null;
+            // The stylization passes are strength-independent, so run them
+            // once and probe the descending-strength ladder with cheap blends.
+            var stylized = reconstruction.ApplyPaintedStylizationFull(
+                job.Request.WrapEdges,
+                key.NeuralScale,
+                job.Request.Options.ResolvedPaintedStyle);
             double[] finishScales = [1d, 0.75d, 0.5d, 0.25d];
             foreach (var finishScale in finishScales)
             {
                 try
                 {
-                    var graphicPainted = reconstruction.ApplyGraphicPaintedFinish(
+                    var graphicPainted = reconstruction.BlendTowardStylized(
+                        stylized,
                         GetGraphicPaintedStrength(job.Request, job.PreserveAlphaCoverage)
                             * reconstructionStrengthScale
-                            * finishScale,
-                        job.Request.WrapEdges);
+                            * finishScale);
                     ValidateGraphicPaintedOutput(
                         CalculateFidelityMetrics(job.Decoded, graphicPainted));
                     var themed = ApplyValidatedPaintedTheme(
