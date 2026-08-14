@@ -853,45 +853,71 @@
                                         <Grid.RowDefinitions>
                                             <RowDefinition />
                                             <RowDefinition />
+                                            <RowDefinition />
                                         </Grid.RowDefinitions>
                                         <StackPanel Grid.Row="0" Grid.Column="0">
+                                            <TextBlock Text="STYLIZATION STRENGTH" Style="{StaticResource FieldLabelStyle}"
+                                                       ToolTip="How completely the painterly art direction replaces the reconstructed texture. This is the master control; it is no longer silently reduced by build scope." />
+                                            <Slider Value="{Binding PaintedStylizationStrength, Delay=200}"
+                                                    AutomationProperties.Name="Painted stylization strength" />
+                                        </StackPanel>
+                                        <StackPanel Grid.Row="0" Grid.Column="2">
                                             <TextBlock Text="STROKE SIZE" Style="{StaticResource FieldLabelStyle}"
                                                        ToolTip="How broad the painted planes and brush clumps are. Left keeps forms tight; right paints with a wider brush." />
                                             <Slider Value="{Binding PaintedStrokeSize, Delay=200}"
                                                     AutomationProperties.Name="Painted stroke size" />
                                         </StackPanel>
-                                        <StackPanel Grid.Row="0" Grid.Column="2">
+                                        <StackPanel Grid.Row="0" Grid.Column="4">
                                             <TextBlock Text="STROKE STRENGTH" Style="{StaticResource FieldLabelStyle}"
                                                        ToolTip="Visibility of brush-hair grain, value jitter, and warm/cool drift inside the painted planes." />
                                             <Slider Value="{Binding PaintedStrokeStrength, Delay=200}"
                                                     AutomationProperties.Name="Painted stroke strength" />
                                         </StackPanel>
-                                        <StackPanel Grid.Row="0" Grid.Column="4">
+                                        <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,10,0,0">
                                             <TextBlock Text="DETAIL PRESERVATION" Style="{StaticResource FieldLabelStyle}"
-                                                       ToolTip="How strongly text, signage, masonry lines, and fine material detail resist the painted simplification." />
+                                                       ToolTip="How strongly text, signage, masonry lines, and fine material detail resist the painted simplification. Detail is repainted with a smaller brush, never left photographic." />
                                             <Slider Value="{Binding PaintedDetailPreservation, Delay=200}"
                                                     AutomationProperties.Name="Painted detail preservation" />
                                         </StackPanel>
-                                        <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,10,0,0">
+                                        <StackPanel Grid.Row="1" Grid.Column="2" Margin="0,10,0,0">
                                             <TextBlock Text="COLOR SIMPLIFICATION" Style="{StaticResource FieldLabelStyle}"
                                                        ToolTip="How much hue variation merges into broader color planes. Luminance detail is preserved either way." />
                                             <Slider Value="{Binding PaintedColorSimplification, Delay=200}"
                                                     AutomationProperties.Name="Painted color simplification" />
                                         </StackPanel>
-                                        <StackPanel Grid.Row="1" Grid.Column="2" Margin="0,10,0,0">
+                                        <StackPanel Grid.Row="1" Grid.Column="4" Margin="0,10,0,0">
                                             <TextBlock Text="CANVAS GRAIN" Style="{StaticResource FieldLabelStyle}"
                                                        ToolTip="Subtle paper/canvas texture so flat planes do not read as vector fill." />
                                             <Slider Value="{Binding PaintedCanvasGrain, Delay=200}"
                                                     AutomationProperties.Name="Painted canvas grain" />
                                         </StackPanel>
-                                        <Button Grid.Row="1" Grid.Column="4" Content="Reset style"
+                                        <Button Grid.Row="2" Grid.Column="0" Content="Reset style"
                                                 Command="{Binding ResetPaintedStyleCommand}"
-                                                HorizontalAlignment="Left" VerticalAlignment="Bottom"
-                                                Margin="0,10,0,2" Padding="10,4"
+                                                HorizontalAlignment="Left"
+                                                Margin="0,12,0,2" Padding="10,4"
                                                 AutomationProperties.Name="Reset painted style sliders" />
                                     </Grid>
                                     <TextBlock Margin="0,9,0,0" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap"
                                                Text="Style sliders shape the painterly finish for new Graphic Painted builds and are recorded in the pack so repairs reproduce the same look. Use Live Settings Preview to judge them on your own textures." />
+
+                                    <Border Margin="0,12,0,0" Padding="11" CornerRadius="6"
+                                            Background="#100D16" BorderBrush="#4E3A6A" BorderThickness="1">
+                                        <StackPanel>
+                                            <TextBlock Text="DIFFUSION REPAINT (EXPERIMENTAL)" Style="{StaticResource FieldLabelStyle}" />
+                                            <TextBlock Text="{Binding ArtisticWorkerStatusText}" Margin="0,6,0,0"
+                                                       Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" LineHeight="17" />
+                                            <WrapPanel Margin="0,9,0,0">
+                                                <Button Content="Set Up Diffusion Repaint (~2.9 GB)"
+                                                        Command="{Binding SetupArtisticWorkerCommand}"
+                                                        Background="#231A33" BorderBrush="#4E3A6A" Padding="10,4"
+                                                        AutomationProperties.Name="Set up diffusion repaint worker" />
+                                                <Button Content="Remove" Margin="8,0,0,0"
+                                                        Command="{Binding RemoveArtisticWorkerCommand}"
+                                                        Padding="10,4"
+                                                        AutomationProperties.Name="Remove diffusion repaint worker" />
+                                            </WrapPanel>
+                                        </StackPanel>
+                                    </Border>
                                 </StackPanel>
                             </Border>
 

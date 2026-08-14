@@ -11,8 +11,11 @@ public sealed record PaintedStyleSettings(
     double StrokeStrength,
     double DetailPreservation,
     double ColorSimplification,
-    double CanvasGrain)
+    double CanvasGrain,
+    double Strength = 0.9)
 {
+    public const double DefaultStrength = 0.9;
+
     public static PaintedStyleSettings Default { get; } = new(0.5, 0.55, 0.6, 0.5, 0.35);
 
     /// <summary>Returns an equivalent instance with every control clamped to [0, 1].</summary>
@@ -21,8 +24,9 @@ public sealed record PaintedStyleSettings(
         ClampUnit(StrokeStrength),
         ClampUnit(DetailPreservation),
         ClampUnit(ColorSimplification),
-        ClampUnit(CanvasGrain));
+        ClampUnit(CanvasGrain),
+        ClampUnit(Strength, DefaultStrength));
 
-    private static double ClampUnit(double value) =>
-        double.IsFinite(value) ? Math.Clamp(value, 0, 1) : 0.5;
+    private static double ClampUnit(double value, double fallback = 0.5) =>
+        double.IsFinite(value) ? Math.Clamp(value, 0, 1) : fallback;
 }

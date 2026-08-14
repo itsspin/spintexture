@@ -127,8 +127,16 @@ public static class PaintedStylizer
         // --- fine oriented sector filter at full resolution ---
         var fine = SectorFilter.Run(input, luma, field, width, height, wrapEdges, strokeRadius);
 
-        // --- contrast mask: where detail must survive ---
-        var mask = BuildDetailMask(field.Contrast, width, height, wrapEdges, settings.DetailPreservation);
+        // --- small-brush pass: detailed regions get repainted with a finer
+        // brush instead of falling back to photographic source pixels ---
+        var detailRadius = Math.Max(2, strokeRadius / 3);
+        var detailFine = SectorFilter.Run(
+            input, luma, field, width, height, wrapEdges, detailRadius, iterations: 1);
+
+        // --- contrast mask: where detail must survive; the blurred contrast
+        // also drives the dark ink accents along strong boundaries ---
+        var blurredContrast = GaussianBlur(field.Contrast, width, height, wrapEdges, radius: 3);
+        var mask = BuildDetailMask(blurredContrast, settings.DetailPreservation);
 
         // --- luminance high-frequency band for re-injection ---
         var blurredLuma = GaussianBlur(luma, width, height, wrapEdges, radius: Math.Max(2, neuralScale));
@@ -142,10 +150,12 @@ public static class PaintedStylizer
             luma,
             blurredLuma,
             fine,
+            detailFine,
             coarse,
             coarseWidth,
             coarseHeight,
             mask,
+            blurredContrast,
             field,
             strokeGrain,
             noise,
@@ -162,10 +172,12 @@ public static class PaintedStylizer
         float[] luma,
         float[] blurredLuma,
         byte[] fine,
+        byte[] detailFine,
         byte[] coarse,
         int coarseWidth,
         int coarseHeight,
         float[] mask,
+        float[] blurredContrast,
         FlowField field,
         float[] strokeGrain,
         PeriodicNoise noise,
@@ -202,7 +214,7 @@ public static class PaintedStylizer
 
                 // Value: detailed areas keep the fine pass, flat areas relax
                 // into the broad underpainting planes.
-                var valueMix = 0.18f + (0.82f * m);
+                var valueMix = 0.10f + (0.90f * m);
                 var l = cl + ((fl - cl) * valueMix);
 
                 // Chroma: color simplification pulls hue planes toward the
@@ -216,16 +228,20 @@ public static class PaintedStylizer
                 var highFrequency = luma[pixel] - blurredLuma[pixel];
                 l += highFrequency * detailPreservation * (0.30f + (0.70f * m)) * 1.25f;
 
-                // The strongest detail regions (signage, icons, glyph edges)
-                // additionally pull back toward the source color so thin
-                // strokes cannot be eaten by the sector planes.
-                var protect = detailPreservation * SmoothStep(0.70f, 0.97f, m) * 0.45f;
-                if (protect > 0f)
+                // The strongest detail regions (signage, icons, masonry lines)
+                // pull toward the small-brush repaint so fine structure stays
+                // legible but still reads as painted, never as photographic
+                // source pixels floating inside painted planes.
+                var repaint = detailPreservation * SmoothStep(0.45f, 0.92f, m) * 0.80f;
+                if (repaint > 0f)
                 {
-                    var sourceLuma = luma[pixel];
-                    l += (sourceLuma - l) * protect;
-                    chromaR += ((input[offset] - sourceLuma) - chromaR) * protect;
-                    chromaB += ((input[offset + 2] - sourceLuma) - chromaB) * protect;
+                    float dr = detailFine[offset];
+                    float dg = detailFine[offset + 1];
+                    float db = detailFine[offset + 2];
+                    var dl = Luma(dr, dg, db);
+                    l += (dl - l) * repaint;
+                    chromaR += ((dr - dl) - chromaR) * repaint;
+                    chromaB += ((db - dl) - chromaB) * repaint;
                 }
 
                 // Flow-aligned stroke grain: strongest where the flow is
@@ -245,6 +261,19 @@ public static class PaintedStylizer
                 // Canvas grain reads mostly in the flat painted planes.
                 var canvas = noise.FineGrain(x, y);
                 l += (canvas - 0.5f) * canvasGrain * 7.0f * (1f - (0.5f * m));
+
+                // Vibrance: painted fantasy art commits to its colors. Muted
+                // chroma gets the strongest lift so already-vivid accents do
+                // not clip.
+                var chromaMagnitude = MathF.Abs(chromaR) + MathF.Abs(chromaB);
+                var vibrance = 1f + (0.22f * (1f - MathF.Min(1f, chromaMagnitude / 110f)));
+                chromaR *= vibrance;
+                chromaB *= vibrance;
+
+                // Dark ink accents hug strong boundaries the way a painter
+                // pools shadow between forms.
+                var ink = SmoothStep(0.055f, 0.22f, blurredContrast[pixel] / 255f);
+                l -= ink * 17f;
 
                 l = SoftClipLuma(l);
                 var r = l + chromaR;
@@ -286,19 +315,15 @@ public static class PaintedStylizer
     }
 
     private static float[] BuildDetailMask(
-        float[] contrast,
-        int width,
-        int height,
-        bool wrapEdges,
+        float[] blurredContrast,
         double detailPreservation)
     {
-        var blurred = GaussianBlur(contrast, width, height, wrapEdges, radius: 3);
         var high = (float)Lerp(0.30, 0.10, detailPreservation);
         var low = high * 0.30f;
-        var mask = new float[blurred.Length];
+        var mask = new float[blurredContrast.Length];
         for (var i = 0; i < mask.Length; i++)
         {
-            mask[i] = SmoothStep(low, high, blurred[i] / 255f);
+            mask[i] = SmoothStep(low, high, blurredContrast[i] / 255f);
         }
 
         return mask;
@@ -487,7 +512,7 @@ public static class PaintedStylizer
                         // Low-variance sectors dominate decisively: this is
                         // what turns noise into confident painted planes with
                         // crisp clump boundaries instead of an airbrushed blur.
-                        var scaled = variance * 0.09f;
+                        var scaled = variance * 0.12f;
                         var squared = scaled * scaled;
                         var sectorWeight = 1f / (1f + (squared * squared * squared));
                         totalWeight += sectorWeight;

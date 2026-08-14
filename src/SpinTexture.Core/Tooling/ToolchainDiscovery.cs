@@ -6,8 +6,11 @@ public sealed record ExternalToolPaths(
     string? RealEsrganModelsPath,
     string? TextureUpscalerPath,
     string? TextureModelsPath,
-    IReadOnlyList<string> Diagnostics)
+    IReadOnlyList<string> Diagnostics,
+    string? ArtisticWorkerPath = null)
 {
+    public bool HasArtisticWorker => ArtisticWorkerPath is not null;
+
     public bool HasDirectXTex => TexconvPath is not null;
     public bool HasRealEsrgan => RealEsrganPath is not null && RealEsrganModelsPath is not null;
     public bool HasTextureUpscaler => TextureUpscalerPath is not null
@@ -23,6 +26,7 @@ public sealed class ToolchainDiscovery
     private const string RealEsrganModelsEnvironmentVariable = "SPINTEXTURE_REALESRGAN_MODELS";
     private const string TextureUpscalerEnvironmentVariable = "SPINTEXTURE_UPSCAYL";
     private const string TextureModelsEnvironmentVariable = "SPINTEXTURE_TEXTURE_MODELS";
+    private const string ArtisticWorkerEnvironmentVariable = "SPINTEXTURE_ARTISTIC_WORKER";
 
     public ExternalToolPaths Discover(ProjectPaths paths)
     {
@@ -114,13 +118,30 @@ public sealed class ToolchainDiscovery
                 "Texture HD custom worker is incomplete; the bundled faithful Real-ESRNet fallback will be used.");
         }
 
+        var artisticWorker = FindFile(
+            ArtisticWorkerEnvironmentVariable,
+            diagnostics,
+            Path.Combine(paths.ToolsPath, "artistic-worker", "worker.exe"),
+            Path.Combine(paths.ToolsPath, "artistic-worker", "worker.bat"),
+            Path.Combine(paths.ToolsPath, "artistic-worker", "worker.cmd"),
+            Path.Combine(applicationDirectory, "Tools", "artistic-worker", "worker.exe"),
+            Path.Combine(applicationDirectory, "Tools", "artistic-worker", "worker.bat"),
+            Path.Combine(applicationDirectory, "Tools", "artistic-worker", "worker.cmd"));
+        if (artisticWorker is not null)
+        {
+            diagnostics.Add(
+                $"Experimental external artistic painted worker enabled: {artisticWorker}. "
+                + "Graphic Painted Fantasy will use it as its reconstruction base; see docs/ARTISTIC_WORKER.md.");
+        }
+
         return new ExternalToolPaths(
             texconv,
             realEsrgan,
             models,
             textureUpscaler,
             textureModels,
-            diagnostics);
+            diagnostics,
+            artisticWorker);
     }
 
     private static string? FindFile(

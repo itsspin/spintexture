@@ -97,6 +97,7 @@ public static class TexturePipelineSelfTests
         await output.WriteLineAsync("Credential-free enhanced game launch tests passed.")
             .ConfigureAwait(false);
         TestTextureModelSelection();
+        TestArtisticWorkerCommand();
         TestPresetAwareFidelityGate();
         TestPaintedFinalValidationPolicyAndCappedMetrics();
         await output.WriteLineAsync("Texture model discovery and preset fidelity-gate tests passed.").ConfigureAwait(false);
@@ -2196,6 +2197,87 @@ public static class TexturePipelineSelfTests
         AssertEqual(lava.Index, replacement.Index, "released preview indices should be reused deterministically");
     }
 
+    private static void TestArtisticWorkerCommand()
+    {
+        var scriptPath = Path.Combine(Path.GetTempPath(), "artistic", "worker.bat");
+        var command = new ArtisticWorkerCommandBuilder().CreateStylize(
+            scriptPath,
+            Path.Combine(Path.GetTempPath(), "in"),
+            Path.Combine(Path.GetTempPath(), "out"));
+        AssertEqual(
+            "4",
+            GetCommandArgument(command.Arguments, "-s")!,
+            "the artistic worker contract is fixed at 4x");
+        AssertEqual(
+            "png",
+            GetCommandArgument(command.Arguments, "-f")!,
+            "the artistic worker exchanges PNG batches");
+        Assert(
+            command.InactivityTimeout == ArtisticWorkerCommandBuilder.WorkerInactivityTimeout,
+            "diffusion pipelines get a long inactivity allowance");
+        Assert(
+            GetCommandArgument(command.Arguments, "-i") is not null
+            && GetCommandArgument(command.Arguments, "-o") is not null,
+            "the artistic worker receives input and output directories");
+        Assert(
+            command.ExecutablePath.EndsWith("cmd.exe", StringComparison.OrdinalIgnoreCase)
+            && command.Arguments.Contains("/c")
+            && command.Arguments.Contains(Path.GetFullPath(scriptPath)),
+            "batch workers must run through the command interpreter");
+        var direct = new ArtisticWorkerCommandBuilder().CreateStylize(
+            Path.Combine(Path.GetTempPath(), "artistic", "worker.exe"),
+            Path.Combine(Path.GetTempPath(), "in"),
+            Path.Combine(Path.GetTempPath(), "out"));
+        Assert(
+            direct.ExecutablePath.EndsWith("worker.exe", StringComparison.OrdinalIgnoreCase),
+            "executable workers run directly");
+
+        foreach (var component in ArtisticWorkerSetupService.Components)
+        {
+            Assert(
+                component.Url.StartsWith("https://", StringComparison.Ordinal),
+                $"artistic component {component.Name} must download over HTTPS");
+            Assert(
+                component.Sha256.Length == 64
+                && component.Sha256.All(Uri.IsHexDigit),
+                $"artistic component {component.Name} must pin a SHA-256");
+            Assert(component.SizeBytes > 0, $"artistic component {component.Name} must pin its size");
+        }
+
+        var setupRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-artistic-{Guid.NewGuid():N}");
+        try
+        {
+            var setup = new ArtisticWorkerSetupService(setupRoot);
+            Directory.CreateDirectory(setup.WorkerDirectory);
+            setup.WriteWorkerScripts(
+                Path.Combine(setupRoot, "realesrgan-ncnn-vulkan.exe"),
+                Path.Combine(setupRoot, "models"));
+            var generatedScript = File.ReadAllText(Path.Combine(setup.WorkerDirectory, "worker.ps1"));
+            Assert(
+                generatedScript.Contains("--seed", StringComparison.Ordinal)
+                && generatedScript.Contains("control_v11f1e_sd15_tile_fp16.safetensors", StringComparison.Ordinal)
+                && generatedScript.Contains("DreamShaper_8_pruned.safetensors", StringComparison.Ordinal)
+                && generatedScript.Contains("$targetW = $w * 4", StringComparison.Ordinal),
+                "the generated worker script pins seed, models, and the exact-4x contract");
+            Assert(
+                File.Exists(Path.Combine(setup.WorkerDirectory, "worker.bat"))
+                && File.Exists(Path.Combine(setup.WorkerDirectory, "worker-config.json")),
+                "worker shim and editable config are generated");
+            Assert(
+                setup.GetStatus() is { IsInstalled: true, IsEnabled: true },
+                "generated scripts report as installed and enabled");
+        }
+        finally
+        {
+            if (Directory.Exists(setupRoot))
+            {
+                Directory.Delete(setupRoot, recursive: true);
+            }
+        }
+    }
+
     private static async Task TestPaintedStylizerAsync(CancellationToken cancellationToken)
     {
         // A strictly periodic fixture makes the wrapped-seam assertions
@@ -4062,9 +4144,9 @@ public static class TexturePipelineSelfTests
     private static void TestPaintedProfileReportCompatibility()
     {
         AssertEqual(
-            4,
+            5,
             TextureBuildReport.CurrentIllustratedProfileRevision,
-            "Graphic Painted profile revision should advance independently to revision four (painterly stylizer)");
+            "Graphic Painted profile revision should advance independently to revision five (bold painterly stylizer)");
         AssertEqual(
             1,
             TextureBuildReport.CurrentRusticPaintedProfileRevision,
@@ -4090,9 +4172,9 @@ public static class TexturePipelineSelfTests
             TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.RusticPainted),
             "unchanged Rustic Painted builds should retain the base resume operation key");
         AssertEqual(
-            $"{TexturePackWorkflow.FreshBuildResumeOperationKey}-illustrated-4",
+            $"{TexturePackWorkflow.FreshBuildResumeOperationKey}-illustrated-5",
             TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.Illustrated),
-            "Graphic Painted revision four should use a fenced resume operation key");
+            "Graphic Painted revision five should use a fenced resume operation key");
 
         var report = new TextureBuildReport(
             TextureBuildReport.CurrentSchemaVersion,

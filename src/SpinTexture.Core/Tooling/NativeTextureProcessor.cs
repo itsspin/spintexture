@@ -42,7 +42,9 @@ public sealed class NativeTextureProcessor
     private readonly DirectXTexCommandBuilder _directXTex;
     private readonly RealEsrganCommandBuilder _realEsrgan;
     private readonly UpscaylCommandBuilder _upscayl;
+    private readonly ArtisticWorkerCommandBuilder _artisticWorker = new();
     private int textureUpscalerUnavailable;
+    private int artisticWorkerUnavailable;
 
     public NativeTextureProcessor(
         ExternalToolPaths tools,
@@ -551,6 +553,18 @@ public sealed class NativeTextureProcessor
         PreparedColorJob job,
         TextureUpscaleModelSelection? specializedModel)
     {
+        if (job.EffectivePreset == TexturePreset.Illustrated
+            && Volatile.Read(ref artisticWorkerUnavailable) == 0
+            && _tools.HasArtisticWorker)
+        {
+            return new NeuralBatchKey(
+                NeuralWorkerKind.ExternalArtistic,
+                "external-artistic",
+                TexturePreset.Illustrated,
+                ArtisticWorkerCommandBuilder.WorkerScale,
+                job.Request.RealEsrganTileSize);
+        }
+
         if (ShouldUseTextureSpecializedReconstruction(job.EffectivePreset)
             && Volatile.Read(ref textureUpscalerUnavailable) == 0
             && specializedModel is not null)
@@ -698,6 +712,39 @@ public sealed class NativeTextureProcessor
                     cancellationToken).ConfigureAwait(false);
             }
         }
+        catch (NativeProcessException) when (key.WorkerKind == NeuralWorkerKind.ExternalArtistic)
+        {
+            Interlocked.Exchange(ref artisticWorkerUnavailable, 1);
+            nativeProgress?.Report(new NativeOutputLine(
+                NativeOutputStream.StandardError,
+                "The external artistic painted worker could not run; continuing this build with the built-in painterly stylization."));
+            await ExecuteStandardPaintedGroupsAsync(
+                    jobs,
+                    outcomes,
+                    batchDirectory,
+                    executionState,
+                    nativeProgress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+        catch (Exception exception) when (
+            IsPerTextureFailure(exception)
+            && key.WorkerKind == NeuralWorkerKind.ExternalArtistic)
+        {
+            nativeProgress?.Report(new NativeOutputLine(
+                NativeOutputStream.StandardError,
+                $"The external artistic worker returned unusable output; retrying this batch with the built-in painterly stylization. {exception.Message}"));
+            await ExecuteStandardPaintedGroupsAsync(
+                    jobs,
+                    outcomes,
+                    batchDirectory,
+                    executionState,
+                    nativeProgress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
         catch (NativeProcessException) when (key.WorkerKind == NeuralWorkerKind.TextureSpecialized)
         {
             Interlocked.Exchange(ref textureUpscalerUnavailable, 1);
@@ -798,6 +845,7 @@ public sealed class NativeTextureProcessor
         }
 
         var legacyPaintedRetries = new List<PreparedColorJob>();
+        var standardPaintedRetries = new List<PreparedColorJob>();
         var faithfulRetries = new List<PreparedColorJob>();
         try
         {
@@ -819,6 +867,13 @@ public sealed class NativeTextureProcessor
                             ?? throw new InvalidDataException(
                                 "Parallel texture completion returned neither output nor an error."),
                         Error: null);
+                }
+                else if (key.WorkerKind == NeuralWorkerKind.ExternalArtistic)
+                {
+                    nativeProgress?.Report(new NativeOutputLine(
+                        NativeOutputStream.StandardError,
+                        $"{Path.GetFileName(job.Request.SourcePath)} failed the painted fidelity gate on the artistic worker's output; queued for the built-in painterly stylization. {completion.Error.Message}"));
+                    standardPaintedRetries.Add(job);
                 }
                 else if (key.WorkerPreset != TexturePreset.Faithful)
                 {
@@ -849,6 +904,17 @@ public sealed class NativeTextureProcessor
         finally
         {
             TryDeleteOwnedChildDirectory(batchDirectory, invocation.GroupDirectory, "neural-");
+        }
+
+        if (standardPaintedRetries.Count > 0)
+        {
+            await ExecuteStandardPaintedGroupsAsync(
+                standardPaintedRetries,
+                outcomes,
+                batchDirectory,
+                executionState,
+                nativeProgress,
+                cancellationToken).ConfigureAwait(false);
         }
 
         if (legacyPaintedRetries.Count > 0)
@@ -1015,6 +1081,67 @@ public sealed class NativeTextureProcessor
             .ConfigureAwait(false);
     }
 
+    private async Task ExecuteStandardPaintedGroupsAsync(
+        IReadOnlyList<PreparedColorJob> jobs,
+        NativeTextureProcessOutcome?[] outcomes,
+        string batchDirectory,
+        NeuralBatchExecutionState executionState,
+        IProgress<NativeOutputLine>? nativeProgress,
+        CancellationToken cancellationToken)
+    {
+        // Regroup exactly as a build without the artistic worker would have:
+        // the specialized game-texture model when available, else the bundled
+        // detail model. The artistic worker is never re-selected here because
+        // its per-build availability flag or this retry path excluded it.
+        var specializedModel = Volatile.Read(ref textureUpscalerUnavailable) == 0
+                               && _tools.HasTextureUpscaler
+            ? _upscayl.FindTextureModel(_tools.TextureModelsPath!)
+            : null;
+        foreach (var group in jobs
+                     .OrderBy(job => job.RequestIndex)
+                     .GroupBy(job => CreateStandardPaintedKey(job, specializedModel)))
+        {
+            foreach (var chunk in ChunkNeuralJobs(group))
+            {
+                await ExecuteNeuralGroupAsync(
+                    chunk,
+                    group.Key,
+                    outcomes,
+                    batchDirectory,
+                    executionState,
+                    nativeProgress,
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private NeuralBatchKey CreateStandardPaintedKey(
+        PreparedColorJob job,
+        TextureUpscaleModelSelection? specializedModel)
+    {
+        if (ShouldUseTextureSpecializedReconstruction(job.EffectivePreset)
+            && Volatile.Read(ref textureUpscalerUnavailable) == 0
+            && specializedModel is not null)
+        {
+            return new NeuralBatchKey(
+                NeuralWorkerKind.TextureSpecialized,
+                specializedModel.Name,
+                job.EffectivePreset,
+                UpscaylCommandBuilder.ModelScale,
+                job.Request.RealEsrganTileSize);
+        }
+
+        var model = _realEsrgan.ResolveModel(
+            _tools.RealEsrganModelsPath!,
+            job.EffectivePreset);
+        return new NeuralBatchKey(
+            NeuralWorkerKind.LegacyRealEsrgan,
+            model.Name,
+            job.EffectivePreset,
+            job.Dimensions.RequiredNeuralScale,
+            job.Request.RealEsrganTileSize);
+    }
+
     private async Task ExecuteLegacyPaintedFallbackGroupsAsync(
         IReadOnlyList<PreparedColorJob> jobs,
         NativeTextureProcessOutcome?[] outcomes,
@@ -1073,6 +1200,10 @@ public sealed class NativeTextureProcessor
 
             var command = key.WorkerKind switch
             {
+                NeuralWorkerKind.ExternalArtistic => _artisticWorker.CreateStylize(
+                    _tools.ArtisticWorkerPath!,
+                    inputDirectory,
+                    outputDirectory),
                 NeuralWorkerKind.TextureSpecialized => _upscayl.CreateUpscale(
                     _tools.TextureUpscalerPath!,
                     _tools.TextureModelsPath!,
@@ -1232,10 +1363,14 @@ public sealed class NativeTextureProcessor
             InvalidDataException? lastPaintedFailure = null;
             // The stylization passes are strength-independent, so run them
             // once and probe the descending-strength ladder with cheap blends.
-            var stylized = reconstruction.ApplyPaintedStylizationFull(
-                job.Request.WrapEdges,
-                key.NeuralScale,
-                job.Request.Options.ResolvedPaintedStyle);
+            // An external artistic worker's output already carries the full
+            // art direction, so only the theme treatment applies on top.
+            var stylized = key.WorkerKind == NeuralWorkerKind.ExternalArtistic
+                ? reconstruction
+                : reconstruction.ApplyPaintedStylizationFull(
+                    job.Request.WrapEdges,
+                    key.NeuralScale,
+                    job.Request.Options.ResolvedPaintedStyle);
             double[] finishScales = [1d, 0.75d, 0.5d, 0.25d];
             foreach (var finishScale in finishScales)
             {
@@ -1371,6 +1506,11 @@ public sealed class NativeTextureProcessor
             return key.WorkerKind == NeuralWorkerKind.TextureSpecialized
                 ? $"Batched game-texture reconstruction ({key.ModelName})"
                 : "Batched faithful Real-ESRNet reconstruction (game-texture fallback)";
+        }
+
+        if (key.WorkerKind == NeuralWorkerKind.ExternalArtistic)
+        {
+            return $"Batched external artistic illustrated reconstruction with {FormatPaintedTheme(job.Request.Options.PaintedTheme)} finishing{FormatGraphicPaintedScale(graphicPaintedScale)}{FormatPaintedThemeScale(paintedThemeScale)}";
         }
 
         return key.WorkerPreset switch
@@ -1619,17 +1759,18 @@ public sealed class NativeTextureProcessor
         }
 
         if (fidelity.EnhancedStatistics.Samples == 0
-            || fidelity.MeanLuminanceDrift > 10
-            || fidelity.MaximumMeanChannelDrift > 20
+            || fidelity.MeanLuminanceDrift > 14
+            || fidelity.MaximumMeanChannelDrift > 26
             // Graphic abstraction deliberately reorganizes fine texels, so a
-            // faithful-mode PSNR floor rejects healthy illustrated output. Keep
-            // a low catastrophic floor and require the coarse scene layout to
-            // remain strongly correlated instead.
-            || fidelity.RoundTripLuminancePsnr < 12.5
-            || fidelity.CoarseLuminanceCorrelation < 0.72
+            // faithful-mode PSNR floor rejects healthy illustrated output.
+            // These bounds catch catastrophic results (black frames, washed
+            // images, lost scene layout) while allowing a committed painted
+            // art direction with ink accents and vibrance.
+            || fidelity.RoundTripLuminancePsnr < 10.5
+            || fidelity.CoarseLuminanceCorrelation < 0.62
             || (fidelity.SourceEdgeEnergy >= 0.5
-                && fidelity.EdgeEnergyRatio is < 0.18 or > 2.25)
-            || fidelity.ExtremeLuminanceGrowth > 0.02)
+                && fidelity.EdgeEnergyRatio is < 0.12 or > 2.6)
+            || fidelity.ExtremeLuminanceGrowth > 0.035)
         {
             throw new InvalidDataException(
                 "The graphic-painted output exceeded its bounded fidelity limits "
@@ -1646,27 +1787,23 @@ public sealed class NativeTextureProcessor
         NativeTextureProcessRequest request,
         bool preserveAlphaCoverage)
     {
-        var strength = request.Options.Scope switch
+        // The user's stylization-strength slider is the authority; the old
+        // hidden per-scope table quietly watered the art direction down.
+        var strength = request.Options.ResolvedPaintedStyle.Strength;
+        if (request.Options.Scope == AssetScope.SpellEffectsOnly)
         {
-            // Animated effects benefit from cleaner shapes, but retaining their
-            // timing silhouettes matters more than strong material flattening.
-            AssetScope.SpellEffectsOnly => 0.44,
-            AssetScope.CharactersAndEquipmentOnly => 0.72,
-            AssetScope.WorldCharactersAndEquipment => 0.76,
-            AssetScope.AllSafeTextures => 0.76,
-            _ => 0.78
-        };
+            // Animated effects keep their timing silhouettes readable.
+            strength *= 0.55;
+        }
 
         if (request.Classification.Kind == TextureKind.Cutout || preserveAlphaCoverage)
         {
-            // Foliage, hair, fences, decals, and other alpha-tested cards rely
-            // on fine internal edges as well as their outer silhouette. A
-            // restrained finish keeps the requested painted plane treatment
-            // without turning those small structures into broad soft blobs.
-            strength *= 0.58;
+            // Alpha-tested cards keep fine internal edges; a light touch, not
+            // the old 42% cut that made foliage look unstyled.
+            strength *= 0.80;
         }
 
-        return strength;
+        return Math.Clamp(strength, 0, 1);
     }
 
     private static double GetRusticPaintedStrength(NativeTextureProcessRequest request)
@@ -1692,21 +1829,18 @@ public sealed class NativeTextureProcessor
         NativeTextureProcessRequest request,
         bool preserveAlphaCoverage)
     {
-        var strength = request.Options.Scope switch
+        var strength = request.Options.ResolvedPaintedStyle.Strength * 0.92;
+        if (request.Options.Scope == AssetScope.SpellEffectsOnly)
         {
-            AssetScope.SpellEffectsOnly => 0.30,
-            AssetScope.CharactersAndEquipmentOnly => 0.66,
-            AssetScope.WorldCharactersAndEquipment => 0.72,
-            AssetScope.AllSafeTextures => 0.70,
-            _ => 0.78
-        };
+            strength *= 0.50;
+        }
 
         if (request.Classification.Kind == TextureKind.Cutout || preserveAlphaCoverage)
         {
-            strength *= 0.62;
+            strength *= 0.85;
         }
 
-        return strength;
+        return Math.Clamp(strength, 0, 1);
     }
 
     private static (TgaPixelBuffer Image, double StrengthScale) ApplyValidatedPaintedTheme(
@@ -2496,7 +2630,8 @@ public sealed class NativeTextureProcessor
     private enum NeuralWorkerKind
     {
         TextureSpecialized,
-        LegacyRealEsrgan
+        LegacyRealEsrgan,
+        ExternalArtistic
     }
 
     private sealed record NeuralBatchKey(
