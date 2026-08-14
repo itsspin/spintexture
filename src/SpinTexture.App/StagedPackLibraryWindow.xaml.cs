@@ -132,12 +132,15 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         private set => SetField(ref highlightedSelectionText, value);
     }
 
-    public string DeleteButtonText => GetHighlightedPacks().Count switch
+    public string DeleteButtonText => GetHighlightedPacks() switch
     {
-        0 => "Delete Focused Pack...",
-        1 => "Delete Focused Pack...",
-        var count => $"Delete {count:N0} Highlighted Packs..."
+        { Count: 0 } => "Delete Pack...",
+        { Count: 1 } packs => $"Delete “{TruncateForButton(packs[0].Title)}”...",
+        var packs => $"Delete {packs.Count:N0} Highlighted Packs..."
     };
+
+    private static string TruncateForButton(string title) =>
+        title.Length <= 26 ? title : title[..25] + "…";
 
     public string InstallButtonText
     {
@@ -1603,6 +1606,15 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                       ? $"{report.Statistics.FallbackTextures:N0} textures used a validated safety fallback instead of the requested model route. "
                       : string.Empty)
                   + "Archive conflicts are checked before composition.";
+            if (IsComposition)
+            {
+                var componentSummary = DescribeCompositionComponents(info);
+                if (componentSummary is not null)
+                {
+                    ContentsSummary = componentSummary;
+                }
+            }
+
             var isCharacterScope = manifest?.Options.Scope is
                 AssetScope.CharactersAndEquipmentOnly
                 or AssetScope.WorldCharactersAndEquipment;
@@ -1778,6 +1790,52 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             AssetScope scope,
             IReadOnlyList<string> artifactPaths) =>
             TextureProcessingPipeline.RequiresRepair(report, scope, artifactPaths);
+
+        private static string? DescribeCompositionComponents(StagedPackInfo info)
+        {
+            try
+            {
+                var path = Path.Combine(info.BuildDirectory, "composition.json");
+                if (!File.Exists(path))
+                {
+                    return null;
+                }
+
+                var composition = JsonSerializer.Deserialize<StagedPackCompositionDocument>(
+                    File.ReadAllText(path),
+                    CompositionJsonOptions);
+                if (composition is null || composition.Components.Count == 0)
+                {
+                    return null;
+                }
+
+                var stagingRoot = Path.GetDirectoryName(info.BuildDirectory);
+                var componentNames = composition.Components
+                    .Select(component =>
+                    {
+                        var displayName = stagingRoot is null
+                            ? null
+                            : StagedPackMetadataStore
+                                .TryRead(Path.Combine(stagingRoot, component.BuildId))?
+                                .DisplayName;
+                        return $"{displayName ?? component.BuildId} ({component.ArtifactCount:N0} archive(s))";
+                    })
+                    .ToArray();
+                return $"This combination was generated automatically while installing "
+                    + $"{composition.Components.Count:N0} checked pack(s) together. It combines: "
+                    + string.Join("; ", componentNames)
+                    + ". Deleting a source pack is blocked while this combination references it; "
+                    + "delete the combination first if it is no longer installed.";
+            }
+            catch (Exception exception) when (exception is
+                IOException
+                or UnauthorizedAccessException
+                or JsonException
+                or NotSupportedException)
+            {
+                return null;
+            }
+        }
 
         private static TextureBuildReport? TryReadReport(string buildDirectory)
         {
