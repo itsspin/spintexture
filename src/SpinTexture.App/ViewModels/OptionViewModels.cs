@@ -112,6 +112,14 @@ public sealed record PaintedThemeOptionViewModel(
     public override string ToString() => Name;
 }
 
+public sealed record ArtisticStyleOptionViewModel(
+    string Key,
+    string Name,
+    string Description)
+{
+    public override string ToString() => Name;
+}
+
 public sealed record LogEntryViewModel(
     string Timestamp,
     string Level,

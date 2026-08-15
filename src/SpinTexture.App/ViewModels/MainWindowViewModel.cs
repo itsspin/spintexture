@@ -21,6 +21,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private readonly IUserDialogService _dialogs;
     private readonly ArtisticWorkerSetupService _artisticWorkerSetup = new();
     private string _artisticWorkerStatusText = string.Empty;
+    private bool _isArtisticWorkerInstalled;
+    private ArtisticStyleOptionViewModel? _selectedArtisticStyleOption;
+    private bool _suppressArtisticStyleApply;
     private readonly IEnhancedLauncherService _enhancedLauncher;
     private readonly AppPreferencesStore _preferences;
     private string _installPath = string.Empty;
@@ -171,7 +174,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             new PaintedThemeOptionViewModel(
                 PaintedTheme.ClassicPainted,
                 "Classic painted",
-                "Balanced graphic fantasy color, painted planes, and clean silhouettes without an extra bright or dark palette bias."),
+                "No extra palette treatment: the painted result is delivered exactly as produced, with no bright, dark, or zone-specific color bias. With Diffusion Repaint enabled this shows the chosen art style untinted."),
             new PaintedThemeOptionViewModel(
                 PaintedTheme.LightStorybook,
                 "Light storybook",
@@ -261,6 +264,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public IReadOnlyList<PresetOptionViewModel> PresetOptions { get; }
     public IReadOnlyList<PaintedThemeOptionViewModel> PaintedThemeOptions { get; }
+    public ObservableCollection<ArtisticStyleOptionViewModel> ArtisticStyleOptions { get; } = [];
     public IReadOnlyList<ScopeOptionViewModel> ScopeOptions { get; }
     public IReadOnlyList<WorldExpansionOptionViewModel> WorldExpansionOptions { get; }
     public IReadOnlyList<int> TextureCaps { get; }
@@ -2085,9 +2089,48 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _artisticWorkerStatusText, value);
     }
 
+    public bool IsArtisticWorkerInstalled
+    {
+        get => _isArtisticWorkerInstalled;
+        private set => SetProperty(ref _isArtisticWorkerInstalled, value);
+    }
+
+    public ArtisticStyleOptionViewModel? SelectedArtisticStyleOption
+    {
+        get => _selectedArtisticStyleOption;
+        set
+        {
+            if (value is null || !SetProperty(ref _selectedArtisticStyleOption, value))
+            {
+                return;
+            }
+
+            if (_suppressArtisticStyleApply
+                || value.Key == ArtisticStylePreset.CustomKey)
+            {
+                return;
+            }
+
+            try
+            {
+                _artisticWorkerSetup.ApplyStylePreset(value.Key);
+                AddLog("INFO", $"Diffusion art style set to {value.Name}. It applies to new Graphic Painted builds; keep it unchanged while repairing a pack so repairs reproduce the recorded look.");
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                _dialogs.ShowArtisticWorkerNotice(
+                    $"The art style could not be saved: {exception.Message}",
+                    isError: true);
+            }
+
+            RefreshArtisticStyleOptions();
+        }
+    }
+
     private void RefreshArtisticWorkerStatus()
     {
         var status = _artisticWorkerSetup.GetStatus();
+        IsArtisticWorkerInstalled = status.IsInstalled;
         ArtisticWorkerStatusText = status switch
         {
             { IsInstalled: false } =>
@@ -2095,12 +2138,71 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 + "stable-diffusion.cpp (Vulkan \u2014 AMD, NVIDIA, and Intel GPUs), the DreamShaper 8 painterly model, "
                 + "and ControlNet Tile. The worker is verified on this PC before it is enabled.",
             { IsEnabled: true } =>
-                "Installed and verified. Graphic Painted builds now repaint each texture with the diffusion worker; "
-                + "the painted theme still applies, the style sliders do not. Builds take several times longer \u2014 try one zone first.",
+                "Installed and verified. Graphic Painted builds repaint each texture with the diffusion worker using the "
+                + "art style below; the style sliders do not apply. The painted theme still runs on top \u2014 choose "
+                + "Classic painted to see the art style with no extra color treatment. Builds take several times longer \u2014 try one zone first.",
             var disabled =>
                 $"Installed but disabled: {disabled.DisabledReason} Run setup again to retry verification."
         };
+        RefreshArtisticStyleOptions();
         RemoveArtisticWorkerCommand?.RaiseCanExecuteChanged();
+    }
+
+    private void RefreshArtisticStyleOptions()
+    {
+        _suppressArtisticStyleApply = true;
+        try
+        {
+            if (ArtisticStyleOptions.Count == 0)
+            {
+                foreach (var preset in ArtisticWorkerSetupService.StylePresets)
+                {
+                    ArtisticStyleOptions.Add(new ArtisticStyleOptionViewModel(
+                        preset.Key,
+                        preset.Name,
+                        preset.Description));
+                }
+            }
+
+            var activeKey = _artisticWorkerSetup.GetActiveStylePresetKey();
+            var customOption = ArtisticStyleOptions.FirstOrDefault(option =>
+                option.Key == ArtisticStylePreset.CustomKey);
+            if (activeKey == ArtisticStylePreset.CustomKey)
+            {
+                customOption ??= AddCustomStyleOption();
+            }
+            else if (customOption is not null)
+            {
+                if (ReferenceEquals(_selectedArtisticStyleOption, customOption))
+                {
+                    _selectedArtisticStyleOption = null;
+                }
+
+                ArtisticStyleOptions.Remove(customOption);
+            }
+
+            var active = ArtisticStyleOptions.FirstOrDefault(option => option.Key == activeKey)
+                ?? ArtisticStyleOptions[0];
+            if (!ReferenceEquals(_selectedArtisticStyleOption, active))
+            {
+                _selectedArtisticStyleOption = active;
+                OnPropertyChanged(nameof(SelectedArtisticStyleOption));
+            }
+        }
+        finally
+        {
+            _suppressArtisticStyleApply = false;
+        }
+    }
+
+    private ArtisticStyleOptionViewModel AddCustomStyleOption()
+    {
+        var custom = new ArtisticStyleOptionViewModel(
+            ArtisticStylePreset.CustomKey,
+            "Custom (hand-edited)",
+            "worker-config.json was edited past a preset recipe. Your settings are used as-is; picking a preset overwrites the prompt and strength fields but keeps your seed, steps, and resolution bound.");
+        ArtisticStyleOptions.Add(custom);
+        return custom;
     }
 
     private async Task SetupArtisticWorkerAsync(CancellationToken cancellationToken)

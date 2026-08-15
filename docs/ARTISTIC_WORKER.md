@@ -17,9 +17,12 @@ When a worker is configured and you build with **Graphic Painted Fantasy**:
 2. The worker is invoked once per batch directory of PNGs (model stays warm).
 3. The output is cropped, the **original alpha plane is restored byte-exact**,
    the painted fidelity gates check for catastrophic output, and the selected
-   painted theme (Classic / Light Storybook / Dark Gothic / Comic Ink) is
-   applied on top. The built-in painterly stylizer and its sliders are
-   bypassed — the worker owns the art direction.
+   painted theme is applied on top. **Classic painted applies no palette
+   treatment at all** — choose it to see the diffusion art style exactly as
+   generated; the other themes (Follow each zone / Light Storybook / Dark
+   Gothic / Comic Ink) add their color grade on top of it. The built-in
+   painterly stylizer and its sliders are bypassed — the worker owns the art
+   direction.
 4. Any failure — the worker won't start, output files are missing or the
    wrong size, or a texture fails the fidelity gate — falls back safely to
    the built-in painterly stylization for that build or texture. A build
@@ -55,9 +58,34 @@ an exact size and SHA-256 and refused on any mismatch; an interrupted setup
 resumes safely when re-run. After download, SpinTexture generates the worker
 scripts and verifies them on your PC by repainting a test image twice —
 checking exact 4x output and byte-identical determinism — before the worker
-is enabled. Advanced settings (prompt, denoise strength, steps, seed,
-maximum diffusion resolution) live in
-`Tools\artistic-worker\worker-config.json`.
+is enabled.
+
+### Art styles
+
+Once installed, the **Art Style** dropdown in the Graphic Painted panel
+switches between curated diffusion recipes:
+
+- **Painted Fantasy** — bold hand-painted brush work, rich saturated color.
+  The balanced default.
+- **Epic Cinematic** — dramatic concept-art lighting, atmospheric depth, rich
+  color grading. The most transformative look.
+- **Dark Oil Painting** — old-master chiaroscuro, heavy impasto, muted
+  ominous palette. Made for dungeons and dark cities.
+- **Storybook Watercolor** — soft washes, gentle ink lines, warm whimsical
+  color for pastoral zones.
+- **Comic Ink** — cel-shaded planes, strong ink lines, vivid flat color.
+
+Every style shares the same seed, step count, and resolution bound, so
+switching styles changes the art direction — not build time or determinism.
+Advanced settings (prompt, denoise strength, steps, seed, maximum diffusion
+resolution) live in `Tools\artistic-worker\worker-config.json`; hand-editing
+it past a recipe shows as **Custom** in the dropdown and is used as-is.
+Re-running setup never resets your style choice.
+
+**Caveat:** the chosen style is part of the worker, not the pack recording.
+Keep the style unchanged between building a pack and repairing it —
+repairing individual textures under a different style would repaint them in
+the new look. To change styles, build a fresh pack.
 
 ## Installing a custom worker manually
 
