@@ -16,13 +16,18 @@ namespace SpinTexture.Core.Services;
 /// checkpoints so older painted artifacts cannot mix with the new art pass.
 /// Revision 8 enforces the palette color key on bitmaps referenced by masked
 /// WLD materials (weapon blades, cutout props) so their transparent regions
-/// can never re-encode as opaque color. Older packs can advance through these
-/// independent safety rules without rerunning unaffected successfully
-/// enhanced textures.
+/// can never re-encode as opaque color. Revision 9 widens classic coverage:
+/// pre-shader 8-bit bitmaps are no longer misread as modern normal/mask/UI
+/// assets ("metal1" doors, "window2" walls), tall trim is no longer skipped
+/// as a sprite strip, and thin or low-color indexed bitmaps become
+/// enhanceable — a repair re-attempts previously preserved textures under
+/// the widened rules. Older packs can advance through these independent
+/// safety rules without rerunning unaffected successfully enhanced
+/// textures.
 /// </summary>
 public static class TextureProcessingPipeline
 {
-    public const int CurrentRevision = 8;
+    public const int CurrentRevision = 9;
     public const string CharacterEquipmentCoverageRuleId =
         "character-equipment-coverage-v1";
     public const string CutoutMipSafetyRuleId =
@@ -35,6 +40,8 @@ public static class TextureProcessingPipeline
         "legacy-translucent-materials-originals-v6";
     public const string MaskedMaterialColorKeySafetyRuleId =
         "masked-material-color-key-v8";
+    public const string ExpandedClassicCoverageRuleId =
+        "expanded-classic-coverage-v9";
 
     public static bool RequiresRepair(
         TextureBuildReport? report,
@@ -199,6 +206,15 @@ public static class TextureProcessingPipeline
                 or AssetScope.SelectedZone)
         {
             rules.Add(MaskedMaterialColorKeySafetyRuleId);
+        }
+
+        if (revision >= 9
+            && scope is AssetScope.CharactersAndEquipmentOnly
+                or AssetScope.WorldCharactersAndEquipment
+                or AssetScope.WorldOnly
+                or AssetScope.SelectedZone)
+        {
+            rules.Add(ExpandedClassicCoverageRuleId);
         }
 
         var paths = artifactPaths?.ToArray();

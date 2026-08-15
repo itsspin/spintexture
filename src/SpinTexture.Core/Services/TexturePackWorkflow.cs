@@ -519,6 +519,9 @@ public sealed class TexturePackWorkflow
                 missingExactOriginalRules.Contains(ruleId, StringComparer.Ordinal)
                 || ruleId.Equals(
                     TextureProcessingPipeline.MaskedMaterialColorKeySafetyRuleId,
+                    StringComparison.Ordinal)
+                || ruleId.Equals(
+                    TextureProcessingPipeline.ExpandedClassicCoverageRuleId,
                     StringComparison.Ordinal));
 
         if (baseline.Options.Scope == AssetScope.AllSafeTextures
@@ -674,7 +677,15 @@ public sealed class TexturePackWorkflow
             rebuildFromReuseArchive: isTargetedSafetyRepair
                 || isManualTextureRevision
                 || requireRequestedVisualProfile,
-            retryUnchangedEntries: !(isTargetedSafetyRepair || isManualTextureRevision),
+            // Targeted repairs normally leave source-identical (previously
+            // preserved) members untouched. The expanded-coverage rule exists
+            // precisely to re-attempt them under today's widened eligibility,
+            // so it opts those members back in.
+            retryUnchangedEntries: !isManualTextureRevision
+                && (!isTargetedSafetyRepair
+                    || missingRepairRules.Contains(
+                        TextureProcessingPipeline.ExpandedClassicCoverageRuleId,
+                        StringComparer.Ordinal)),
             requireRequestedVisualProfile: requireRequestedVisualProfile,
             // Only the explicitly versioned current painted pipeline can
             // reproduce a missing member. Legacy painted pixels can still be

@@ -51,6 +51,11 @@ public sealed class TextureSemanticClassifier
         "spell", "spells", "spellbook", "inventory", "inv", "slot", "hotbar", "loading", "splash"
     };
 
+    // Words that are user-interface vocabulary in modern art but ordinary
+    // world architecture in classic indexed bitmaps.
+    private static readonly HashSet<string> WorldAmbiguousUserInterfaceTokens =
+        new(StringComparer.OrdinalIgnoreCase) { "window" };
+
     private static readonly HashSet<string> AnimatedTokens = new(StringComparer.OrdinalIgnoreCase)
     {
         "anim", "animated", "effect", "effects", "emitter",
@@ -71,6 +76,15 @@ public sealed class TextureSemanticClassifier
         var reasons = new List<string>();
         var tokens = Tokenize(logicalName);
 
+        // Pre-shader-era payloads (8-bit indexed bitmaps) cannot be normal,
+        // roughness, or other scalar material maps: that authoring pipeline
+        // did not exist when this art was made. Classic zone art also reuses
+        // the words modern suffix conventions rely on ("metal1" doors and
+        // bars, "window2" walls), so applying the modern token rules to them
+        // wrongly retires large amounts of world masonry, trim, and doors.
+        var isClassicIndexedBitmap = metadata.FileFormat == TextureFileFormat.Bmp
+            && metadata.BitsPerPixel == 8;
+
         if (!metadata.IsSimpleTwoDimensionalTexture)
         {
             reasons.Add("Texture is a cube, volume, or array resource and requires resource-aware processing.");
@@ -83,15 +97,16 @@ public sealed class TextureSemanticClassifier
             return Result(TextureKind.Unsupported, ClassificationConfidence.High, false, metadata.HasAlpha, true, reasons);
         }
 
-        if (tokens.Overlaps(NormalWordTokens)
-            || TokenizeDelimitedOnly(logicalName).Overlaps(NormalSuffixTokens))
+        if (!isClassicIndexedBitmap
+            && (tokens.Overlaps(NormalWordTokens)
+                || TokenizeDelimitedOnly(logicalName).Overlaps(NormalSuffixTokens)))
         {
             reasons.Add("The logical name contains a normal- or bump-map token.");
             reasons.Add("Vector data must be interpolated and renormalized instead of processed as color.");
             return Result(TextureKind.Normal, ClassificationConfidence.High, false, false, false, reasons);
         }
 
-        if (tokens.Overlaps(MaskTokens))
+        if (!isClassicIndexedBitmap && tokens.Overlaps(MaskTokens))
         {
             reasons.Add("The logical name contains a scalar or packed-mask token.");
             return Result(TextureKind.Mask, ClassificationConfidence.High, false, metadata.HasAlpha, false, reasons);
@@ -117,7 +132,9 @@ public sealed class TextureSemanticClassifier
             return Result(TextureKind.Unsupported, ClassificationConfidence.High, false, metadata.HasAlpha, true, reasons);
         }
 
-        if (tokens.Overlaps(UserInterfaceTokens))
+        if (tokens.Any(token => UserInterfaceTokens.Contains(token)
+                && !(isClassicIndexedBitmap
+                    && WorldAmbiguousUserInterfaceTokens.Contains(token))))
         {
             reasons.Add("The logical name contains a user-interface or glyph token.");
             return Result(TextureKind.UserInterface, ClassificationConfidence.High, true, metadata.HasAlpha, true, reasons);

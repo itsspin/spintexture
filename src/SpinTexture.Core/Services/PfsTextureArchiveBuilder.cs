@@ -1024,7 +1024,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
 
         var aspect = (double)Math.Max(entry.Content.Width, entry.Content.Height)
             / Math.Min(entry.Content.Width, entry.Content.Height);
-        return aspect <= 8;
+        return aspect <= 16;
     }
 
     private bool IsEntryAllowed(string relativeInstallPath, string entryName) =>
@@ -1251,9 +1251,11 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
             return "Texture is too small for reliable reconstruction";
         }
 
+        // Classic trim, beams, and pillars legitimately run up to 16:1;
+        // real sprite strips and packed cell sheets are more extreme.
         var aspect = (double)Math.Max(metadata.Width, metadata.Height)
             / Math.Min(metadata.Width, metadata.Height);
-        if (aspect > 8)
+        if (aspect > 16)
         {
             return "Likely sprite strip or packed cells";
         }

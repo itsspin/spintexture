@@ -99,6 +99,7 @@ public static class TexturePipelineSelfTests
         TestTextureModelSelection();
         TestArtisticWorkerCommand();
         TestLightingBaker();
+        TestExpandedClassicCoverage();
         TestMaskedIndexedColorKey();
         TestDiffusionTiler();
         await TestCrispMipChainAsync(cancellationToken).ConfigureAwait(false);
@@ -205,9 +206,12 @@ public static class TexturePipelineSelfTests
                     Report(revision: 3),
                     AssetScope.CharactersAndEquipmentOnly)
                 .SequenceEqual(
-                    [TextureProcessingPipeline.MaskedMaterialColorKeySafetyRuleId],
+                    [
+                        TextureProcessingPipeline.MaskedMaterialColorKeySafetyRuleId,
+                        TextureProcessingPipeline.ExpandedClassicCoverageRuleId
+                    ],
                     StringComparer.Ordinal),
-            "a revision-3 character-only pack has no environmental celestial work; only the masked color-key rule applies");
+            "a revision-3 character-only pack has no environmental celestial work; only the masked color-key and expanded-coverage rules apply");
         Assert(
             TextureProcessingPipeline.RequiresCutoutMipUpgrade(
                 Report(revision: 0, isRepair: true),
@@ -2318,6 +2322,104 @@ public static class TexturePipelineSelfTests
             && !NativeTextureProcessor.ShouldUseCrispMips(
                 request, 11, false, "merged.tga", new UpscaleDimensions(256, 256, 1000, 1024, 4)),
             "cutouts, normals, faithful, single-mip, non-TGA staging, and non-power-of-two stay on the standard path");
+    }
+
+    private static void TestExpandedClassicCoverage()
+    {
+        // Pre-shader 8-bit bitmaps must not be misread as modern material
+        // maps or UI art: "metal1" doors and "window2" walls are world
+        // masonry in classic zones and stay on the color path.
+        var classicBitmap = new TextureMetadata(
+            TextureFileFormat.Bmp, "8-bit indexed", 128, 128, 1, 8,
+            TextureAlphaStatus.None, false, false, false, false, 1, null);
+        var classifier = new TextureSemanticClassifier();
+        AssertEqual(
+            TextureKind.Color,
+            classifier.Classify("metal1.bmp", classicBitmap).Kind,
+            "classic metal-named walls stay color textures");
+        AssertEqual(
+            TextureKind.Color,
+            classifier.Classify("window2.bmp", classicBitmap).Kind,
+            "classic window-named walls stay color textures");
+        AssertEqual(
+            TextureKind.Color,
+            classifier.Classify("wall_n.bmp", classicBitmap).Kind,
+            "classic compass-suffixed walls are not normal maps");
+        AssertEqual(
+            TextureKind.UserInterface,
+            classifier.Classify("spells01.bmp", classicBitmap).Kind,
+            "classic spell icon sheets keep their UI protection");
+        var modernDds = new TextureMetadata(
+            TextureFileFormat.Dds, "BC1_UNORM", 256, 256, 9, 4,
+            TextureAlphaStatus.None, true, true, false, false, 1, "BC1_UNORM");
+        AssertEqual(
+            TextureKind.Mask,
+            classifier.Classify("armor_metallic.dds", modernDds).Kind,
+            "modern DDS material maps keep the mask protection");
+
+        // Tall classic trim (up to 16:1) is world art, not a sprite strip.
+        var trimBitmap = classicBitmap with { Width = 16, Height = 256 };
+        var trimClassification = classifier.Classify("beam1.bmp", trimBitmap);
+        Assert(
+            PfsTextureArchiveBuilder.GetPreservedReason(trimBitmap, trimClassification, 2048) is null,
+            "16:1 classic trim is enhanceable");
+        var stripBitmap = classicBitmap with { Width = 8, Height = 256 };
+        AssertEqual(
+            "Likely sprite strip or packed cells",
+            PfsTextureArchiveBuilder.GetPreservedReason(
+                stripBitmap,
+                classifier.Classify("beam2.bmp", stripBitmap),
+                2048)!,
+            "extreme strips remain preserved");
+
+        // Thin and low-color indexed bitmaps are now encodable.
+        static byte[] BuildIndexedBmp(int width, int height, int distinctIndices)
+        {
+            const int paletteOffset = 14 + 40;
+            var pixelOffset = paletteOffset + (256 * 4);
+            var stride = (width + 3) & ~3;
+            var bmp = new byte[pixelOffset + (stride * height)];
+            bmp[0] = (byte)'B';
+            bmp[1] = (byte)'M';
+            BinaryPrimitives.WriteUInt32LittleEndian(bmp.AsSpan(2), (uint)bmp.Length);
+            BinaryPrimitives.WriteUInt32LittleEndian(bmp.AsSpan(10), (uint)pixelOffset);
+            BinaryPrimitives.WriteUInt32LittleEndian(bmp.AsSpan(14), 40);
+            BinaryPrimitives.WriteInt32LittleEndian(bmp.AsSpan(18), width);
+            BinaryPrimitives.WriteInt32LittleEndian(bmp.AsSpan(22), height);
+            BinaryPrimitives.WriteUInt16LittleEndian(bmp.AsSpan(26), 1);
+            BinaryPrimitives.WriteUInt16LittleEndian(bmp.AsSpan(28), 8);
+            BinaryPrimitives.WriteUInt32LittleEndian(bmp.AsSpan(34), (uint)(stride * height));
+            BinaryPrimitives.WriteUInt32LittleEndian(bmp.AsSpan(46), 256);
+            for (var index = 0; index < 256; index++)
+            {
+                bmp[paletteOffset + (index * 4)] = (byte)index;
+                bmp[paletteOffset + (index * 4) + 1] = (byte)index;
+                bmp[paletteOffset + (index * 4) + 2] = (byte)index;
+            }
+
+            for (var y = 0; y < height; y++)
+            {
+                for (var x = 0; x < width; x++)
+                {
+                    bmp[pixelOffset + (y * stride) + x] = (byte)((x + y) % distinctIndices);
+                }
+            }
+
+            return bmp;
+        }
+
+        Assert(
+            LegacyIndexedBmp.CanEncode(BuildIndexedBmp(16, 128, 12)),
+            "16px-wide classic trim strips are encodable");
+        Assert(
+            LegacyIndexedBmp.CanEncode(BuildIndexedBmp(64, 64, 8)),
+            "low-color classic surfaces are encodable");
+        Assert(
+            !LegacyIndexedBmp.CanEncode(BuildIndexedBmp(8, 128, 12)),
+            "genuinely tiny strips stay preserved");
+        Assert(
+            !LegacyIndexedBmp.CanEncode(BuildIndexedBmp(64, 64, 4)),
+            "near-degenerate palettes stay preserved");
     }
 
     private static void TestMaskedIndexedColorKey()
