@@ -856,39 +856,63 @@
                                             <RowDefinition />
                                         </Grid.RowDefinitions>
                                         <StackPanel Grid.Row="0" Grid.Column="0">
+                                            <DockPanel LastChildFill="True">
+                                            <TextBlock DockPanel.Dock="Right" Foreground="#E7EAF0" FontSize="11" FontFamily="Cascadia Mono"
+                                                       Text="{Binding Value, ElementName=PaintedStrengthSlider, StringFormat={}{0:0.00}}" />
                                             <TextBlock Text="STYLIZATION STRENGTH" Style="{StaticResource FieldLabelStyle}"
                                                        ToolTip="How completely the painterly art direction replaces the reconstructed texture. This is the master control; it is no longer silently reduced by build scope." />
-                                            <Slider Value="{Binding PaintedStylizationStrength, Delay=200}"
+                                            </DockPanel>
+                                            <Slider x:Name="PaintedStrengthSlider" Value="{Binding PaintedStylizationStrength, Delay=200}"
                                                     AutomationProperties.Name="Painted stylization strength" />
                                         </StackPanel>
                                         <StackPanel Grid.Row="0" Grid.Column="2">
+                                            <DockPanel LastChildFill="True">
+                                            <TextBlock DockPanel.Dock="Right" Foreground="#E7EAF0" FontSize="11" FontFamily="Cascadia Mono"
+                                                       Text="{Binding Value, ElementName=PaintedStrokeSizeSlider, StringFormat={}{0:0.00}}" />
                                             <TextBlock Text="STROKE SIZE" Style="{StaticResource FieldLabelStyle}"
                                                        ToolTip="How broad the painted planes and brush clumps are. Left keeps forms tight; right paints with a wider brush." />
-                                            <Slider Value="{Binding PaintedStrokeSize, Delay=200}"
+                                            </DockPanel>
+                                            <Slider x:Name="PaintedStrokeSizeSlider" Value="{Binding PaintedStrokeSize, Delay=200}"
                                                     AutomationProperties.Name="Painted stroke size" />
                                         </StackPanel>
                                         <StackPanel Grid.Row="0" Grid.Column="4">
+                                            <DockPanel LastChildFill="True">
+                                            <TextBlock DockPanel.Dock="Right" Foreground="#E7EAF0" FontSize="11" FontFamily="Cascadia Mono"
+                                                       Text="{Binding Value, ElementName=PaintedStrokeStrengthSlider, StringFormat={}{0:0.00}}" />
                                             <TextBlock Text="STROKE STRENGTH" Style="{StaticResource FieldLabelStyle}"
                                                        ToolTip="Visibility of brush-hair grain, value jitter, and warm/cool drift inside the painted planes." />
-                                            <Slider Value="{Binding PaintedStrokeStrength, Delay=200}"
+                                            </DockPanel>
+                                            <Slider x:Name="PaintedStrokeStrengthSlider" Value="{Binding PaintedStrokeStrength, Delay=200}"
                                                     AutomationProperties.Name="Painted stroke strength" />
                                         </StackPanel>
                                         <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,10,0,0">
+                                            <DockPanel LastChildFill="True">
+                                            <TextBlock DockPanel.Dock="Right" Foreground="#E7EAF0" FontSize="11" FontFamily="Cascadia Mono"
+                                                       Text="{Binding Value, ElementName=PaintedDetailSlider, StringFormat={}{0:0.00}}" />
                                             <TextBlock Text="DETAIL PRESERVATION" Style="{StaticResource FieldLabelStyle}"
                                                        ToolTip="How strongly text, signage, masonry lines, and fine material detail resist the painted simplification. Detail is repainted with a smaller brush, never left photographic." />
-                                            <Slider Value="{Binding PaintedDetailPreservation, Delay=200}"
+                                            </DockPanel>
+                                            <Slider x:Name="PaintedDetailSlider" Value="{Binding PaintedDetailPreservation, Delay=200}"
                                                     AutomationProperties.Name="Painted detail preservation" />
                                         </StackPanel>
                                         <StackPanel Grid.Row="1" Grid.Column="2" Margin="0,10,0,0">
+                                            <DockPanel LastChildFill="True">
+                                            <TextBlock DockPanel.Dock="Right" Foreground="#E7EAF0" FontSize="11" FontFamily="Cascadia Mono"
+                                                       Text="{Binding Value, ElementName=PaintedColorSlider, StringFormat={}{0:0.00}}" />
                                             <TextBlock Text="COLOR SIMPLIFICATION" Style="{StaticResource FieldLabelStyle}"
                                                        ToolTip="How much hue variation merges into broader color planes. Luminance detail is preserved either way." />
-                                            <Slider Value="{Binding PaintedColorSimplification, Delay=200}"
+                                            </DockPanel>
+                                            <Slider x:Name="PaintedColorSlider" Value="{Binding PaintedColorSimplification, Delay=200}"
                                                     AutomationProperties.Name="Painted color simplification" />
                                         </StackPanel>
                                         <StackPanel Grid.Row="1" Grid.Column="4" Margin="0,10,0,0">
+                                            <DockPanel LastChildFill="True">
+                                            <TextBlock DockPanel.Dock="Right" Foreground="#E7EAF0" FontSize="11" FontFamily="Cascadia Mono"
+                                                       Text="{Binding Value, ElementName=PaintedGrainSlider, StringFormat={}{0:0.00}}" />
                                             <TextBlock Text="CANVAS GRAIN" Style="{StaticResource FieldLabelStyle}"
                                                        ToolTip="Subtle paper/canvas texture so flat planes do not read as vector fill." />
-                                            <Slider Value="{Binding PaintedCanvasGrain, Delay=200}"
+                                            </DockPanel>
+                                            <Slider x:Name="PaintedGrainSlider" Value="{Binding PaintedCanvasGrain, Delay=200}"
                                                     AutomationProperties.Name="Painted canvas grain" />
                                         </StackPanel>
                                         <Button Grid.Row="2" Grid.Column="0" Content="Reset style"
@@ -906,25 +930,6 @@
                                             <TextBlock Text="DIFFUSION REPAINT (EXPERIMENTAL)" Style="{StaticResource FieldLabelStyle}" />
                                             <TextBlock Text="{Binding ArtisticWorkerStatusText}" Margin="0,6,0,0"
                                                        Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" LineHeight="17" />
-                                            <Grid Margin="0,10,0,0">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="220" />
-                                                    <ColumnDefinition Width="*" />
-                                                </Grid.ColumnDefinitions>
-                                                <StackPanel Margin="0,0,14,0">
-                                                    <TextBlock Text="MODEL QUALITY" Style="{StaticResource FieldLabelStyle}"
-                                                               ToolTip="Which diffusion model the one-click setup installs. Switch any time by picking the other tier and running setup again; your art style choice carries over." />
-                                                    <ComboBox Margin="0,6,0,0"
-                                                              ItemsSource="{Binding ArtisticModelTierOptions}"
-                                                              SelectedItem="{Binding SelectedArtisticModelTierOption}"
-                                                              DisplayMemberPath="Name"
-                                                              AutomationProperties.Name="Diffusion model quality tier" />
-                                                </StackPanel>
-                                                <TextBlock Grid.Column="1" VerticalAlignment="Center"
-                                                           Text="{Binding SelectedArtisticModelTierOption.Description}"
-                                                           Style="{StaticResource CaptionStyle}"
-                                                           TextWrapping="Wrap" LineHeight="17" />
-                                            </Grid>
                                             <Grid Margin="0,10,0,0"
                                                   Visibility="{Binding IsArtisticWorkerInstalled, Converter={StaticResource BooleanToVisibilityConverter}}">
                                                 <Grid.ColumnDefinitions>
@@ -954,7 +959,7 @@
                                                 <TextBlock Text="Full-resolution repaint (tiled — maximum detail, much slower)" TextWrapping="Wrap" />
                                             </CheckBox>
                                             <WrapPanel Margin="0,9,0,0">
-                                                <Button Content="{Binding SetupArtisticWorkerButtonText}"
+                                                <Button Content="Set Up Diffusion Repaint (~2.9 GB)"
                                                         Command="{Binding SetupArtisticWorkerCommand}"
                                                         Background="#231A33" BorderBrush="#4E3A6A" Padding="10,4"
                                                         AutomationProperties.Name="Set up diffusion repaint worker" />
@@ -981,23 +986,35 @@
                                             <ColumnDefinition Width="*" />
                                         </Grid.ColumnDefinitions>
                                         <StackPanel>
+                                            <DockPanel LastChildFill="True">
+                                            <TextBlock DockPanel.Dock="Right" Foreground="#E7EAF0" FontSize="11" FontFamily="Cascadia Mono"
+                                                       Text="{Binding Value, ElementName=BakedDepthSlider, StringFormat={}{0:0.00}}" />
                                             <TextBlock Text="BAKED DEPTH" Style="{StaticResource FieldLabelStyle}"
                                                        ToolTip="Bakes subtle carved-in shading into the color: mortar lines and cracks recess, blocks and planks pop forward. The classic renderer has no normal maps, so this is how surfaces gain depth. 0 is off; around 0.4 is a good start." />
-                                            <Slider Value="{Binding BakedDepth, Delay=200}" Minimum="0" Maximum="1"
+                                            </DockPanel>
+                                            <Slider x:Name="BakedDepthSlider" Value="{Binding BakedDepth, Delay=200}" Minimum="0" Maximum="1"
                                                     LargeChange="0.1" SmallChange="0.05"
                                                     AutomationProperties.Name="Baked depth strength" />
                                         </StackPanel>
                                         <StackPanel Grid.Column="2">
+                                            <DockPanel LastChildFill="True">
+                                            <TextBlock DockPanel.Dock="Right" Foreground="#E7EAF0" FontSize="11" FontFamily="Cascadia Mono"
+                                                       Text="{Binding Value, ElementName=EmissiveGlowSlider, StringFormat={}{0:0.00}}" />
                                             <TextBlock Text="EMISSIVE GLOW" Style="{StaticResource FieldLabelStyle}"
                                                        ToolTip="Pushes bright, saturated regions (windows, lava cracks, runes) toward a glow with a soft light spill, so they read as light sources at night and in dungeons. 0 is off; around 0.35 is a good start." />
-                                            <Slider Value="{Binding EmissiveGlow, Delay=200}" Minimum="0" Maximum="1"
+                                            </DockPanel>
+                                            <Slider x:Name="EmissiveGlowSlider" Value="{Binding EmissiveGlow, Delay=200}" Minimum="0" Maximum="1"
                                                     LargeChange="0.1" SmallChange="0.05"
                                                     AutomationProperties.Name="Emissive glow strength" />
                                         </StackPanel>
                                         <StackPanel Grid.Column="4">
+                                            <DockPanel LastChildFill="True">
+                                            <TextBlock DockPanel.Dock="Right" Foreground="#E7EAF0" FontSize="11" FontFamily="Cascadia Mono"
+                                                       Text="{Binding Value, ElementName=MipSharpenSlider, StringFormat={}{0:0.00}}" />
                                             <TextBlock Text="CRISP DISTANCE DETAIL" Style="{StaticResource FieldLabelStyle}"
                                                        ToolTip="Most of what you see in-game is mip levels, not the full texture, and each halving washes out contrast. This regenerates the mip chain with a bounded per-level re-sharpen so walls and ground stay defined at a distance. Opaque world textures only; the full-size texture is untouched. 0 is off; around 0.5 is a good start." />
-                                            <Slider Value="{Binding MipSharpen, Delay=200}" Minimum="0" Maximum="1"
+                                            </DockPanel>
+                                            <Slider x:Name="MipSharpenSlider" Value="{Binding MipSharpen, Delay=200}" Minimum="0" Maximum="1"
                                                     LargeChange="0.1" SmallChange="0.05"
                                                     AutomationProperties.Name="Crisp distance detail strength" />
                                         </StackPanel>

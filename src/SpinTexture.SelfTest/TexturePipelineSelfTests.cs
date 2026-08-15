@@ -2574,14 +2574,17 @@ public static class TexturePipelineSelfTests
                 && !string.IsNullOrWhiteSpace(preset.NegativePrompt),
                 $"art style preset {preset.Key} must be fully described");
             Assert(
-                preset.DenoiseStrength is >= 0.35 and <= 0.6
+                preset.DenoiseStrength is >= 0.45 and <= 0.65
                 && preset.ControlStrength is >= 0.6 and <= 0.9
-                && preset.CfgScale is >= 4.0 and <= 8.0,
+                && preset.CfgScale is >= 4.5 and <= 7.5,
                 $"art style preset {preset.Key} strengths must stay in the layout-preserving range");
             var config = preset.ToConfig();
             Assert(
-                config.Steps == 18 && config.Seed == 90210 && config.MaximumDiffusionEdge == 1152,
-                $"art style preset {preset.Key} must share the deterministic performance knobs");
+                config.SchemaVersion == 2
+                    && config.Steps == 28
+                    && config.Seed == 90210
+                    && config.MaximumDiffusionEdge == 1152,
+                $"art style preset {preset.Key} must share the deterministic quality knobs");
         }
 
         var setupRoot = Path.Combine(
@@ -2592,7 +2595,6 @@ public static class TexturePipelineSelfTests
             var setup = new ArtisticWorkerSetupService(setupRoot);
             Directory.CreateDirectory(setup.WorkerDirectory);
             setup.WriteWorkerScripts(
-                ArtisticWorkerSetupService.ModelTierStandard,
                 Path.Combine(setupRoot, "realesrgan-ncnn-vulkan.exe"),
                 Path.Combine(setupRoot, "models"));
             var generatedScript = File.ReadAllText(Path.Combine(setup.WorkerDirectory, "worker.ps1"));
@@ -2603,10 +2605,31 @@ public static class TexturePipelineSelfTests
                 && generatedScript.Contains("$targetW = $w * 4", StringComparison.Ordinal),
                 "the generated worker script pins seed, models, and the exact-4x contract");
             Assert(
+                generatedScript.Contains("dpm++2m", StringComparison.Ordinal)
+                && generatedScript.Contains("karras", StringComparison.Ordinal)
+                && generatedScript.Contains("--clip-skip", StringComparison.Ordinal)
+                && generatedScript.Contains("--control-net", StringComparison.Ordinal),
+                "the generated worker script uses the quality sampler recipe with ControlNet");
+            Assert(
                 generatedScript.Contains("batch-meta.json", StringComparison.Ordinal)
                 && generatedScript.Contains("promptSuffix", StringComparison.Ordinal)
                 && generatedScript.Contains("denoiseScale", StringComparison.Ordinal),
                 "the generated worker script honors SpinTexture's per-file art direction sidecar");
+            Assert(
+                generatedScript.Contains("SPINTEXTURE-PROGRESS", StringComparison.Ordinal),
+                "the generated worker script reports per-texture progress for the build ETA");
+            Assert(
+                NativeTextureProcessor.ArtisticWorkerProgressAdapter.TryParse(
+                    "SPINTEXTURE-PROGRESS 3/42 j00000005.png", out var progressCurrent, out var progressTotal)
+                && progressCurrent == 3
+                && progressTotal == 42
+                && !NativeTextureProcessor.ArtisticWorkerProgressAdapter.TryParse(
+                    "loading model", out _, out _)
+                && !NativeTextureProcessor.ArtisticWorkerProgressAdapter.TryParse(
+                    "SPINTEXTURE-PROGRESS 0/42 x.png", out _, out _)
+                && !NativeTextureProcessor.ArtisticWorkerProgressAdapter.TryParse(
+                    "SPINTEXTURE-PROGRESS 5/4 x.png", out _, out _),
+                "the worker progress lines parse into phase counts and reject malformed input");
             Assert(
                 File.Exists(Path.Combine(setup.WorkerDirectory, "worker.bat"))
                 && File.Exists(Path.Combine(setup.WorkerDirectory, "worker-config.json")),
@@ -2626,7 +2649,7 @@ public static class TexturePipelineSelfTests
                 "applying a preset makes it the active style");
             var applied = setup.TryReadConfig();
             Assert(
-                applied is { Seed: 90210, Steps: 18, MaximumDiffusionEdge: 1152 },
+                applied is { Seed: 90210, Steps: 28, MaximumDiffusionEdge: 1152 },
                 "applying a preset writes the shared deterministic knobs");
 
             var customized = applied! with { Seed = 1234, Prompt = applied.Prompt + " extra" };
@@ -2651,7 +2674,6 @@ public static class TexturePipelineSelfTests
                 "applying a preset preserves the user's seed, steps, and resolution knobs");
 
             setup.WriteWorkerScripts(
-                ArtisticWorkerSetupService.ModelTierStandard,
                 Path.Combine(setupRoot, "realesrgan-ncnn-vulkan.exe"),
                 Path.Combine(setupRoot, "models"));
             AssertEqual(
@@ -2659,41 +2681,31 @@ public static class TexturePipelineSelfTests
                 setup.GetActiveStylePresetKey(),
                 "re-running setup never resets the chosen art style");
 
-            // Ultra (SDXL Turbo) tier: turbo settings, no ControlNet (sd.cpp
-            // supports ControlNet for SD 1.5 only), fp16-fix VAE, and the
-            // active style survives the tier switch re-mapped for SDXL.
-            var ultraConfig = ArtisticWorkerSetupService.StylePresets[0]
-                .ToConfig(ArtisticWorkerSetupService.ModelTierUltra);
-            Assert(
-                ultraConfig.ModelTier == ArtisticWorkerSetupService.ModelTierUltra
-                && ultraConfig.Steps == 8
-                && ultraConfig.CfgScale is >= 2.0 and <= 2.6
-                && ultraConfig.DenoiseStrength < ArtisticWorkerSetupService.StylePresets[0].DenoiseStrength
-                && ultraConfig.Seed == 90210,
-                "the Ultra tier maps presets to turbo settings with the shared seed");
+            // Recipe migration: a config written under an older recipe schema
+            // (or the retired SDXL tier) is re-mapped onto the active style's
+            // current quality recipe on the next setup, keeping the seed.
+            var legacy = setup.TryReadConfig()! with
+            {
+                SchemaVersion = 1,
+                Steps = 18,
+                DenoiseStrength = 0.5,
+                Seed = 4242
+            };
+            File.WriteAllText(
+                setup.ConfigPath,
+                System.Text.Json.JsonSerializer.Serialize(
+                    legacy,
+                    new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)));
             setup.WriteWorkerScripts(
-                ArtisticWorkerSetupService.ModelTierUltra,
                 Path.Combine(setupRoot, "realesrgan-ncnn-vulkan.exe"),
                 Path.Combine(setupRoot, "models"));
-            var ultraScript = File.ReadAllText(Path.Combine(setup.WorkerDirectory, "worker.ps1"));
             Assert(
-                ultraScript.Contains("DreamShaperXL_Turbo_v2_1.safetensors", StringComparison.Ordinal)
-                && ultraScript.Contains("sdxl_vae.safetensors", StringComparison.Ordinal)
-                && !ultraScript.Contains("--control-net", StringComparison.Ordinal),
-                "the Ultra worker script loads SDXL with the fp16-fix VAE and no ControlNet");
+                setup.TryReadConfig() is { SchemaVersion: 2, Steps: 28, Seed: 4242 },
+                "re-setup migrates old-recipe configs to the quality recipe while keeping the seed");
             AssertEqual(
                 "dark-oil",
                 setup.GetActiveStylePresetKey(),
-                "switching model tiers keeps the active art style, re-mapped for the new model");
-            Assert(
-                setup.TryReadConfig() is { ModelTier: ArtisticWorkerSetupService.ModelTierUltra, Steps: 8, Seed: 1234 },
-                "the tier switch adopts turbo steps while preserving the user's seed");
-            Assert(
-                ArtisticWorkerSetupService.GetTotalDownloadBytes(ArtisticWorkerSetupService.ModelTierUltra)
-                    > ArtisticWorkerSetupService.GetTotalDownloadBytes(ArtisticWorkerSetupService.ModelTierStandard)
-                && ArtisticWorkerSetupService.GetComponents(ArtisticWorkerSetupService.ModelTierUltra)
-                    .Any(component => component.IsZipArchive),
-                "each tier bundles the shared runtime plus its own pinned models");
+                "the recipe migration keeps the active art style");
         }
         finally
         {
@@ -4570,9 +4582,9 @@ public static class TexturePipelineSelfTests
     private static void TestPaintedProfileReportCompatibility()
     {
         AssertEqual(
-            6,
+            7,
             TextureBuildReport.CurrentIllustratedProfileRevision,
-            "Graphic Painted profile revision should advance independently to revision six (material and zone aware diffusion prompts)");
+            "Graphic Painted profile revision should advance independently to revision seven (quality diffusion recipe)");
         AssertEqual(
             1,
             TextureBuildReport.CurrentRusticPaintedProfileRevision,
@@ -4598,9 +4610,9 @@ public static class TexturePipelineSelfTests
             TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.RusticPainted),
             "unchanged Rustic Painted builds should retain the base resume operation key");
         AssertEqual(
-            $"{TexturePackWorkflow.FreshBuildResumeOperationKey}-illustrated-6",
+            $"{TexturePackWorkflow.FreshBuildResumeOperationKey}-illustrated-7",
             TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.Illustrated),
-            "Graphic Painted revision six should use a fenced resume operation key");
+            "Graphic Painted revision seven should use a fenced resume operation key");
 
         var report = new TextureBuildReport(
             TextureBuildReport.CurrentSchemaVersion,

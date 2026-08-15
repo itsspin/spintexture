@@ -1271,10 +1271,14 @@ public sealed class NativeTextureProcessor
                 NativeTextureWorkPhase.GpuInference,
                 0,
                 jobs.Count));
+            var workerProgress = key.WorkerKind == NeuralWorkerKind.ExternalArtistic
+                && nativeProgress is not null
+                    ? new ArtisticWorkerProgressAdapter(nativeProgress)
+                    : nativeProgress;
             await executionState.GpuGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                await RunCheckedAsync(command, nativeProgress, cancellationToken).ConfigureAwait(false);
+                await RunCheckedAsync(command, workerProgress, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -1352,6 +1356,59 @@ public sealed class NativeTextureProcessor
         {
             TryDeleteOwnedChildDirectory(batchDirectory, groupDirectory, "neural-");
             throw;
+        }
+    }
+
+    /// <summary>
+    /// The generated diffusion worker prints one structured line per texture
+    /// ("SPINTEXTURE-PROGRESS 3/42 name.png"). Translating those into
+    /// GPU-inference phase counts drives the per-artifact fraction, so the
+    /// build's remaining-time estimate keeps moving during long diffusion
+    /// batches instead of freezing until the whole batch returns.
+    /// </summary>
+    internal sealed class ArtisticWorkerProgressAdapter(IProgress<NativeOutputLine> inner)
+        : IProgress<NativeOutputLine>
+    {
+        internal const string ProgressPrefix = "SPINTEXTURE-PROGRESS ";
+
+        public void Report(NativeOutputLine value)
+        {
+            if (TryParse(value.Text, out var current, out var total))
+            {
+                inner.Report(new NativeOutputLine(
+                    value.Stream,
+                    $"GPU diffusion repaint: painting texture {current:N0} of {total:N0}.",
+                    NativeTextureWorkPhase.GpuInference,
+                    current - 1,
+                    total));
+                return;
+            }
+
+            inner.Report(value);
+        }
+
+        internal static bool TryParse(string text, out int current, out int total)
+        {
+            current = 0;
+            total = 0;
+            var trimmed = text.TrimStart();
+            if (!trimmed.StartsWith(ProgressPrefix, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var payload = trimmed[ProgressPrefix.Length..];
+            var slash = payload.IndexOf('/');
+            var space = payload.IndexOf(' ');
+            if (slash <= 0 || space <= slash)
+            {
+                return false;
+            }
+
+            return int.TryParse(payload[..slash], out current)
+                && int.TryParse(payload[(slash + 1)..space], out total)
+                && current >= 1
+                && total >= current;
         }
     }
 

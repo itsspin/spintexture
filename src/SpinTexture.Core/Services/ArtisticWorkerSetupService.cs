@@ -55,34 +55,23 @@ public sealed record ArtisticStylePreset(
     public const string CustomKey = "custom";
 
     /// <summary>
-    /// Maps the recipe to concrete worker settings for a model tier. The
-    /// Ultra (SDXL Turbo) tier has no ControlNet in stable-diffusion.cpp, so
-    /// layout is held by a slightly lower denoise instead, and Turbo models
-    /// want few steps at low guidance — which also keeps the much larger
-    /// model's build time comparable to the Standard tier.
+    /// Maps the recipe to concrete worker settings. Schema 2 is the quality
+    /// recipe: DPM++ 2M with the Karras schedule at 28 steps and clip-skip 2
+    /// (what the checkpoint was tuned for), with denoise pushed harder
+    /// because ControlNet Tile holds every structural line in place.
     /// </summary>
-    public ArtisticWorkerConfig ToConfig(
-        string modelTier = ArtisticWorkerSetupService.ModelTierStandard)
-    {
-        var isUltra = string.Equals(
-            modelTier,
-            ArtisticWorkerSetupService.ModelTierUltra,
-            StringComparison.OrdinalIgnoreCase);
-        return new(
-            SchemaVersion: 1,
-            Preset: Key,
-            ModelTier: isUltra
-                ? ArtisticWorkerSetupService.ModelTierUltra
-                : ArtisticWorkerSetupService.ModelTierStandard,
-            Prompt: Prompt,
-            NegativePrompt: NegativePrompt,
-            DenoiseStrength: isUltra ? Math.Round(DenoiseStrength * 0.85, 3) : DenoiseStrength,
-            ControlStrength: ControlStrength,
-            CfgScale: isUltra ? Math.Round(Math.Clamp(CfgScale / 2.5, 2.0, 2.6), 2) : CfgScale,
-            Steps: isUltra ? 8 : 18,
-            Seed: 90210,
-            MaximumDiffusionEdge: 1152);
-    }
+    public ArtisticWorkerConfig ToConfig() => new(
+        SchemaVersion: 2,
+        Preset: Key,
+        ModelTier: ArtisticWorkerSetupService.ModelTierStandard,
+        Prompt: Prompt,
+        NegativePrompt: NegativePrompt,
+        DenoiseStrength: DenoiseStrength,
+        ControlStrength: ControlStrength,
+        CfgScale: CfgScale,
+        Steps: 28,
+        Seed: 90210,
+        MaximumDiffusionEdge: 1152);
 }
 
 /// <summary>
@@ -100,11 +89,11 @@ public sealed class ArtisticWorkerSetupService
     public const string WorkerDirectoryName = "artistic-worker";
     public const long RequiredFreeBytes = 8L * 1024 * 1024 * 1024;
 
-    /// <summary>SD 1.5 + ControlNet Tile: smaller download, hard layout lock.</summary>
+    /// <summary>
+    /// The single supported model stack (SD 1.5 + ControlNet Tile),
+    /// recorded in the config so older files migrate cleanly.
+    /// </summary>
     public const string ModelTierStandard = "sd15";
-
-    /// <summary>SDXL Turbo: richest painted detail; needs a roomier GPU.</summary>
-    public const string ModelTierUltra = "sdxl";
 
     // Every component is pinned by exact size and SHA-256. The installer
     // refuses bytes that do not match; there is no "latest" channel.
@@ -133,54 +122,10 @@ public sealed class ArtisticWorkerSetupService
             722_601_104,
             "2f31868eedb243a77932e3c63907a6ba0a2058b6d65b5c27b89ee1b7f618ea33",
             "OpenRAIL",
-            IsZipArchive: false),
-        new(
-            "DreamShaper XL Turbo v2.1 checkpoint",
-            "https://huggingface.co/Lykon/dreamshaper-xl-v2-turbo/resolve/main/DreamShaperXL_Turbo_v2_1.safetensors",
-            "DreamShaperXL_Turbo_v2_1.safetensors",
-            6_939_220_250,
-            "4496b36d48bfd7cfe4e5dbce3485db567bcefa2bef7238d290dbd45612125083",
-            "CreativeML OpenRAIL++-M",
-            IsZipArchive: false),
-        new(
-            "SDXL VAE (fp16 fix)",
-            "https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors",
-            "sdxl_vae.safetensors",
-            334_641_162,
-            "235745af8d86bf4a4c1b5b4f529868b37019a10f7c0b2e79ad0abca3a22bc6e1",
-            "MIT",
             IsZipArchive: false)
     ];
 
-    private static readonly string[] StandardTierFiles =
-    [
-        "DreamShaper_8_pruned.safetensors",
-        "control_v11f1e_sd15_tile_fp16.safetensors"
-    ];
-
-    private static readonly string[] UltraTierFiles =
-    [
-        "DreamShaperXL_Turbo_v2_1.safetensors",
-        "sdxl_vae.safetensors"
-    ];
-
-    /// <summary>The runtime plus the models the given tier actually loads.</summary>
-    public static IReadOnlyList<ArtisticWorkerComponent> GetComponents(string modelTier)
-    {
-        var tierFiles = IsUltra(modelTier) ? UltraTierFiles : StandardTierFiles;
-        return Components
-            .Where(component => component.IsZipArchive
-                || tierFiles.Contains(component.FileName, StringComparer.OrdinalIgnoreCase))
-            .ToArray();
-    }
-
-    public static long GetTotalDownloadBytes(string modelTier) =>
-        GetComponents(modelTier).Sum(component => component.SizeBytes);
-
-    private static bool IsUltra(string modelTier) => string.Equals(
-        modelTier,
-        ModelTierUltra,
-        StringComparison.OrdinalIgnoreCase);
+    public static long TotalDownloadBytes => Components.Sum(component => component.SizeBytes);
 
     /// <summary>
     /// Curated art directions for the diffusion repaint. Higher denoise means
@@ -192,48 +137,59 @@ public sealed class ArtisticWorkerSetupService
         new(
             "painted-fantasy",
             "Painted Fantasy",
-            "Bold hand-painted look with visible brush strokes and rich saturated color. The balanced default.",
-            "masterpiece hand-painted fantasy game texture, oil painting, visible brush strokes, rich saturated color, stylized",
-            "photorealistic, photo, blurry, jpeg artifacts, watermark",
-            0.45,
+            "Bold hand-painted look with confident brush strokes, deep value contrast, and rich saturated color. The balanced default.",
+            "masterpiece hand-painted fantasy game texture, rich oil painting, confident visible brush strokes, vivid saturated color, "
+            + "deep value contrast, luminous highlights, stylized AAA game art, breathtaking",
+            "photorealistic, photo, 3d render, flat, dull, washed out, muddy, lowres, blurry, jpeg artifacts, "
+            + "watermark, text, signature, border, frame",
+            0.55,
             0.8,
-            5.5),
+            6.0),
         new(
             "epic-cinematic",
             "Epic Cinematic",
-            "Dramatic concept-art energy: cinematic lighting, atmospheric depth, rich color grading. The most transformative look.",
-            "epic fantasy concept art, cinematic dramatic lighting, painterly game texture, highly detailed, atmospheric, rich color grading, golden rim light, masterpiece",
-            "photorealistic, photo, flat, dull, washed out, blurry, jpeg artifacts, watermark",
-            0.5,
+            "Dramatic concept-art energy: cinematic lighting, atmospheric depth, glowing accents, rich color grading. The most transformative look.",
+            "epic fantasy concept art, cinematic dramatic lighting, majestic painterly game texture, golden rim light, "
+            + "glowing accent highlights, atmospheric depth, rich moody color grading, intricate detailed brushwork, "
+            + "awe-inspiring masterpiece",
+            "photorealistic, photo, 3d render, flat, dull, washed out, muddy, lowres, blurry, jpeg artifacts, "
+            + "watermark, text, signature, border, frame",
+            0.58,
             0.78,
-            6.0),
+            6.5),
         new(
             "dark-oil",
             "Dark Oil Painting",
             "Old-master chiaroscuro: heavy impasto strokes, deep shadow, a muted ominous palette. Made for dungeons and dark cities.",
-            "dark fantasy oil painting, chiaroscuro, rembrandt lighting, heavy impasto brush strokes, muted earthy palette, ominous atmosphere, game texture, masterpiece",
-            "photorealistic, photo, bright, cheerful, neon, blurry, jpeg artifacts, watermark",
-            0.5,
+            "dark fantasy oil painting, chiaroscuro, rembrandt lighting, heavy impasto brush strokes, deep shadow, "
+            + "muted earthy palette with jewel-tone accents, ominous atmosphere, museum-quality game texture, masterpiece",
+            "photorealistic, photo, 3d render, bright, cheerful, neon, flat, lowres, blurry, jpeg artifacts, "
+            + "watermark, text, signature, border, frame",
+            0.56,
             0.8,
-            5.5),
+            6.0),
         new(
             "storybook-watercolor",
             "Storybook Watercolor",
             "Soft washes, gentle ink lines, warm whimsical color. Fits pastoral zones and bright cities.",
-            "storybook watercolor illustration, soft color washes, delicate ink outlines, warm whimsical fantasy palette, hand-painted game texture",
-            "photorealistic, photo, harsh contrast, neon, blurry, jpeg artifacts, watermark",
-            0.5,
+            "enchanting storybook watercolor illustration, layered soft color washes, delicate ink outlines, "
+            + "warm whimsical fantasy palette, gentle luminous light, hand-painted game texture, charming masterpiece",
+            "photorealistic, photo, 3d render, harsh contrast, neon, muddy, lowres, blurry, jpeg artifacts, "
+            + "watermark, text, signature, border, frame",
+            0.55,
             0.8,
-            5.0),
+            5.5),
         new(
             "comic-ink",
             "Comic Ink",
             "Bold cel-shaded planes with strong ink lines and vivid flat color. The most graphic, stylized option.",
-            "bold comic book art, cel shading, strong clean ink lines, vivid flat colors, graphic fantasy game texture, high contrast",
-            "photorealistic, photo, soft gradients, muddy, blurry, jpeg artifacts, watermark",
-            0.55,
+            "bold comic book art, crisp cel shading, strong clean ink lines, vivid flat color planes, dynamic graphic "
+            + "fantasy game texture, high contrast, striking masterpiece",
+            "photorealistic, photo, 3d render, soft gradients, muddy, washed out, lowres, blurry, jpeg artifacts, "
+            + "watermark, text, signature, border, frame",
+            0.62,
             0.75,
-            6.5)
+            7.0)
     ];
 
     private static readonly HttpClient Http = CreateHttpClient();
@@ -254,12 +210,7 @@ public sealed class ArtisticWorkerSetupService
         var disabledScript = workerScript + ".disabled";
         if (File.Exists(workerScript))
         {
-            return new ArtisticWorkerSetupStatus(
-                true,
-                true,
-                WorkerDirectory,
-                null,
-                TryReadConfig()?.ModelTier ?? ModelTierStandard);
+            return new ArtisticWorkerSetupStatus(true, true, WorkerDirectory, null);
         }
 
         if (File.Exists(disabledScript))
@@ -268,8 +219,7 @@ public sealed class ArtisticWorkerSetupService
                 true,
                 false,
                 WorkerDirectory,
-                "The install-time verification did not pass on this PC; the worker is present but disabled.",
-                TryReadConfig()?.ModelTier ?? ModelTierStandard);
+                "The install-time verification did not pass on this PC; the worker is present but disabled.");
         }
 
         return new ArtisticWorkerSetupStatus(false, false, WorkerDirectory, null);
@@ -281,13 +231,11 @@ public sealed class ArtisticWorkerSetupService
     /// match their pinned hash are skipped.
     /// </summary>
     public async Task SetupAsync(
-        string modelTier,
         string realEsrganPath,
         string realEsrganModelsPath,
         IProgress<ProgressUpdate>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(modelTier);
         ArgumentException.ThrowIfNullOrWhiteSpace(realEsrganPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(realEsrganModelsPath);
         Directory.CreateDirectory(WorkerDirectory);
@@ -305,7 +253,7 @@ public sealed class ArtisticWorkerSetupService
 
         var modelsDirectory = Path.Combine(WorkerDirectory, "models");
         Directory.CreateDirectory(modelsDirectory);
-        var components = GetComponents(modelTier);
+        var components = Components;
         for (var index = 0; index < components.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -321,7 +269,7 @@ public sealed class ArtisticWorkerSetupService
             }
         }
 
-        WriteWorkerScripts(modelTier, realEsrganPath, realEsrganModelsPath);
+        WriteWorkerScripts(realEsrganPath, realEsrganModelsPath);
         progress?.Report(new ProgressUpdate(
             "Artistic worker",
             "All components verified; worker scripts generated.",
@@ -592,8 +540,10 @@ public sealed class ArtisticWorkerSetupService
             return ArtisticStylePreset.CustomKey;
         }
 
-        var expected = declared.ToConfig(config.ModelTier) with
+        var expected = declared.ToConfig() with
         {
+            SchemaVersion = config.SchemaVersion,
+            ModelTier = config.ModelTier,
             Seed = config.Seed,
             Steps = config.Steps,
             MaximumDiffusionEdge = config.MaximumDiffusionEdge
@@ -609,13 +559,16 @@ public sealed class ArtisticWorkerSetupService
         Directory.CreateDirectory(WorkerDirectory);
         // Preserve the user's performance/determinism knobs when they exist.
         var current = TryReadConfig();
-        var config = preset.ToConfig(current?.ModelTier ?? ModelTierStandard);
+        var config = preset.ToConfig();
         if (current is not null)
         {
+            // Seed and resolution bound are always the user's; a hand-tuned
+            // step count survives only if it was set under the current
+            // recipe schema — older recipes' defaults should not pin quality.
             config = config with
             {
                 Seed = current.Seed,
-                Steps = current.Steps,
+                Steps = current.SchemaVersion >= 2 ? current.Steps : config.Steps,
                 MaximumDiffusionEdge = current.MaximumDiffusionEdge
             };
         }
@@ -623,37 +576,36 @@ public sealed class ArtisticWorkerSetupService
         File.WriteAllText(ConfigPath, JsonSerializer.Serialize(config, ConfigJsonOptions));
     }
 
-    internal void WriteWorkerScripts(string modelTier, string realEsrganPath, string realEsrganModelsPath)
+    internal void WriteWorkerScripts(string realEsrganPath, string realEsrganModelsPath)
     {
         // The PowerShell implementation reads image sizes, orchestrates the
         // Real-ESRGAN 4x base pass and the diffusion repaint, and guarantees
         // the exact-4x output contract; the .bat is only a shim so the worker
-        // matches SpinTexture's process-invocation contract. An existing
-        // config survives re-setup so style choices are never reset; when the
-        // model tier changes, the active style recipe is re-mapped for the
-        // new tier (a hand-edited custom config falls back to the default
-        // recipe, because its values were tuned for the other model).
-        var isUltra = IsUltra(modelTier);
+        // matches SpinTexture's process-invocation contract. A current-schema
+        // config survives re-setup so style choices are never reset; configs
+        // written by an older recipe schema (or by the retired SDXL tier)
+        // are re-mapped onto the active style's current recipe, keeping the
+        // user's seed and resolution bound.
         var currentConfig = TryReadConfig();
         if (currentConfig is null)
         {
             File.WriteAllText(
                 ConfigPath,
-                JsonSerializer.Serialize(StylePresets[0].ToConfig(modelTier), ConfigJsonOptions));
+                JsonSerializer.Serialize(StylePresets[0].ToConfig(), ConfigJsonOptions));
         }
-        else if (!string.Equals(
-            currentConfig.ModelTier,
-            isUltra ? ModelTierUltra : ModelTierStandard,
-            StringComparison.OrdinalIgnoreCase))
+        else if (currentConfig.SchemaVersion < 2
+            || !string.Equals(currentConfig.ModelTier, ModelTierStandard, StringComparison.OrdinalIgnoreCase))
         {
-            var activeKey = GetActiveStylePresetKey();
+            // The declared preset key is the user's style choice; the old
+            // recipe's values (including any hand tuning made against it) are
+            // superseded by the new recipe they were an approximation of.
             var activePreset = StylePresets.FirstOrDefault(preset =>
-                    string.Equals(preset.Key, activeKey, StringComparison.OrdinalIgnoreCase))
+                    string.Equals(preset.Key, currentConfig.Preset, StringComparison.OrdinalIgnoreCase))
                 ?? StylePresets[0];
             File.WriteAllText(
                 ConfigPath,
                 JsonSerializer.Serialize(
-                    activePreset.ToConfig(modelTier) with
+                    activePreset.ToConfig() with
                     {
                         Seed = currentConfig.Seed,
                         MaximumDiffusionEdge = currentConfig.MaximumDiffusionEdge
@@ -671,16 +623,8 @@ public sealed class ArtisticWorkerSetupService
         script.AppendLine("$root = Split-Path -Parent $MyInvocation.MyCommand.Path");
         script.AppendLine("$config = Get-Content (Join-Path $root 'worker-config.json') | ConvertFrom-Json");
         script.AppendLine("$sdCli = Join-Path $root 'sd\\sd-cli.exe'");
-        if (isUltra)
-        {
-            script.AppendLine("$model = Join-Path $root 'models\\DreamShaperXL_Turbo_v2_1.safetensors'");
-            script.AppendLine("$sdxlVae = Join-Path $root 'models\\sdxl_vae.safetensors'");
-        }
-        else
-        {
-            script.AppendLine("$model = Join-Path $root 'models\\DreamShaper_8_pruned.safetensors'");
-            script.AppendLine("$controlNet = Join-Path $root 'models\\control_v11f1e_sd15_tile_fp16.safetensors'");
-        }
+        script.AppendLine("$model = Join-Path $root 'models\\DreamShaper_8_pruned.safetensors'");
+        script.AppendLine("$controlNet = Join-Path $root 'models\\control_v11f1e_sd15_tile_fp16.safetensors'");
         script.AppendLine($"$realEsrgan = '{realEsrganPath.Replace("'", "''")}'");
         script.AppendLine($"$realEsrganModels = '{realEsrganModelsPath.Replace("'", "''")}'");
         script.AppendLine();
@@ -709,7 +653,12 @@ public sealed class ArtisticWorkerSetupService
         script.AppendLine("$batchMetaPath = Join-Path $i 'batch-meta.json'");
         script.AppendLine("if (Test-Path $batchMetaPath) { $batchMeta = Get-Content $batchMetaPath -Raw | ConvertFrom-Json }");
         script.AppendLine("try {");
-        script.AppendLine("  foreach ($png in Get-ChildItem -Path $i -Filter *.png) {");
+        script.AppendLine("  $pngFiles = @(Get-ChildItem -Path $i -Filter *.png)");
+        script.AppendLine("  $current = 0");
+        script.AppendLine("  foreach ($png in $pngFiles) {");
+        script.AppendLine("    $current++");
+        script.AppendLine("    # Structured progress SpinTexture parses into the build ETA.");
+        script.AppendLine("    Write-Host (\"SPINTEXTURE-PROGRESS {0}/{1} {2}\" -f $current, $pngFiles.Count, $png.Name)");
         script.AppendLine("    $prompt = [string]$config.prompt");
         script.AppendLine("    $denoise = [double]$config.denoiseStrength");
         script.AppendLine("    if ($batchMeta -and $batchMeta.files) {");
@@ -734,18 +683,16 @@ public sealed class ArtisticWorkerSetupService
         script.AppendLine("    $painted = Join-Path $work ($png.BaseName + '-painted.png')");
         script.AppendLine("    $sdArguments = @(");
         script.AppendLine("      '-m', $model,");
-        if (isUltra)
-        {
-            script.AppendLine("      '--vae', $sdxlVae,");
-        }
-        else
-        {
-            script.AppendLine("      '--control-net', $controlNet,");
-            script.AppendLine("      '--control-image', $up,");
-            script.AppendLine("      '--control-strength', ([double]$config.controlStrength).ToString($culture),");
-        }
+        script.AppendLine("      '--control-net', $controlNet,");
+        script.AppendLine("      '--control-image', $up,");
+        script.AppendLine("      '--control-strength', ([double]$config.controlStrength).ToString($culture),");
         script.AppendLine("      '-i', $up,");
         script.AppendLine("      '--strength', $denoise.ToString($culture),");
+        script.AppendLine("      # DPM++ 2M on the Karras schedule with clip-skip 2: the settings the");
+        script.AppendLine("      # checkpoint is tuned for, and a large quality gain over the defaults.");
+        script.AppendLine("      '--sampling-method', 'dpm++2m',");
+        script.AppendLine("      '--schedule', 'karras',");
+        script.AppendLine("      '--clip-skip', '2',");
         script.AppendLine("      '-p', $prompt,");
         script.AppendLine("      '-n', [string]$config.negativePrompt,");
         script.AppendLine("      '--cfg-scale', ([double]$config.cfgScale).ToString($culture),");
