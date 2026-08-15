@@ -50,6 +50,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private double _bakedDepth;
     private double _emissiveGlow;
     private bool _fullResolutionRepaint;
+    private double _mipSharpen;
     private ScopeOptionViewModel _selectedScopeOption;
     private string? _selectedZone;
     private int _selectedMaximumDimension = 2048;
@@ -221,6 +222,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _bakedDepth = Math.Clamp(rememberedPreferences.BakedDepth, 0d, 1d);
         _emissiveGlow = Math.Clamp(rememberedPreferences.EmissiveGlow, 0d, 1d);
         _fullResolutionRepaint = rememberedPreferences.FullResolutionRepaint;
+        _mipSharpen = Math.Clamp(rememberedPreferences.MipSharpen, 0d, 1d);
         var rememberedInstall = rememberedPreferences.LastInstallPath;
         if (!string.IsNullOrWhiteSpace(rememberedInstall)
             && Directory.Exists(rememberedInstall)
@@ -631,6 +633,20 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
+    public double MipSharpen
+    {
+        get => _mipSharpen;
+        set
+        {
+            var clamped = Math.Clamp(double.IsFinite(value) ? value : 0d, 0d, 1d);
+            if (SetProperty(ref _mipSharpen, clamped))
+            {
+                PersistLighting();
+                UpdateOptionPreviewSelection();
+            }
+        }
+    }
+
     public bool FullResolutionRepaint
     {
         get => _fullResolutionRepaint;
@@ -649,11 +665,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         var depth = _bakedDepth;
         var glow = _emissiveGlow;
         var fullResolution = _fullResolutionRepaint;
+        var mipSharpen = _mipSharpen;
         _ = Task.Run(async () =>
         {
             try
             {
-                await _preferences.WriteEnhancementsAsync(depth, glow, fullResolution).ConfigureAwait(false);
+                await _preferences.WriteEnhancementsAsync(depth, glow, fullResolution, mipSharpen).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is
                 IOException or UnauthorizedAccessException or InvalidOperationException)
@@ -1078,7 +1095,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 PaintedStyle: EffectivePaintedStyle,
                 BakedDepth: _bakedDepth,
                 EmissiveGlow: _emissiveGlow,
-                FullResolutionRepaint: _fullResolutionRepaint);
+                FullResolutionRepaint: _fullResolutionRepaint,
+                MipSharpen: _mipSharpen);
 
             TexturePackBuildResult result = await _workflow.BuildAsync(
                 InstallPath,
@@ -2144,7 +2162,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             PaintedStyle: EffectivePaintedStyle,
             BakedDepth: _bakedDepth,
             EmissiveGlow: _emissiveGlow,
-            FullResolutionRepaint: _fullResolutionRepaint);
+            FullResolutionRepaint: _fullResolutionRepaint,
+            MipSharpen: _mipSharpen);
         OptionPreview.UpdateSelection(
             InstallPath,
             previewOptions,

@@ -100,6 +100,7 @@ public static class TexturePipelineSelfTests
         TestArtisticWorkerCommand();
         TestLightingBaker();
         TestDiffusionTiler();
+        await TestCrispMipChainAsync(cancellationToken).ConfigureAwait(false);
         TestPresetAwareFidelityGate();
         TestPaintedFinalValidationPolicyAndCappedMetrics();
         await output.WriteLineAsync("Texture model discovery and preset fidelity-gate tests passed.").ConfigureAwait(false);
@@ -2197,6 +2198,117 @@ public static class TexturePipelineSelfTests
         var replacement = Reserve("lavastorm.s3d", "replacement-material.dds");
         Assert(replacement.Accepted, "failed previews should release their family and archive share");
         AssertEqual(lava.Index, replacement.Index, "released preview indices should be reused deterministically");
+    }
+
+    private static async Task TestCrispMipChainAsync(CancellationToken cancellationToken)
+    {
+        const int width = 128;
+        const int height = 64;
+        var fixtureBytes = new byte[18 + (width * height * 4)];
+        fixtureBytes[2] = 2;
+        BinaryPrimitives.WriteUInt16LittleEndian(fixtureBytes.AsSpan(12), width);
+        BinaryPrimitives.WriteUInt16LittleEndian(fixtureBytes.AsSpan(14), height);
+        fixtureBytes[16] = 32;
+        fixtureBytes[17] = 0x28;
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                var offset = 18 + (((y * width) + x) * 4);
+                fixtureBytes[offset] = (byte)((x * 5) & 0xFF);
+                fixtureBytes[offset + 1] = (byte)((y * 9) & 0xFF);
+                fixtureBytes[offset + 2] = (byte)((x ^ y) & 0xFF);
+                fixtureBytes[offset + 3] = byte.MaxValue;
+            }
+        }
+
+        var image = TgaPixelBuffer.Read(fixtureBytes);
+        var mipCount = TextureMipPolicy.Calculate(width, height, generateMipMaps: true, useCutoutFloor: false);
+        var dds = CrispMipChain.BuildPreMippedDds(image, mipCount, 0.6, wrapEdges: true);
+        Assert(
+            dds.AsSpan().SequenceEqual(CrispMipChain.BuildPreMippedDds(image, mipCount, 0.6, wrapEdges: true)),
+            "the crisp mip chain must be deterministic");
+
+        var expectedPayload = 0;
+        int levelWidth = width, levelHeight = height;
+        for (var level = 0; level < mipCount; level++)
+        {
+            expectedPayload += levelWidth * levelHeight * 4;
+            levelWidth = Math.Max(1, levelWidth >> 1);
+            levelHeight = Math.Max(1, levelHeight >> 1);
+        }
+
+        AssertEqual(
+            4 + 124 + expectedPayload,
+            dds.Length,
+            "the pre-mipped DDS must contain the full chain down to 1x1");
+
+        var ddsPath = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-crisp-{Guid.NewGuid():N}.dds");
+        try
+        {
+            await File.WriteAllBytesAsync(ddsPath, dds, cancellationToken).ConfigureAwait(false);
+            var sniffed = await new TextureHeaderSniffer().ReadFileAsync(ddsPath, cancellationToken).ConfigureAwait(false);
+            Assert(
+                sniffed is
+                {
+                    FileFormat: TextureFileFormat.Dds,
+                    Width: width,
+                    Height: height,
+                    BitsPerPixel: 32,
+                    IsCompressed: false
+                }
+                && sniffed.MipCount == mipCount,
+                "SpinTexture's own header sniffer must accept the generated pre-mipped DDS");
+        }
+        finally
+        {
+            File.Delete(ddsPath);
+        }
+
+        // The top level must be byte-exact source data — only the distance
+        // mips are re-sharpened. TGA pixel bytes are already B,G,R,A, the
+        // same memory order the A8R8G8B8 DDS uses.
+        for (var pixel = 0; pixel < width * height; pixel++)
+        {
+            var source = 18 + (pixel * 4);
+            var packed = 128 + (pixel * 4);
+            for (var channel = 0; channel < 4; channel++)
+            {
+                Assert(
+                    dds[packed + channel] == fixtureBytes[source + channel],
+                    "the top mip level must be byte-exact");
+            }
+        }
+
+        // Gate: crisp mips serve only opaque power-of-two DDS color textures.
+        var opaqueMetadata = new TextureMetadata(
+            TextureFileFormat.Dds, "BC1_UNORM", 256, 256, 9, 4, TextureAlphaStatus.None,
+            true, true, false, false, 1, "BC1_UNORM");
+        var colorClassification = new TextureClassification(
+            TextureKind.Color, ClassificationConfidence.High, true, false, false, []);
+        var crispOptions = UpscaleOptions.Recommended with { MipSharpen = 0.5 };
+        var request = new NativeTextureProcessRequest(
+            "wall.dds", "out.dds", "work", opaqueMetadata, colorClassification, crispOptions);
+        var dimensions = new UpscaleDimensions(256, 256, 1024, 1024, 4);
+        Assert(
+            NativeTextureProcessor.ShouldUseCrispMips(request, 11, false, "merged.tga", dimensions),
+            "opaque power-of-two DDS color textures qualify for crisp mips");
+        Assert(
+            !NativeTextureProcessor.ShouldUseCrispMips(
+                request with { Options = crispOptions with { MipSharpen = 0 } }, 11, false, "merged.tga", dimensions)
+            && !NativeTextureProcessor.ShouldUseCrispMips(
+                request with { Options = crispOptions with { Preset = TexturePreset.Faithful } }, 11, false, "merged.tga", dimensions)
+            && !NativeTextureProcessor.ShouldUseCrispMips(
+                request with { Metadata = opaqueMetadata with { AlphaStatus = TextureAlphaStatus.Explicit } }, 11, false, "merged.tga", dimensions)
+            && !NativeTextureProcessor.ShouldUseCrispMips(
+                request with { Classification = colorClassification with { Kind = TextureKind.Normal } }, 11, false, "merged.tga", dimensions)
+            && !NativeTextureProcessor.ShouldUseCrispMips(request, 1, false, "merged.tga", dimensions)
+            && !NativeTextureProcessor.ShouldUseCrispMips(request, 11, false, "wall.dds", dimensions)
+            && !NativeTextureProcessor.ShouldUseCrispMips(
+                request, 11, false, "merged.tga", new UpscaleDimensions(256, 256, 1000, 1024, 4)),
+            "cutouts, normals, faithful, single-mip, non-TGA staging, and non-power-of-two stay on the standard path");
     }
 
     private static void TestDiffusionTiler()

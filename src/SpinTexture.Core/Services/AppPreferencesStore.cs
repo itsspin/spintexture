@@ -9,7 +9,8 @@ public sealed record AppPreferences(
     PaintedStyleSettings? PaintedStyle = null,
     double BakedDepth = 0,
     double EmissiveGlow = 0,
-    bool FullResolutionRepaint = false)
+    bool FullResolutionRepaint = false,
+    double MipSharpen = 0)
 {
     public static AppPreferences Empty { get; } = new((string?)null);
 }
@@ -56,7 +57,8 @@ public sealed class AppPreferencesStore
                 document.PaintedStyle?.Clamped(),
                 Math.Clamp(document.BakedDepth, 0d, 1d),
                 Math.Clamp(document.EmissiveGlow, 0d, 1d),
-                document.FullResolutionRepaint);
+                document.FullResolutionRepaint,
+                Math.Clamp(document.MipSharpen, 0d, 1d));
         }
         catch (Exception exception) when (exception is
             IOException or UnauthorizedAccessException or JsonException or ArgumentException or NotSupportedException)
@@ -84,7 +86,8 @@ public sealed class AppPreferencesStore
             current.PaintedStyle,
             current.BakedDepth,
             current.EmissiveGlow,
-            current.FullResolutionRepaint);
+            current.FullResolutionRepaint,
+            current.MipSharpen);
         var parent = Path.GetDirectoryName(settingsPath)
             ?? throw new InvalidOperationException("The preferences path has no parent directory.");
         Directory.CreateDirectory(parent);
@@ -116,7 +119,8 @@ public sealed class AppPreferencesStore
             paintedStyle?.Clamped(),
             current.BakedDepth,
             current.EmissiveGlow,
-            current.FullResolutionRepaint);
+            current.FullResolutionRepaint,
+            current.MipSharpen);
         var parent = Path.GetDirectoryName(settingsPath)
             ?? throw new InvalidOperationException("The preferences path has no parent directory.");
         Directory.CreateDirectory(parent);
@@ -158,6 +162,7 @@ public sealed class AppPreferencesStore
         double bakedDepth,
         double emissiveGlow,
         bool fullResolutionRepaint,
+        double mipSharpen,
         CancellationToken cancellationToken = default)
     {
         var current = Read();
@@ -167,7 +172,8 @@ public sealed class AppPreferencesStore
             current.PaintedStyle,
             Math.Clamp(bakedDepth, 0d, 1d),
             Math.Clamp(emissiveGlow, 0d, 1d),
-            fullResolutionRepaint);
+            fullResolutionRepaint,
+            Math.Clamp(mipSharpen, 0d, 1d));
         var parent = Path.GetDirectoryName(settingsPath)
             ?? throw new InvalidOperationException("The preferences path has no parent directory.");
         Directory.CreateDirectory(parent);
@@ -194,5 +200,6 @@ public sealed class AppPreferencesStore
         PaintedStyleSettings? PaintedStyle = null,
         double BakedDepth = 0,
         double EmissiveGlow = 0,
-        bool FullResolutionRepaint = false);
+        bool FullResolutionRepaint = false,
+        double MipSharpen = 0);
 }

@@ -67,7 +67,12 @@ public sealed record UpscaleOptions(
     // overlapping full-resolution tiles instead of one bounded pass.
     [property: System.Text.Json.Serialization.JsonIgnore(
         Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
-    bool FullResolutionRepaint = false)
+    bool FullResolutionRepaint = false,
+    // Optional per-mip contrast recovery for opaque DDS color textures
+    // (0 = off, the compatibility default).
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    double MipSharpen = 0)
 {
     /// <summary>
     /// The effective painted style: explicit settings when present, otherwise

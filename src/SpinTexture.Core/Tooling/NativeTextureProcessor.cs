@@ -2540,6 +2540,23 @@ public sealed class NativeTextureProcessor
                 request.Options.GenerateMipMaps,
                 usedCutoutMipFloor)
             : 1;
+        if (ShouldUseCrispMips(request, mipCount, preserveAlphaCoverage, inputPath, dimensions))
+        {
+            var crisp = await TryEncodeCrispMipsAsync(
+                    request,
+                    dimensions,
+                    inputPath,
+                    operationDirectory,
+                    mipCount,
+                    nativeProgress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (crisp is not null)
+            {
+                return crisp;
+            }
+        }
+
         var encodedDirectory = CreateDirectory(operationDirectory, "encoded");
         await RunCheckedAsync(
             _directXTex.CreateEncode(
@@ -2566,6 +2583,111 @@ public sealed class NativeTextureProcessor
         var encodedPath = FindSingleOutput(encodedDirectory, extension);
         await CopyFileAsync(encodedPath, request.DestinationPath, cancellationToken).ConfigureAwait(false);
         return new GeneratedMipResult(mipCount, usedCutoutMipFloor);
+    }
+
+    /// <summary>
+    /// Crisp distance detail is deliberately narrow: opaque power-of-two DDS
+    /// color textures on non-Faithful presets, from a TGA staging input. Any
+    /// other shape (cutouts and their coverage handling, vector normals,
+    /// masks, palettes) keeps the established texconv mip path untouched.
+    /// </summary>
+    internal static bool ShouldUseCrispMips(
+        NativeTextureProcessRequest request,
+        int mipCount,
+        bool preserveAlphaCoverage,
+        string inputPath,
+        UpscaleDimensions dimensions)
+    {
+        return request.Options.MipSharpen > 0d
+            && request.Options.Preset != TexturePreset.Faithful
+            && request.Metadata.FileFormat == TextureFileFormat.Dds
+            && request.Metadata.TexconvFormat is not null
+            && mipCount > 1
+            && !request.Metadata.HasAlpha
+            && !preserveAlphaCoverage
+            && request.Classification.Kind == TextureKind.Color
+            && inputPath.EndsWith(".tga", StringComparison.OrdinalIgnoreCase)
+            && int.IsPow2(dimensions.OutputWidth)
+            && int.IsPow2(dimensions.OutputHeight);
+    }
+
+    /// <summary>
+    /// Builds the sharpened mip chain on the CPU, hands texconv a pre-mipped
+    /// uncompressed DDS at final dimensions (so it only block-compresses),
+    /// and verifies the encoded header before accepting the result. Any
+    /// surprise — texconv failing, or the output not carrying the exact
+    /// expected dimensions and mip count — falls back to the standard path.
+    /// </summary>
+    private async Task<GeneratedMipResult?> TryEncodeCrispMipsAsync(
+        NativeTextureProcessRequest request,
+        UpscaleDimensions dimensions,
+        string inputPath,
+        string operationDirectory,
+        int mipCount,
+        IProgress<NativeOutputLine>? nativeProgress,
+        CancellationToken cancellationToken)
+    {
+        var image = await TgaPixelBuffer.ReadFileAsync(inputPath, cancellationToken).ConfigureAwait(false);
+        if (image.Width < dimensions.OutputWidth || image.Height < dimensions.OutputHeight)
+        {
+            return null;
+        }
+
+        if (image.Width != dimensions.OutputWidth || image.Height != dimensions.OutputHeight)
+        {
+            image = image.ResizeArea(dimensions.OutputWidth, dimensions.OutputHeight);
+        }
+
+        var preMippedPath = Path.Combine(operationDirectory, "crisp-premipped.dds");
+        await File.WriteAllBytesAsync(
+            preMippedPath,
+            CrispMipChain.BuildPreMippedDds(
+                image,
+                mipCount,
+                Math.Clamp(request.Options.MipSharpen, 0d, 1d),
+                request.WrapEdges),
+            cancellationToken).ConfigureAwait(false);
+        var crispDirectory = CreateDirectory(operationDirectory, "encoded-crisp");
+        try
+        {
+            await RunCheckedAsync(
+                _directXTex.CreateEncode(
+                    _tools.TexconvPath!,
+                    preMippedPath,
+                    crispDirectory,
+                    request.Metadata,
+                    dimensions.OutputWidth,
+                    dimensions.OutputHeight,
+                    mipCount,
+                    preserveAlphaCoverage: false,
+                    wrapSampling: request.WrapEdges),
+                nativeProgress,
+                cancellationToken).ConfigureAwait(false);
+            var crispPath = FindSingleOutput(crispDirectory, ".dds");
+            var encodedMetadata = await new TextureHeaderSniffer()
+                .ReadFileAsync(crispPath, cancellationToken)
+                .ConfigureAwait(false);
+            if (encodedMetadata is null
+                || encodedMetadata.Width != dimensions.OutputWidth
+                || encodedMetadata.Height != dimensions.OutputHeight
+                || encodedMetadata.MipCount != mipCount)
+            {
+                nativeProgress?.Report(new NativeOutputLine(
+                    NativeOutputStream.StandardError,
+                    $"{Path.GetFileName(request.SourcePath)}: the crisp-mip encode did not preserve the expected layout; using the standard mip path."));
+                return null;
+            }
+
+            await CopyFileAsync(crispPath, request.DestinationPath, cancellationToken).ConfigureAwait(false);
+            return new GeneratedMipResult(mipCount, UsedCutoutFloor: false);
+        }
+        catch (NativeProcessException exception)
+        {
+            nativeProgress?.Report(new NativeOutputLine(
+                NativeOutputStream.StandardError,
+                $"{Path.GetFileName(request.SourcePath)}: the crisp-mip encode failed and the standard mip path was used instead. {exception.Message}"));
+            return null;
+        }
     }
 
     private async Task RunCheckedAsync(

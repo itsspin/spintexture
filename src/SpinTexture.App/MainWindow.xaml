@@ -971,9 +971,11 @@
                             <Border Margin="0,14,0,0" Padding="13" CornerRadius="7" Background="#0D1117"
                                     BorderBrush="#343B46" BorderThickness="1">
                                 <StackPanel>
-                                    <TextBlock Text="BAKED LIGHTING (OPTIONAL)" Style="{StaticResource FieldLabelStyle}" />
+                                    <TextBlock Text="VISUAL ENHANCEMENTS (OPTIONAL)" Style="{StaticResource FieldLabelStyle}" />
                                     <Grid Margin="0,8,0,0">
                                         <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="18" />
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="18" />
                                             <ColumnDefinition Width="*" />
@@ -992,9 +994,16 @@
                                                     LargeChange="0.1" SmallChange="0.05"
                                                     AutomationProperties.Name="Emissive glow strength" />
                                         </StackPanel>
+                                        <StackPanel Grid.Column="4">
+                                            <TextBlock Text="CRISP DISTANCE DETAIL" Style="{StaticResource FieldLabelStyle}"
+                                                       ToolTip="Most of what you see in-game is mip levels, not the full texture, and each halving washes out contrast. This regenerates the mip chain with a bounded per-level re-sharpen so walls and ground stay defined at a distance. Opaque world textures only; the full-size texture is untouched. 0 is off; around 0.5 is a good start." />
+                                            <Slider Value="{Binding MipSharpen, Delay=200}" Minimum="0" Maximum="1"
+                                                    LargeChange="0.1" SmallChange="0.05"
+                                                    AutomationProperties.Name="Crisp distance detail strength" />
+                                        </StackPanel>
                                     </Grid>
                                     <TextBlock Margin="0,7,0,0" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap"
-                                               Text="Applies to every preset except Faithful and soft spell effects, tiles seamlessly, and is recorded in the pack so repairs match. Signage and icons automatically receive a gentler bake. Both at 0 = exactly the previous behavior." />
+                                               Text="Applies to every preset except Faithful and soft spell effects, tiles seamlessly, and is recorded in the pack so repairs match. Signage and icons automatically receive a gentler bake; cutout foliage keeps its established mip handling. All at 0 = exactly the previous behavior." />
                                 </StackPanel>
                             </Border>
 
