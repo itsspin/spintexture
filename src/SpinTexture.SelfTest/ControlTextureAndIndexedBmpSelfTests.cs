@@ -463,10 +463,16 @@ internal static class ControlTextureAndIndexedBmpSelfTests
             () => LegacyIndexedBmp.Encode(lowColor, outputWidth, outputHeight, enhancedRgba),
             "low-color indexed BMP encode rejection");
 
-        var tiny = CreateIndexedBitmap(width: 16, height: 16, richPaletteUse: true);
+        // 16px is the widened floor (classic trim strips); only genuinely
+        // tiny bitmaps below it stay protected.
+        Assert(
+            LegacyIndexedBmp.CanEncode(
+                CreateIndexedBitmap(width: 16, height: 16, richPaletteUse: true)),
+            "16px indexed BMPs are encodable under the widened classic coverage");
+        var tiny = CreateIndexedBitmap(width: 8, height: 8, richPaletteUse: true);
         Assert(!LegacyIndexedBmp.CanEncode(tiny), "tiny indexed BMP should remain protected");
         AssertThrows<NotSupportedException>(
-            () => LegacyIndexedBmp.Encode(tiny, width: 64, height: 64, new byte[64 * 64 * 4]),
+            () => LegacyIndexedBmp.Encode(tiny, width: 32, height: 32, new byte[32 * 32 * 4]),
             "tiny indexed BMP encode rejection");
     }
 
