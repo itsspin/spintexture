@@ -13,13 +13,16 @@ namespace SpinTexture.Core.Services;
 /// preserves the exact bitmap sets referenced by legacy semi-transparent WLD
 /// materials so water and glass retain their authored blending. Revision 7
 /// introduces the asset-aware graphic-painted route and fences crash-resume
-/// checkpoints so older painted artifacts cannot mix with the new art pass. Older
-/// packs can advance through these independent safety rules without rerunning
-/// unaffected successfully enhanced textures.
+/// checkpoints so older painted artifacts cannot mix with the new art pass.
+/// Revision 8 enforces the palette color key on bitmaps referenced by masked
+/// WLD materials (weapon blades, cutout props) so their transparent regions
+/// can never re-encode as opaque color. Older packs can advance through these
+/// independent safety rules without rerunning unaffected successfully
+/// enhanced textures.
 /// </summary>
 public static class TextureProcessingPipeline
 {
-    public const int CurrentRevision = 7;
+    public const int CurrentRevision = 8;
     public const string CharacterEquipmentCoverageRuleId =
         "character-equipment-coverage-v1";
     public const string CutoutMipSafetyRuleId =
@@ -30,6 +33,8 @@ public static class TextureProcessingPipeline
         "native-sky-resources-originals-v5";
     public const string LegacyTranslucentMaterialSafetyRuleId =
         "legacy-translucent-materials-originals-v6";
+    public const string MaskedMaterialColorKeySafetyRuleId =
+        "masked-material-color-key-v8";
 
     public static bool RequiresRepair(
         TextureBuildReport? report,
@@ -185,6 +190,15 @@ public static class TextureProcessingPipeline
                 or AssetScope.SelectedZone)
         {
             rules.Add(CutoutMipSafetyRuleId);
+        }
+
+        if (revision >= 8
+            && scope is AssetScope.CharactersAndEquipmentOnly
+                or AssetScope.WorldCharactersAndEquipment
+                or AssetScope.WorldOnly
+                or AssetScope.SelectedZone)
+        {
+            rules.Add(MaskedMaterialColorKeySafetyRuleId);
         }
 
         var paths = artifactPaths?.ToArray();

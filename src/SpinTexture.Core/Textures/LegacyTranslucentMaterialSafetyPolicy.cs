@@ -21,6 +21,11 @@ public static class LegacyTranslucentMaterialSafetyPolicy
     private const uint MaterialFragment = 0x30;
     private const uint SemiTransparentMaterialBits = 0x0C;
 
+    // Bit 0x10 in the material parameters selects palette-masked (color-key)
+    // rendering: the client discards pixels whose palette index is the key
+    // (index zero) instead of alpha-blending them.
+    private const uint MaskedMaterialBit = 0x10;
+
     private static readonly byte[] StringKey =
         [0x95, 0x3A, 0xC5, 0x2A, 0x95, 0x7A, 0x95, 0x6A];
 
@@ -31,6 +36,26 @@ public static class LegacyTranslucentMaterialSafetyPolicy
     /// </summary>
     public static IReadOnlySet<string> FindProtectedTextureNames(
         ReadOnlySpan<byte> wldPayload)
+        => FindTextureNamesByMaterial(
+            wldPayload,
+            static parameters => (parameters & SemiTransparentMaterialBits) != 0);
+
+    /// <summary>
+    /// Returns every bitmap filename referenced by a WLD material rendered
+    /// with palette-masked (color-key) transparency and no alpha blending.
+    /// Those bitmaps must keep their keyed palette index exactly, or the
+    /// client draws their transparent regions as opaque color.
+    /// </summary>
+    public static IReadOnlySet<string> FindMaskedTextureNames(
+        ReadOnlySpan<byte> wldPayload)
+        => FindTextureNamesByMaterial(
+            wldPayload,
+            static parameters => (parameters & MaskedMaterialBit) != 0
+                && (parameters & SemiTransparentMaterialBits) == 0);
+
+    private static IReadOnlySet<string> FindTextureNamesByMaterial(
+        ReadOnlySpan<byte> wldPayload,
+        Func<uint, bool> materialMatches)
     {
         var protectedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (wldPayload.Length < 28
@@ -63,7 +88,7 @@ public static class LegacyTranslucentMaterialSafetyPolicy
         {
             var parameters = BinaryPrimitives.ReadUInt32LittleEndian(
                 material.Data.Span.Slice(4, sizeof(uint)));
-            if ((parameters & SemiTransparentMaterialBits) == 0)
+            if (!materialMatches(parameters))
             {
                 continue;
             }

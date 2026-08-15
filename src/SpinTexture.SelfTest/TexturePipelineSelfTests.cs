@@ -99,6 +99,7 @@ public static class TexturePipelineSelfTests
         TestTextureModelSelection();
         TestArtisticWorkerCommand();
         TestLightingBaker();
+        TestMaskedIndexedColorKey();
         TestDiffusionTiler();
         await TestCrispMipChainAsync(cancellationToken).ConfigureAwait(false);
         TestPresetAwareFidelityGate();
@@ -2309,6 +2310,82 @@ public static class TexturePipelineSelfTests
             && !NativeTextureProcessor.ShouldUseCrispMips(
                 request, 11, false, "merged.tga", new UpscaleDimensions(256, 256, 1000, 1024, 4)),
             "cutouts, normals, faithful, single-mip, non-TGA staging, and non-power-of-two stay on the standard path");
+    }
+
+    private static void TestMaskedIndexedColorKey()
+    {
+        // A masked weapon-style layout the border heuristic cannot detect:
+        // the art touches most of the border, with the keyed background in
+        // the corners and an interior hole — like a blade filling its frame.
+        const int size = 64;
+        const int paletteOffset = 14 + 40;
+        const int pixelOffset = paletteOffset + (256 * 4);
+        var bmp = new byte[pixelOffset + (size * size)];
+        bmp[0] = (byte)'B';
+        bmp[1] = (byte)'M';
+        BinaryPrimitives.WriteUInt32LittleEndian(bmp.AsSpan(2), (uint)bmp.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(bmp.AsSpan(10), pixelOffset);
+        BinaryPrimitives.WriteUInt32LittleEndian(bmp.AsSpan(14), 40);
+        BinaryPrimitives.WriteInt32LittleEndian(bmp.AsSpan(18), size);
+        BinaryPrimitives.WriteInt32LittleEndian(bmp.AsSpan(22), size);
+        BinaryPrimitives.WriteUInt16LittleEndian(bmp.AsSpan(26), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(bmp.AsSpan(28), 8);
+        BinaryPrimitives.WriteUInt32LittleEndian(bmp.AsSpan(34), (uint)(size * size));
+        BinaryPrimitives.WriteUInt32LittleEndian(bmp.AsSpan(46), 256);
+        // Palette: index 0 is the magenta key; the rest a gray ramp.
+        bmp[paletteOffset] = 255;
+        bmp[paletteOffset + 2] = 255;
+        for (var index = 1; index < 256; index++)
+        {
+            var gray = (byte)index;
+            bmp[paletteOffset + (index * 4)] = gray;
+            bmp[paletteOffset + (index * 4) + 1] = gray;
+            bmp[paletteOffset + (index * 4) + 2] = gray;
+        }
+
+        bool IsKeyedAt(int x, int y) =>
+            (x < 10 && y < 10)
+            || (x >= size - 10 && y >= size - 10)
+            || (x is >= 28 and < 36 && y is >= 28 and < 36);
+        for (var y = 0; y < size; y++)
+        {
+            for (var x = 0; x < size; x++)
+            {
+                var fileRow = size - 1 - y;
+                bmp[pixelOffset + (fileRow * size) + x] = IsKeyedAt(x, y)
+                    ? (byte)0
+                    : (byte)(40 + ((x + y) % 160));
+            }
+        }
+
+        Assert(LegacyIndexedBmp.CanEncode(bmp), "the masked fixture is an encodable indexed bitmap");
+
+        // An enhanced repaint that (like a painted or diffusion pass) filled
+        // the keyed background with plausible near-key color.
+        const int scale = 2;
+        const int outSize = size * scale;
+        var rgba = new byte[outSize * outSize * 4];
+        for (var pixel = 0; pixel < outSize * outSize; pixel++)
+        {
+            var offset = pixel * 4;
+            rgba[offset] = 235;
+            rgba[offset + 1] = 90;
+            rgba[offset + 2] = 235;
+            rgba[offset + 3] = 255;
+        }
+
+        var unforced = LegacyIndexedBmp.Encode(bmp, outSize, outSize, rgba);
+        Assert(
+            !LegacyIndexedBmp.KeyMaskPreserved(bmp, unforced),
+            "without an authoritative key this layout loses its mask (the reported bug)");
+
+        var forced = LegacyIndexedBmp.Encode(bmp, outSize, outSize, rgba, forcedKeyIndex: 0);
+        Assert(
+            LegacyIndexedBmp.KeyMaskPreserved(bmp, forced),
+            "the WLD-enforced key keeps every masked pixel keyed and every visible pixel opaque");
+        Assert(
+            !LegacyIndexedBmp.KeyMaskPreserved(bmp, unforced) || unforced.AsSpan().SequenceEqual(forced),
+            "the mask validator distinguishes broken prior outputs from keyed ones");
     }
 
     private static void TestDiffusionTiler()
