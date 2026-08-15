@@ -99,6 +99,7 @@ public static class TexturePipelineSelfTests
         TestTextureModelSelection();
         TestArtisticWorkerCommand();
         TestLightingBaker();
+        TestDiffusionTiler();
         TestPresetAwareFidelityGate();
         TestPaintedFinalValidationPolicyAndCappedMetrics();
         await output.WriteLineAsync("Texture model discovery and preset fidelity-gate tests passed.").ConfigureAwait(false);
@@ -2196,6 +2197,75 @@ public static class TexturePipelineSelfTests
         var replacement = Reserve("lavastorm.s3d", "replacement-material.dds");
         Assert(replacement.Accepted, "failed previews should release their family and archive share");
         AssertEqual(lava.Index, replacement.Index, "released preview indices should be reused deterministically");
+    }
+
+    private static void TestDiffusionTiler()
+    {
+        // Axis plans cover every pixel with fixed-size tiles and end exactly
+        // at the edge; single-tile axes stay untouched.
+        var axis = DiffusionTiler.PlanAxis(576);
+        Assert(
+            axis.SequenceEqual([0, 256, 288])
+            && axis.All(position => position + DiffusionTiler.TileInputSize <= 576),
+            "the 576px axis plan must stride by tile-minus-overlap and end flush");
+        Assert(
+            DiffusionTiler.PlanAxis(DiffusionTiler.TileInputSize).SequenceEqual([0]),
+            "an axis that fits one tile plans exactly one tile");
+        Assert(
+            !DiffusionTiler.NeedsTiling(288, 288) && DiffusionTiler.NeedsTiling(289, 100),
+            "tiling triggers only when either axis exceeds the tile size");
+        var plan = DiffusionTiler.PlanTiles(576, 320);
+        AssertEqual(6, plan.Count, "576x320 plans a 3x2 tile grid");
+
+        // Splitting an image into the planned tiles and blending them back
+        // unchanged must reproduce the image: the blend is a weighted average
+        // of agreeing values, so any deviation means broken weights.
+        const int width = 576;
+        const int height = 320;
+        var fixtureBytes = new byte[18 + (width * height * 4)];
+        fixtureBytes[2] = 2;
+        BinaryPrimitives.WriteUInt16LittleEndian(fixtureBytes.AsSpan(12), width);
+        BinaryPrimitives.WriteUInt16LittleEndian(fixtureBytes.AsSpan(14), height);
+        fixtureBytes[16] = 32;
+        fixtureBytes[17] = 0x28;
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                var offset = 18 + (((y * width) + x) * 4);
+                var hash = (uint)((x * 374761393) + (y * 668265263));
+                hash = (hash ^ (hash >> 13)) * 1274126177u;
+                fixtureBytes[offset] = (byte)(hash & 0xFF);
+                fixtureBytes[offset + 1] = (byte)((hash >> 8) & 0xFF);
+                fixtureBytes[offset + 2] = (byte)((hash >> 16) & 0xFF);
+                fixtureBytes[offset + 3] = (byte)(255 - (hash & 0x3F));
+            }
+        }
+
+        var image = TgaPixelBuffer.Read(fixtureBytes);
+        var tiles = plan
+            .Select(position => (
+                position,
+                image.Crop(
+                    position.X,
+                    position.Y,
+                    Math.Min(DiffusionTiler.TileInputSize, width),
+                    Math.Min(DiffusionTiler.TileInputSize, height))))
+            .ToArray();
+        var blended = DiffusionTiler.BlendTiles(tiles, width, height, scale: 1);
+        AssertEqual(width, blended.Width, "the blended repaint keeps its width");
+        AssertEqual(height, blended.Height, "the blended repaint keeps its height");
+        var maximumDelta = 0;
+        for (var index = 0; index < width * height * 4; index++)
+        {
+            maximumDelta = Math.Max(
+                maximumDelta,
+                Math.Abs(image.RgbaPixels.Span[index] - blended.RgbaPixels.Span[index]));
+        }
+
+        Assert(
+            maximumDelta <= 1,
+            $"splitting and re-blending unchanged tiles must be the identity (max delta {maximumDelta})");
     }
 
     private static void TestLightingBaker()

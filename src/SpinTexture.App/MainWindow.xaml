@@ -926,6 +926,14 @@
                                                            Style="{StaticResource CaptionStyle}"
                                                            TextWrapping="Wrap" LineHeight="17" />
                                             </Grid>
+                                            <CheckBox Margin="0,9,0,0"
+                                                      IsChecked="{Binding FullResolutionRepaint}"
+                                                      Visibility="{Binding IsArtisticWorkerInstalled, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                                      Foreground="{StaticResource PrimaryTextBrush}"
+                                                      AutomationProperties.Name="Full-resolution repaint"
+                                                      ToolTip="Paints textures larger than the diffusion bound in overlapping full-resolution tiles instead of one bounded pass. Maximum painted detail on 2K/4K textures, but a large texture becomes many diffusion passes — expect builds several times slower. Recorded in the pack, so repairs match.">
+                                                <TextBlock Text="Full-resolution repaint (tiled — maximum detail, much slower)" TextWrapping="Wrap" />
+                                            </CheckBox>
                                             <WrapPanel Margin="0,9,0,0">
                                                 <Button Content="Set Up Diffusion Repaint (~2.9 GB)"
                                                         Command="{Binding SetupArtisticWorkerCommand}"

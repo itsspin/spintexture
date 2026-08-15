@@ -38,6 +38,20 @@ public sealed class TgaPixelBuffer
     public int Height { get; }
     internal ReadOnlyMemory<byte> RgbaPixels => _rgba;
 
+    internal static TgaPixelBuffer FromRgba(int width, int height, byte[] rgba)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(width, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(height, 1);
+        if (rgba.Length != width * height * 4)
+        {
+            throw new ArgumentException(
+                "The RGBA payload does not match the stated dimensions.",
+                nameof(rgba));
+        }
+
+        return new TgaPixelBuffer(width, height, rgba);
+    }
+
     public static async Task<TgaPixelBuffer> ReadPngFileAsync(
         string path,
         CancellationToken cancellationToken = default)

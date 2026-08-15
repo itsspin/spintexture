@@ -90,6 +90,18 @@ resolution) live in `Tools\artistic-worker\worker-config.json`; hand-editing
 it past a recipe shows as **Custom** in the dropdown and is used as-is.
 Re-running setup never resets your style choice.
 
+### Full-resolution repaint (tiled)
+
+By default the diffusion pass is bounded (1152px edge) and larger textures
+are bicubically upscaled to their final size, which softens painted detail
+on 2K/4K textures. The **Full-resolution repaint** checkbox paints oversized
+textures in overlapping 1152px tiles instead — every pixel is diffusion
+detail — and blends the tiles with wide linear ramps so no tile seams show.
+The worker itself is unaware of tiling (each tile is an ordinary contract
+file), the tile grid is a pure function of the texture's size so repairs
+reproduce it exactly, and a 4K texture becomes ~25 diffusion passes: expect
+builds several times slower with it on.
+
 **Caveat:** the chosen style is part of the worker, not the pack recording.
 Keep the style unchanged between building a pack and repairing it —
 repairing individual textures under a different style would repaint them in

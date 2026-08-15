@@ -1188,8 +1188,38 @@ public sealed class NativeTextureProcessor
 
         try
         {
+            var tiledJobs = new Dictionary<int, List<(DiffusionTiler.TilePosition Position, string FileName, int TileWidth, int TileHeight)>>();
             foreach (var job in jobs.OrderBy(candidate => candidate.RequestIndex))
             {
+                if (key.WorkerKind == NeuralWorkerKind.ExternalArtistic
+                    && job.Request.Options.FullResolutionRepaint)
+                {
+                    var bordered = await TgaPixelBuffer.ReadPngFileAsync(
+                        job.NeuralInputPath,
+                        cancellationToken).ConfigureAwait(false);
+                    if (DiffusionTiler.NeedsTiling(bordered.Width, bordered.Height))
+                    {
+                        var tileWidth = Math.Min(DiffusionTiler.TileInputSize, bordered.Width);
+                        var tileHeight = Math.Min(DiffusionTiler.TileInputSize, bordered.Height);
+                        var plan = DiffusionTiler.PlanTiles(bordered.Width, bordered.Height);
+                        var tileFiles = new List<(DiffusionTiler.TilePosition, string, int, int)>(plan.Count);
+                        for (var tileIndex = 0; tileIndex < plan.Count; tileIndex++)
+                        {
+                            var position = plan[tileIndex];
+                            var tileName = $"j{job.RequestIndex:D8}t{tileIndex:D3}.png";
+                            await bordered.Crop(position.X, position.Y, tileWidth, tileHeight)
+                                .WritePngFileAsync(
+                                    Path.Combine(inputDirectory, tileName),
+                                    cancellationToken).ConfigureAwait(false);
+                            expectedNames.Add(tileName, job);
+                            tileFiles.Add((position, tileName, tileWidth, tileHeight));
+                        }
+
+                        tiledJobs.Add(job.RequestIndex, tileFiles);
+                        continue;
+                    }
+                }
+
                 var fileName = $"j{job.RequestIndex:D8}.png";
                 expectedNames.Add(fileName, job);
                 await CopyTemporaryFileAsync(
@@ -1272,11 +1302,51 @@ public sealed class NativeTextureProcessor
                     + $"Unexpected: {string.Join(", ", unexpected)}.");
             }
 
-            return new NeuralBatchInvocation(
-                groupDirectory,
-                expectedNames.ToDictionary(
-                    pair => pair.Value.RequestIndex,
-                    pair => Path.Combine(outputDirectory, pair.Key)));
+            var outputPaths = new Dictionary<int, string>();
+            foreach (var pair in expectedNames)
+            {
+                if (!tiledJobs.ContainsKey(pair.Value.RequestIndex))
+                {
+                    outputPaths[pair.Value.RequestIndex] = Path.Combine(outputDirectory, pair.Key);
+                }
+            }
+
+            // Reassemble tiled repaints: verify every painted tile is exactly
+            // its input tile at the neural scale, then blend across the
+            // overlaps. The merged file takes the single-file output's place.
+            foreach (var (requestIndex, tileFiles) in tiledJobs)
+            {
+                var job = expectedNames[tileFiles[0].FileName];
+                var painted = new List<(DiffusionTiler.TilePosition, TgaPixelBuffer)>(tileFiles.Count);
+                foreach (var (position, tileName, tileWidth, tileHeight) in tileFiles)
+                {
+                    var paintedTile = await TgaPixelBuffer.ReadPngFileAsync(
+                        Path.Combine(outputDirectory, tileName),
+                        cancellationToken).ConfigureAwait(false);
+                    if (paintedTile.Width != tileWidth * key.NeuralScale
+                        || paintedTile.Height != tileHeight * key.NeuralScale)
+                    {
+                        throw new InvalidDataException(
+                            $"Painted tile {tileName} was {paintedTile.Width}x{paintedTile.Height}; "
+                            + $"expected {tileWidth * key.NeuralScale}x{tileHeight * key.NeuralScale}.");
+                    }
+
+                    painted.Add((position, paintedTile));
+                }
+
+                var borderedWidth = checked(job.Request.Metadata.Width + (job.Request.WrapPadding * 2));
+                var borderedHeight = checked(job.Request.Metadata.Height + (job.Request.WrapPadding * 2));
+                var merged = DiffusionTiler.BlendTiles(
+                    painted,
+                    borderedWidth,
+                    borderedHeight,
+                    key.NeuralScale);
+                var mergedPath = Path.Combine(groupDirectory, $"j{requestIndex:D8}-merged.png");
+                await merged.WritePngFileAsync(mergedPath, cancellationToken).ConfigureAwait(false);
+                outputPaths[requestIndex] = mergedPath;
+            }
+
+            return new NeuralBatchInvocation(groupDirectory, outputPaths);
         }
         catch
         {

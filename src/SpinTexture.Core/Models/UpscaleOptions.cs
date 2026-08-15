@@ -62,7 +62,12 @@ public sealed record UpscaleOptions(
     double BakedDepth = 0,
     [property: System.Text.Json.Serialization.JsonIgnore(
         Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
-    double EmissiveGlow = 0)
+    double EmissiveGlow = 0,
+    // Opt-in: paint oversized textures for the diffusion worker in
+    // overlapping full-resolution tiles instead of one bounded pass.
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    bool FullResolutionRepaint = false)
 {
     /// <summary>
     /// The effective painted style: explicit settings when present, otherwise

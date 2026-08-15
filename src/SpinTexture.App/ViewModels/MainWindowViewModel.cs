@@ -48,6 +48,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private double _paintedCanvasGrain;
     private double _bakedDepth;
     private double _emissiveGlow;
+    private bool _fullResolutionRepaint;
     private ScopeOptionViewModel _selectedScopeOption;
     private string? _selectedZone;
     private int _selectedMaximumDimension = 2048;
@@ -218,6 +219,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _paintedCanvasGrain = rememberedStyle.CanvasGrain;
         _bakedDepth = Math.Clamp(rememberedPreferences.BakedDepth, 0d, 1d);
         _emissiveGlow = Math.Clamp(rememberedPreferences.EmissiveGlow, 0d, 1d);
+        _fullResolutionRepaint = rememberedPreferences.FullResolutionRepaint;
         var rememberedInstall = rememberedPreferences.LastInstallPath;
         if (!string.IsNullOrWhiteSpace(rememberedInstall)
             && Directory.Exists(rememberedInstall)
@@ -616,15 +618,29 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
+    public bool FullResolutionRepaint
+    {
+        get => _fullResolutionRepaint;
+        set
+        {
+            if (SetProperty(ref _fullResolutionRepaint, value))
+            {
+                PersistLighting();
+                UpdateOptionPreviewSelection();
+            }
+        }
+    }
+
     private void PersistLighting()
     {
         var depth = _bakedDepth;
         var glow = _emissiveGlow;
+        var fullResolution = _fullResolutionRepaint;
         _ = Task.Run(async () =>
         {
             try
             {
-                await _preferences.WriteLightingAsync(depth, glow).ConfigureAwait(false);
+                await _preferences.WriteEnhancementsAsync(depth, glow, fullResolution).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is
                 IOException or UnauthorizedAccessException or InvalidOperationException)
@@ -1048,7 +1064,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 WorldExpansions: EffectiveWorldExpansionSelection,
                 PaintedStyle: EffectivePaintedStyle,
                 BakedDepth: _bakedDepth,
-                EmissiveGlow: _emissiveGlow);
+                EmissiveGlow: _emissiveGlow,
+                FullResolutionRepaint: _fullResolutionRepaint);
 
             TexturePackBuildResult result = await _workflow.BuildAsync(
                 InstallPath,
@@ -2113,7 +2130,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             WorldExpansions: EffectiveWorldExpansionSelection,
             PaintedStyle: EffectivePaintedStyle,
             BakedDepth: _bakedDepth,
-            EmissiveGlow: _emissiveGlow);
+            EmissiveGlow: _emissiveGlow,
+            FullResolutionRepaint: _fullResolutionRepaint);
         OptionPreview.UpdateSelection(
             InstallPath,
             previewOptions,
