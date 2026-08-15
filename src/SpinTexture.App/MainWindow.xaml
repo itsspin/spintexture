@@ -930,25 +930,6 @@
                                             <TextBlock Text="DIFFUSION REPAINT (EXPERIMENTAL)" Style="{StaticResource FieldLabelStyle}" />
                                             <TextBlock Text="{Binding ArtisticWorkerStatusText}" Margin="0,6,0,0"
                                                        Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" LineHeight="17" />
-                                            <Grid Margin="0,10,0,0">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="220" />
-                                                    <ColumnDefinition Width="*" />
-                                                </Grid.ColumnDefinitions>
-                                                <StackPanel Margin="0,0,14,0">
-                                                    <TextBlock Text="MODEL QUALITY" Style="{StaticResource FieldLabelStyle}"
-                                                               ToolTip="Which diffusion model the one-click setup installs. Switch any time by picking the other tier and running setup again; your art style choice carries over." />
-                                                    <ComboBox Margin="0,6,0,0"
-                                                              ItemsSource="{Binding ArtisticModelTierOptions}"
-                                                              SelectedItem="{Binding SelectedArtisticModelTierOption}"
-                                                              DisplayMemberPath="Name"
-                                                              AutomationProperties.Name="Diffusion model quality tier" />
-                                                </StackPanel>
-                                                <TextBlock Grid.Column="1" VerticalAlignment="Center"
-                                                           Text="{Binding SelectedArtisticModelTierOption.Description}"
-                                                           Style="{StaticResource CaptionStyle}"
-                                                           TextWrapping="Wrap" LineHeight="17" />
-                                            </Grid>
                                             <Grid Margin="0,10,0,0"
                                                   Visibility="{Binding IsArtisticWorkerInstalled, Converter={StaticResource BooleanToVisibilityConverter}}">
                                                 <Grid.ColumnDefinitions>
@@ -978,7 +959,7 @@
                                                 <TextBlock Text="Full-resolution repaint (tiled — maximum detail, much slower)" TextWrapping="Wrap" />
                                             </CheckBox>
                                             <WrapPanel Margin="0,9,0,0">
-                                                <Button Content="{Binding SetupArtisticWorkerButtonText}"
+                                                <Button Content="Set Up Diffusion Repaint (~2.9 GB)"
                                                         Command="{Binding SetupArtisticWorkerCommand}"
                                                         Background="#231A33" BorderBrush="#4E3A6A" Padding="10,4"
                                                         AutomationProperties.Name="Set up diffusion repaint worker" />

@@ -120,13 +120,6 @@ public sealed record ArtisticStyleOptionViewModel(
     public override string ToString() => Name;
 }
 
-public sealed record ArtisticModelTierOptionViewModel(
-    string Key,
-    string Name,
-    string Description)
-{
-    public override string ToString() => Name;
-}
 
 public sealed record LogEntryViewModel(
     string Timestamp,

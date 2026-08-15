@@ -23,7 +23,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private string _artisticWorkerStatusText = string.Empty;
     private bool _isArtisticWorkerInstalled;
     private ArtisticStyleOptionViewModel? _selectedArtisticStyleOption;
-    private ArtisticModelTierOptionViewModel _selectedArtisticModelTierOption;
     private bool _suppressArtisticStyleApply;
     private readonly IEnhancedLauncherService _enhancedLauncher;
     private readonly AppPreferencesStore _preferences;
@@ -252,18 +251,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             _ => !IsBusy && IsClientSignaturePresent);
         RestoreCommand = new AsyncRelayCommand(RestoreAsync, CanRestore);
         CancelCommand = new RelayCommand(_ => Cancel(), _ => IsBusy);
-        ArtisticModelTierOptions =
-        [
-            new ArtisticModelTierOptionViewModel(
-                ArtisticWorkerSetupService.ModelTierStandard,
-                "Standard — SD 1.5 + ControlNet (recommended)",
-                "The best-performing tier in practice: ControlNet Tile pins every line in place so the repaint can push harder, and the compact model reloads quickly for each texture. ~2.9 GB download."),
-            new ArtisticModelTierOptionViewModel(
-                ArtisticWorkerSetupService.ModelTierUltra,
-                "Ultra — SDXL Turbo (experimental)",
-                "A much larger model (~7.3 GB) that reloads for every texture, so builds run far slower and the GPU idles while it loads. No ControlNet exists for SDXL here, so the repaint must also stay more conservative. Try it only out of curiosity.")
-        ];
-        _selectedArtisticModelTierOption = ArtisticModelTierOptions[0];
         SetupArtisticWorkerCommand = new AsyncRelayCommand(
             SetupArtisticWorkerAsync,
             () => !IsBusy);
@@ -2200,23 +2187,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _isArtisticWorkerInstalled, value);
     }
 
-    public IReadOnlyList<ArtisticModelTierOptionViewModel> ArtisticModelTierOptions { get; }
-
-    public ArtisticModelTierOptionViewModel SelectedArtisticModelTierOption
-    {
-        get => _selectedArtisticModelTierOption;
-        set
-        {
-            if (value is not null && SetProperty(ref _selectedArtisticModelTierOption, value))
-            {
-                OnPropertyChanged(nameof(SetupArtisticWorkerButtonText));
-            }
-        }
-    }
-
-    public string SetupArtisticWorkerButtonText =>
-        $"Set Up Diffusion Repaint (~{ArtisticWorkerSetupService.GetTotalDownloadBytes(_selectedArtisticModelTierOption.Key) / (1024.0 * 1024 * 1024):0.#} GB)";
-
     public ArtisticStyleOptionViewModel? SelectedArtisticStyleOption
     {
         get => _selectedArtisticStyleOption;
@@ -2253,32 +2223,18 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         var status = _artisticWorkerSetup.GetStatus();
         IsArtisticWorkerInstalled = status.IsInstalled;
-        if (status.IsInstalled
-            && status.ModelTier is { } installedTier
-            && ArtisticModelTierOptions.FirstOrDefault(option =>
-                    string.Equals(option.Key, installedTier, StringComparison.OrdinalIgnoreCase))
-                is { } installedOption
-            && !ReferenceEquals(_selectedArtisticModelTierOption, installedOption))
-        {
-            _selectedArtisticModelTierOption = installedOption;
-            OnPropertyChanged(nameof(SelectedArtisticModelTierOption));
-            OnPropertyChanged(nameof(SetupArtisticWorkerButtonText));
-        }
-
-        var installedTierName = ArtisticModelTierOptions.FirstOrDefault(option =>
-                string.Equals(option.Key, status.ModelTier, StringComparison.OrdinalIgnoreCase))?.Name
-            ?? "Standard";
         ArtisticWorkerStatusText = status switch
         {
             { IsInstalled: false } =>
-                "Not installed. One click downloads a pinned, SHA-256-verified toolchain: the stable-diffusion.cpp "
-                + "Vulkan runtime (AMD, NVIDIA, and Intel GPUs) plus the models for the quality tier you pick below. "
-                + "The worker is verified on this PC before it is enabled.",
+                "Not installed. One click downloads a pinned, SHA-256-verified toolchain (~2.9 GB): the "
+                + "stable-diffusion.cpp Vulkan runtime (AMD, NVIDIA, and Intel GPUs), the DreamShaper 8 painterly "
+                + "model, and ControlNet Tile, which locks every structural line in place while surfaces are "
+                + "repainted. The worker is verified on this PC before it is enabled.",
             { IsEnabled: true } =>
-                $"Installed and verified ({installedTierName}). Graphic Painted builds repaint each texture with the diffusion worker using the "
+                "Installed and verified. Graphic Painted builds repaint each texture with the diffusion worker using the "
                 + "art style below; the style sliders do not apply. The painted theme still runs on top \u2014 choose "
                 + "Classic painted to see the art style with no extra color treatment. Builds take several times longer \u2014 try one zone first. "
-                + "To switch model quality, pick the other tier and run setup again.",
+                + "After updating SpinTexture, run setup again once to refresh the worker recipe.",
             var disabled =>
                 $"Installed but disabled: {disabled.DisabledReason} Run setup again to retry verification."
         };
@@ -2345,11 +2301,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task SetupArtisticWorkerAsync(CancellationToken cancellationToken)
     {
-        var modelTier = _selectedArtisticModelTierOption.Key;
-        var tierComponents = ArtisticWorkerSetupService.GetComponents(modelTier);
         if (!_dialogs.ConfirmArtisticWorkerSetup(
-            ArtisticWorkerSetupService.GetTotalDownloadBytes(modelTier),
-            tierComponents.Select(component => $"{component.Name} ({component.License} license)").ToArray()))
+            ArtisticWorkerSetupService.TotalDownloadBytes,
+            ArtisticWorkerSetupService.Components
+                .Select(component => $"{component.Name} ({component.License} license)")
+                .ToArray()))
         {
             return;
         }
@@ -2380,7 +2336,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 StatusText = update.Message;
             });
             await _artisticWorkerSetup.SetupAsync(
-                    modelTier,
                     tools.RealEsrganPath!,
                     tools.RealEsrganModelsPath!,
                     progress,

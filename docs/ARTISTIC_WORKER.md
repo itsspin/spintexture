@@ -58,31 +58,30 @@ only enumerates `*.png` can safely ignore it.
 
 ## One-click setup (recommended)
 
-The **Set Up Diffusion Repaint** button in the Graphic Painted panel
-installs everything automatically: the stable-diffusion.cpp **Vulkan**
-runtime (AMD, NVIDIA, and Intel GPUs — no CUDA, no Python) plus the models
-for the **Model quality** tier you pick:
+The **Set Up Diffusion Repaint (~2.9 GB)** button in the Graphic Painted
+panel installs everything automatically: the stable-diffusion.cpp **Vulkan**
+runtime (AMD, NVIDIA, and Intel GPUs — no CUDA, no Python), the
+DreamShaper 8 painterly checkpoint, and ControlNet v1.1 Tile.
 
-- **Standard — SD 1.5 + ControlNet (recommended, ~2.9 GB)**: DreamShaper 8
-  with ControlNet v1.1 Tile. The best-performing tier in practice: the
-  structural lock lets the repaint push harder, and the compact model
-  reloads quickly for each texture.
-- **Ultra — SDXL Turbo (experimental, ~7.3 GB)**: DreamShaper XL Turbo v2.1
-  with the fp16-fix SDXL VAE. Be aware of the architecture cost: the worker
-  launches one process per texture, and each launch reloads the ~7 GB model
-  into GPU memory — the GPU idles during every load, so real-world builds
-  run several times slower than Standard. stable-diffusion.cpp also has no
-  SDXL ControlNet, so the repaint must stay more conservative.
+The recipe is tuned hard for quality: ControlNet Tile pins every structural
+line — masonry, trim, signage, UV seams — in place, which is exactly what
+lets the repaint push an aggressive denoise for genuinely transformed,
+hand-painted surfaces without the layout drifting. Sampling runs DPM++ 2M
+on the Karras schedule at 28 steps with clip-skip 2 (the settings the
+checkpoint was tuned for), and every texture also carries its material and
+zone art direction: plate armor is prompted toward brilliant polished metal
+with gleaming specular highlights, chain toward glinting rings, cloth
+toward rich dyed folds, and each reviewed zone contributes its own
+signature palette so a whole zone reads as one deliberate piece.
 
-Switch tiers any time by picking the other tier and running setup again —
-already-verified components are kept, your art style carries over (re-mapped
-to settings tuned for the new model), and a hand-edited custom config is
-reset to the default recipe because its values were tuned for the other
-model. Every download is pinned to an exact size and SHA-256 and refused on
-any mismatch; an interrupted setup resumes safely when re-run. After
-download, SpinTexture generates the worker scripts and verifies them on your
-PC by repainting a test image twice — checking exact 4x output and
-byte-identical determinism — before the worker is enabled.
+Every download is pinned to an exact size and SHA-256 and refused on any
+mismatch; an interrupted setup resumes safely when re-run. After download,
+SpinTexture generates the worker scripts and verifies them on your PC by
+repainting a test image twice — checking exact 4x output and byte-identical
+determinism — before the worker is enabled. **After updating SpinTexture,
+run setup again once** — models are already cached, so it only refreshes
+the worker recipe (configs from older recipes migrate automatically,
+keeping your style choice and seed).
 
 ### Art styles
 
