@@ -25,7 +25,8 @@ internal static class LegacyIndexedBmp
         ReadOnlySpan<byte> source,
         int width,
         int height,
-        ReadOnlySpan<byte> rgba)
+        ReadOnlySpan<byte> rgba,
+        byte? forcedKeyIndex = null)
     {
         if (!CanEncode(source) || !TryReadLayout(source, out var layout))
         {
@@ -59,7 +60,13 @@ internal static class LegacyIndexedBmp
             layout.TopDown ? -height : height);
         BinaryPrimitives.WriteUInt32LittleEndian(output.AsSpan(34, 4), checked((uint)imageBytes));
 
-        var keyedIndex = FindLikelyKeyedIndex(source, layout);
+        // A caller that knows the renderer's contract (a WLD material flagged
+        // palette-masked) dictates the key outright; the statistical border
+        // heuristic only serves textures with no authoritative source, and it
+        // can fail on layouts whose art touches the border.
+        var keyedIndex = forcedKeyIndex is { } forced && forced < layout.ColorCount
+            ? forced
+            : FindLikelyKeyedIndex(source, layout);
         var paletteLookup = BuildPaletteLookup(source, layout, keyedIndex);
         for (var y = 0; y < height; y++)
         {
@@ -85,6 +92,47 @@ internal static class LegacyIndexedBmp
         }
 
         return output;
+    }
+
+    /// <summary>
+    /// Checks that an enhanced 8-bit BMP keeps the source's keyed-index mask:
+    /// every output pixel is keyed exactly when its nearest source pixel is.
+    /// Used to detect earlier enhancements that lost color-key transparency
+    /// (they re-encoded keyed backgrounds as opaque near-colors) so a repair
+    /// treats them as cache misses instead of carrying them forward.
+    /// </summary>
+    public static bool KeyMaskPreserved(
+        ReadOnlySpan<byte> source,
+        ReadOnlySpan<byte> enhanced,
+        byte keyIndex = 0)
+    {
+        if (!TryReadLayout(source, out var sourceLayout)
+            || !TryReadLayout(enhanced, out var enhancedLayout)
+            || keyIndex >= sourceLayout.ColorCount)
+        {
+            return false;
+        }
+
+        for (var y = 0; y < enhancedLayout.Height; y++)
+        {
+            var enhancedRow = GetSourceRowOffset(enhancedLayout, y);
+            for (var x = 0; x < enhancedLayout.Width; x++)
+            {
+                var sourceIndex = ReadSourceIndexNearest(
+                    source,
+                    sourceLayout,
+                    x,
+                    y,
+                    enhancedLayout.Width,
+                    enhancedLayout.Height);
+                if ((enhanced[enhancedRow + x] == keyIndex) != (sourceIndex == keyIndex))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     private static byte[] BuildPaletteLookup(

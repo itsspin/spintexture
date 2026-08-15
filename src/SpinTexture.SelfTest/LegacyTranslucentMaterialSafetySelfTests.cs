@@ -56,6 +56,28 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
             LegacyTranslucentMaterialSafetyPolicy
                 .FindProtectedTextureNames(sentinelTerminated).Count,
             "real-client WLD end sentinel is accepted");
+
+        // Masked (palette color-key) materials are a separate contract: they
+        // are enhanced with an enforced key, not preserved as originals.
+        AssertEqual(
+            0,
+            LegacyTranslucentMaterialSafetyPolicy.FindMaskedTextureNames(payload).Count,
+            "blended materials are not reported as masked");
+        var maskedPayload = CreateLegacyWld(["blade.bmp"], materialParameters: 0x80000013);
+        AssertTrue(
+            LegacyTranslucentMaterialSafetyPolicy.FindMaskedTextureNames(maskedPayload)
+                .Contains("blade.bmp"),
+            "masked materials report their bitmaps for color-key enforcement");
+        AssertEqual(
+            0,
+            LegacyTranslucentMaterialSafetyPolicy.FindProtectedTextureNames(maskedPayload).Count,
+            "masked-only materials are not preserved as translucent originals");
+        var maskedBlended = CreateLegacyWld(["glasspane.bmp"], materialParameters: 0x80000017);
+        AssertTrue(
+            LegacyTranslucentMaterialSafetyPolicy.FindProtectedTextureNames(maskedBlended)
+                .Contains("glasspane.bmp")
+            && LegacyTranslucentMaterialSafetyPolicy.FindMaskedTextureNames(maskedBlended).Count == 0,
+            "masked-and-blended materials stay under whole-original preservation");
     }
 
     private static async Task TestPfsRepairRestoresWaterAndCarriesUnrelatedTextureAsync(
@@ -264,7 +286,9 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
         }
     }
 
-    private static byte[] CreateLegacyWld(IReadOnlyList<string> textureNames)
+    private static byte[] CreateLegacyWld(
+        IReadOnlyList<string> textureNames,
+        uint materialParameters = 0x80000007)
     {
         var fragments = new List<(uint Type, byte[] Data)>();
         foreach (var textureName in textureNames)
@@ -292,7 +316,7 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
 
         var material = new byte[32];
         BinaryPrimitives.WriteUInt32LittleEndian(material.AsSpan(0, 4), 2);
-        BinaryPrimitives.WriteUInt32LittleEndian(material.AsSpan(4, 4), 0x80000007);
+        BinaryPrimitives.WriteUInt32LittleEndian(material.AsSpan(4, 4), materialParameters);
         BinaryPrimitives.WriteUInt32LittleEndian(material.AsSpan(8, 4), 0x00010101);
         BinaryPrimitives.WriteUInt32LittleEndian(material.AsSpan(16, 4), 0x3F800000);
         BinaryPrimitives.WriteUInt32LittleEndian(

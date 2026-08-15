@@ -175,6 +175,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         var pendingTextures = new List<PendingTexture>();
         var protectedLegacyTranslucentTextures = new HashSet<string>(
             StringComparer.OrdinalIgnoreCase);
+        var maskedColorKeyTextures = new HashSet<string>(
+            StringComparer.OrdinalIgnoreCase);
         foreach (var wldEntry in source.Entries.Where(entry =>
                      entry.Name.EndsWith(".wld", StringComparison.OrdinalIgnoreCase)))
         {
@@ -182,6 +184,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                 .ConfigureAwait(false);
             protectedLegacyTranslucentTextures.UnionWith(
                 LegacyTranslucentMaterialSafetyPolicy.FindProtectedTextureNames(wldPayload));
+            maskedColorKeyTextures.UnionWith(
+                LegacyTranslucentMaterialSafetyPolicy.FindMaskedTextureNames(wldPayload));
         }
         var textureEntries = source.Entries
             .Where(entry => entry.IsTexture
@@ -478,6 +482,9 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                             metadata,
                             classification,
                             cancellationToken).ConfigureAwait(false);
+                        var isMaskedColorKeyBmp = maskedColorKeyTextures.Contains(entry.Name)
+                            && metadata.FileFormat == TextureFileFormat.Bmp
+                            && metadata.BitsPerPixel == 8;
                         try
                         {
                             var reusedMetadata = await sniffer.ReadFileAsync(
@@ -498,6 +505,28 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                                 metadata,
                                 expectedDimensions,
                                 expectedMipCount);
+                            if (isMaskedColorKeyBmp)
+                            {
+                                // Prior releases could lose the palette color
+                                // key on masked-material bitmaps (opaque boxes
+                                // around blades and cutouts). Treat such a
+                                // reused output as a targeted cache miss so it
+                                // regenerates with the keyed encoder.
+                                sourcePayload ??= await File.ReadAllBytesAsync(
+                                        sourceTexturePath,
+                                        cancellationToken)
+                                    .ConfigureAwait(false);
+                                var reusedPayload = await File.ReadAllBytesAsync(
+                                        reusedTexturePath,
+                                        cancellationToken)
+                                    .ConfigureAwait(false);
+                                if (!LegacyIndexedBmp.KeyMaskPreserved(sourcePayload, reusedPayload))
+                                {
+                                    throw new InvalidDataException(
+                                        $"{entry.Name} lost its palette color-key mask in a prior enhancement; the masked texture will be regenerated.");
+                                }
+                            }
+
                             if (!rebuildFromReuseArchive)
                             {
                                 replacements.Add(PfsArchiveReplacement.FromFile(
@@ -529,14 +558,16 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                             // explicitly restored from the original instead of
                             // being carried forward or entering the AI path.
                             TryDeleteTemporaryFile(reusedTexturePath);
-                            if (requireRequestedVisualProfile && !useCutoutMipFloor)
+                            if (requireRequestedVisualProfile
+                                && !useCutoutMipFloor
+                                && !isMaskedColorKeyBmp)
                             {
                                 throw new InvalidDataException(
                                     $"Repair stopped because the prior painted output for {entry.Name} no longer passes current validation. Rebuilding the complete painted pack is required; SpinTexture will not replace it with original or differently styled pixels.",
                                     exception);
                             }
 
-                            if (rebuildFromReuseArchive && !useCutoutMipFloor)
+                            if (rebuildFromReuseArchive && !useCutoutMipFloor && !isMaskedColorKeyBmp)
                             {
                                 replacements.Add(PfsArchiveReplacement.FromFile(
                                     entry.Name,
@@ -613,7 +644,10 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                             entry.Name,
                             classification,
                             clampArchiveNames.Contains(
-                                Path.GetFileName(context.RelativeInstallPath))))));
+                                Path.GetFileName(context.RelativeInstallPath))),
+                        HasMaskedColorKey: maskedColorKeyTextures.Contains(entry.Name)
+                            && metadata.FileFormat == TextureFileFormat.Bmp
+                            && metadata.BitsPerPixel == 8)));
             }
 
             await ProcessPendingTexturesAsync(

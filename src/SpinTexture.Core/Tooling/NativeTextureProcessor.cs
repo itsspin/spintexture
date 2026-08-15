@@ -13,7 +13,11 @@ public sealed record NativeTextureProcessRequest(
     UpscaleOptions Options,
     int WrapPadding = 32,
     int RealEsrganTileSize = 0,
-    bool WrapEdges = true);
+    bool WrapEdges = true,
+    // Set when a WLD material renders this texture with palette-masked
+    // transparency: the keyed palette index (zero) must survive re-encoding
+    // exactly or the client draws transparent regions as opaque color.
+    bool HasMaskedColorKey = false);
 
 public sealed record NativeTextureProcessResult(
     string DestinationPath,
@@ -2580,7 +2584,8 @@ public sealed class NativeTextureProcessor
                 sourceBytes,
                 enhanced.Width,
                 enhanced.Height,
-                enhanced.RgbaPixels.Span);
+                enhanced.RgbaPixels.Span,
+                request.HasMaskedColorKey ? (byte?)0 : null);
             await File.WriteAllBytesAsync(
                 request.DestinationPath,
                 indexedBytes,
