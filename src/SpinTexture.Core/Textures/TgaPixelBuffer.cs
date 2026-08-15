@@ -38,6 +38,20 @@ public sealed class TgaPixelBuffer
     public int Height { get; }
     internal ReadOnlyMemory<byte> RgbaPixels => _rgba;
 
+    internal static TgaPixelBuffer FromRgba(int width, int height, byte[] rgba)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(width, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(height, 1);
+        if (rgba.Length != width * height * 4)
+        {
+            throw new ArgumentException(
+                "The RGBA payload does not match the stated dimensions.",
+                nameof(rgba));
+        }
+
+        return new TgaPixelBuffer(width, height, rgba);
+    }
+
     public static async Task<TgaPixelBuffer> ReadPngFileAsync(
         string path,
         CancellationToken cancellationToken = default)
@@ -529,6 +543,23 @@ public sealed class TgaPixelBuffer
                 wrapEdges,
                 neuralScale,
                 style ?? PaintedStyleSettings.Default));
+    }
+
+    /// <summary>
+    /// Bakes optional cavity/ambient-occlusion shading and emissive glow into
+    /// the diffuse color (the classic renderer cannot add them at draw time).
+    /// Deterministic, hue-preserving within hard gain bounds, tile-safe when
+    /// <paramref name="wrapEdges"/> is set, and alpha is untouched.
+    /// </summary>
+    public TgaPixelBuffer ApplyLightingBake(
+        double bakedDepth,
+        double emissiveGlow,
+        bool wrapEdges)
+    {
+        return new TgaPixelBuffer(
+            Width,
+            Height,
+            LightingBaker.Bake(_rgba, Width, Height, bakedDepth, emissiveGlow, wrapEdges));
     }
 
     /// <summary>

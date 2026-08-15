@@ -21,11 +21,13 @@ public sealed record ArtisticWorkerSetupStatus(
     bool IsInstalled,
     bool IsEnabled,
     string WorkerDirectory,
-    string? DisabledReason);
+    string? DisabledReason,
+    string? ModelTier = null);
 
 public sealed record ArtisticWorkerConfig(
     int SchemaVersion,
     string Preset,
+    string ModelTier,
     string Prompt,
     string NegativePrompt,
     double DenoiseStrength,
@@ -52,17 +54,35 @@ public sealed record ArtisticStylePreset(
 {
     public const string CustomKey = "custom";
 
-    public ArtisticWorkerConfig ToConfig() => new(
-        SchemaVersion: 1,
-        Preset: Key,
-        Prompt: Prompt,
-        NegativePrompt: NegativePrompt,
-        DenoiseStrength: DenoiseStrength,
-        ControlStrength: ControlStrength,
-        CfgScale: CfgScale,
-        Steps: 18,
-        Seed: 90210,
-        MaximumDiffusionEdge: 1152);
+    /// <summary>
+    /// Maps the recipe to concrete worker settings for a model tier. The
+    /// Ultra (SDXL Turbo) tier has no ControlNet in stable-diffusion.cpp, so
+    /// layout is held by a slightly lower denoise instead, and Turbo models
+    /// want few steps at low guidance — which also keeps the much larger
+    /// model's build time comparable to the Standard tier.
+    /// </summary>
+    public ArtisticWorkerConfig ToConfig(
+        string modelTier = ArtisticWorkerSetupService.ModelTierStandard)
+    {
+        var isUltra = string.Equals(
+            modelTier,
+            ArtisticWorkerSetupService.ModelTierUltra,
+            StringComparison.OrdinalIgnoreCase);
+        return new(
+            SchemaVersion: 1,
+            Preset: Key,
+            ModelTier: isUltra
+                ? ArtisticWorkerSetupService.ModelTierUltra
+                : ArtisticWorkerSetupService.ModelTierStandard,
+            Prompt: Prompt,
+            NegativePrompt: NegativePrompt,
+            DenoiseStrength: isUltra ? Math.Round(DenoiseStrength * 0.85, 3) : DenoiseStrength,
+            ControlStrength: ControlStrength,
+            CfgScale: isUltra ? Math.Round(Math.Clamp(CfgScale / 2.5, 2.0, 2.6), 2) : CfgScale,
+            Steps: isUltra ? 8 : 18,
+            Seed: 90210,
+            MaximumDiffusionEdge: 1152);
+    }
 }
 
 /// <summary>
@@ -79,6 +99,12 @@ public sealed class ArtisticWorkerSetupService
 {
     public const string WorkerDirectoryName = "artistic-worker";
     public const long RequiredFreeBytes = 8L * 1024 * 1024 * 1024;
+
+    /// <summary>SD 1.5 + ControlNet Tile: smaller download, hard layout lock.</summary>
+    public const string ModelTierStandard = "sd15";
+
+    /// <summary>SDXL Turbo: richest painted detail; needs a roomier GPU.</summary>
+    public const string ModelTierUltra = "sdxl";
 
     // Every component is pinned by exact size and SHA-256. The installer
     // refuses bytes that do not match; there is no "latest" channel.
@@ -107,10 +133,54 @@ public sealed class ArtisticWorkerSetupService
             722_601_104,
             "2f31868eedb243a77932e3c63907a6ba0a2058b6d65b5c27b89ee1b7f618ea33",
             "OpenRAIL",
+            IsZipArchive: false),
+        new(
+            "DreamShaper XL Turbo v2.1 checkpoint",
+            "https://huggingface.co/Lykon/dreamshaper-xl-v2-turbo/resolve/main/DreamShaperXL_Turbo_v2_1.safetensors",
+            "DreamShaperXL_Turbo_v2_1.safetensors",
+            6_939_220_250,
+            "4496b36d48bfd7cfe4e5dbce3485db567bcefa2bef7238d290dbd45612125083",
+            "CreativeML OpenRAIL++-M",
+            IsZipArchive: false),
+        new(
+            "SDXL VAE (fp16 fix)",
+            "https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors",
+            "sdxl_vae.safetensors",
+            334_641_162,
+            "235745af8d86bf4a4c1b5b4f529868b37019a10f7c0b2e79ad0abca3a22bc6e1",
+            "MIT",
             IsZipArchive: false)
     ];
 
-    public static long TotalDownloadBytes => Components.Sum(component => component.SizeBytes);
+    private static readonly string[] StandardTierFiles =
+    [
+        "DreamShaper_8_pruned.safetensors",
+        "control_v11f1e_sd15_tile_fp16.safetensors"
+    ];
+
+    private static readonly string[] UltraTierFiles =
+    [
+        "DreamShaperXL_Turbo_v2_1.safetensors",
+        "sdxl_vae.safetensors"
+    ];
+
+    /// <summary>The runtime plus the models the given tier actually loads.</summary>
+    public static IReadOnlyList<ArtisticWorkerComponent> GetComponents(string modelTier)
+    {
+        var tierFiles = IsUltra(modelTier) ? UltraTierFiles : StandardTierFiles;
+        return Components
+            .Where(component => component.IsZipArchive
+                || tierFiles.Contains(component.FileName, StringComparer.OrdinalIgnoreCase))
+            .ToArray();
+    }
+
+    public static long GetTotalDownloadBytes(string modelTier) =>
+        GetComponents(modelTier).Sum(component => component.SizeBytes);
+
+    private static bool IsUltra(string modelTier) => string.Equals(
+        modelTier,
+        ModelTierUltra,
+        StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Curated art directions for the diffusion repaint. Higher denoise means
@@ -184,7 +254,12 @@ public sealed class ArtisticWorkerSetupService
         var disabledScript = workerScript + ".disabled";
         if (File.Exists(workerScript))
         {
-            return new ArtisticWorkerSetupStatus(true, true, WorkerDirectory, null);
+            return new ArtisticWorkerSetupStatus(
+                true,
+                true,
+                WorkerDirectory,
+                null,
+                TryReadConfig()?.ModelTier ?? ModelTierStandard);
         }
 
         if (File.Exists(disabledScript))
@@ -193,7 +268,8 @@ public sealed class ArtisticWorkerSetupService
                 true,
                 false,
                 WorkerDirectory,
-                "The install-time verification did not pass on this PC; the worker is present but disabled.");
+                "The install-time verification did not pass on this PC; the worker is present but disabled.",
+                TryReadConfig()?.ModelTier ?? ModelTierStandard);
         }
 
         return new ArtisticWorkerSetupStatus(false, false, WorkerDirectory, null);
@@ -205,11 +281,13 @@ public sealed class ArtisticWorkerSetupService
     /// match their pinned hash are skipped.
     /// </summary>
     public async Task SetupAsync(
+        string modelTier,
         string realEsrganPath,
         string realEsrganModelsPath,
         IProgress<ProgressUpdate>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelTier);
         ArgumentException.ThrowIfNullOrWhiteSpace(realEsrganPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(realEsrganModelsPath);
         Directory.CreateDirectory(WorkerDirectory);
@@ -227,14 +305,15 @@ public sealed class ArtisticWorkerSetupService
 
         var modelsDirectory = Path.Combine(WorkerDirectory, "models");
         Directory.CreateDirectory(modelsDirectory);
-        for (var index = 0; index < Components.Count; index++)
+        var components = GetComponents(modelTier);
+        for (var index = 0; index < components.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var component = Components[index];
+            var component = components[index];
             var destination = component.IsZipArchive
                 ? Path.Combine(WorkerDirectory, component.FileName)
                 : Path.Combine(modelsDirectory, component.FileName);
-            await DownloadComponentAsync(component, destination, index, progress, cancellationToken)
+            await DownloadComponentAsync(component, destination, index, components.Count, progress, cancellationToken)
                 .ConfigureAwait(false);
             if (component.IsZipArchive)
             {
@@ -242,12 +321,12 @@ public sealed class ArtisticWorkerSetupService
             }
         }
 
-        WriteWorkerScripts(realEsrganPath, realEsrganModelsPath);
+        WriteWorkerScripts(modelTier, realEsrganPath, realEsrganModelsPath);
         progress?.Report(new ProgressUpdate(
             "Artistic worker",
             "All components verified; worker scripts generated.",
-            Components.Count,
-            Components.Count,
+            components.Count,
+            components.Count,
             "setup"));
     }
 
@@ -363,6 +442,7 @@ public sealed class ArtisticWorkerSetupService
         ArtisticWorkerComponent component,
         string destination,
         int componentIndex,
+        int componentCount,
         IProgress<ProgressUpdate>? progress,
         CancellationToken cancellationToken)
     {
@@ -377,7 +457,7 @@ public sealed class ArtisticWorkerSetupService
                 "Artistic worker",
                 $"{component.Name} is already downloaded and verified.",
                 componentIndex + 1,
-                Components.Count,
+                componentCount,
                 component.FileName));
             return;
         }
@@ -424,7 +504,7 @@ public sealed class ArtisticWorkerSetupService
                         "Artistic worker",
                         $"Downloading {component.Name}: {downloaded / (1024.0 * 1024):N0} / {component.SizeBytes / (1024.0 * 1024):N0} MB",
                         componentIndex,
-                        Components.Count,
+                        componentCount,
                         component.FileName));
                 }
             }
@@ -512,7 +592,12 @@ public sealed class ArtisticWorkerSetupService
             return ArtisticStylePreset.CustomKey;
         }
 
-        var expected = declared.ToConfig() with { Seed = config.Seed, Steps = config.Steps, MaximumDiffusionEdge = config.MaximumDiffusionEdge };
+        var expected = declared.ToConfig(config.ModelTier) with
+        {
+            Seed = config.Seed,
+            Steps = config.Steps,
+            MaximumDiffusionEdge = config.MaximumDiffusionEdge
+        };
         return expected == config ? declared.Key : ArtisticStylePreset.CustomKey;
     }
 
@@ -524,7 +609,7 @@ public sealed class ArtisticWorkerSetupService
         Directory.CreateDirectory(WorkerDirectory);
         // Preserve the user's performance/determinism knobs when they exist.
         var current = TryReadConfig();
-        var config = preset.ToConfig();
+        var config = preset.ToConfig(current?.ModelTier ?? ModelTierStandard);
         if (current is not null)
         {
             config = config with
@@ -538,18 +623,42 @@ public sealed class ArtisticWorkerSetupService
         File.WriteAllText(ConfigPath, JsonSerializer.Serialize(config, ConfigJsonOptions));
     }
 
-    internal void WriteWorkerScripts(string realEsrganPath, string realEsrganModelsPath)
+    internal void WriteWorkerScripts(string modelTier, string realEsrganPath, string realEsrganModelsPath)
     {
         // The PowerShell implementation reads image sizes, orchestrates the
         // Real-ESRGAN 4x base pass and the diffusion repaint, and guarantees
         // the exact-4x output contract; the .bat is only a shim so the worker
         // matches SpinTexture's process-invocation contract. An existing
-        // config survives re-setup so style choices are never reset.
-        if (TryReadConfig() is null)
+        // config survives re-setup so style choices are never reset; when the
+        // model tier changes, the active style recipe is re-mapped for the
+        // new tier (a hand-edited custom config falls back to the default
+        // recipe, because its values were tuned for the other model).
+        var isUltra = IsUltra(modelTier);
+        var currentConfig = TryReadConfig();
+        if (currentConfig is null)
         {
             File.WriteAllText(
                 ConfigPath,
-                JsonSerializer.Serialize(StylePresets[0].ToConfig(), ConfigJsonOptions));
+                JsonSerializer.Serialize(StylePresets[0].ToConfig(modelTier), ConfigJsonOptions));
+        }
+        else if (!string.Equals(
+            currentConfig.ModelTier,
+            isUltra ? ModelTierUltra : ModelTierStandard,
+            StringComparison.OrdinalIgnoreCase))
+        {
+            var activeKey = GetActiveStylePresetKey();
+            var activePreset = StylePresets.FirstOrDefault(preset =>
+                    string.Equals(preset.Key, activeKey, StringComparison.OrdinalIgnoreCase))
+                ?? StylePresets[0];
+            File.WriteAllText(
+                ConfigPath,
+                JsonSerializer.Serialize(
+                    activePreset.ToConfig(modelTier) with
+                    {
+                        Seed = currentConfig.Seed,
+                        MaximumDiffusionEdge = currentConfig.MaximumDiffusionEdge
+                    },
+                    ConfigJsonOptions));
         }
 
         var script = new StringBuilder();
@@ -562,8 +671,16 @@ public sealed class ArtisticWorkerSetupService
         script.AppendLine("$root = Split-Path -Parent $MyInvocation.MyCommand.Path");
         script.AppendLine("$config = Get-Content (Join-Path $root 'worker-config.json') | ConvertFrom-Json");
         script.AppendLine("$sdCli = Join-Path $root 'sd\\sd-cli.exe'");
-        script.AppendLine("$model = Join-Path $root 'models\\DreamShaper_8_pruned.safetensors'");
-        script.AppendLine("$controlNet = Join-Path $root 'models\\control_v11f1e_sd15_tile_fp16.safetensors'");
+        if (isUltra)
+        {
+            script.AppendLine("$model = Join-Path $root 'models\\DreamShaperXL_Turbo_v2_1.safetensors'");
+            script.AppendLine("$sdxlVae = Join-Path $root 'models\\sdxl_vae.safetensors'");
+        }
+        else
+        {
+            script.AppendLine("$model = Join-Path $root 'models\\DreamShaper_8_pruned.safetensors'");
+            script.AppendLine("$controlNet = Join-Path $root 'models\\control_v11f1e_sd15_tile_fp16.safetensors'");
+        }
         script.AppendLine($"$realEsrgan = '{realEsrganPath.Replace("'", "''")}'");
         script.AppendLine($"$realEsrganModels = '{realEsrganModelsPath.Replace("'", "''")}'");
         script.AppendLine();
@@ -586,8 +703,22 @@ public sealed class ArtisticWorkerSetupService
         script.AppendLine();
         script.AppendLine("$work = Join-Path $root ('work-' + [Guid]::NewGuid().ToString('N'))");
         script.AppendLine("New-Item -ItemType Directory -Path $work | Out-Null");
+        script.AppendLine("# Optional per-file art direction from SpinTexture (material and zone");
+        script.AppendLine("# aware prompts, coherence-restrained denoise for fluid surfaces).");
+        script.AppendLine("$batchMeta = $null");
+        script.AppendLine("$batchMetaPath = Join-Path $i 'batch-meta.json'");
+        script.AppendLine("if (Test-Path $batchMetaPath) { $batchMeta = Get-Content $batchMetaPath -Raw | ConvertFrom-Json }");
         script.AppendLine("try {");
         script.AppendLine("  foreach ($png in Get-ChildItem -Path $i -Filter *.png) {");
+        script.AppendLine("    $prompt = [string]$config.prompt");
+        script.AppendLine("    $denoise = [double]$config.denoiseStrength");
+        script.AppendLine("    if ($batchMeta -and $batchMeta.files) {");
+        script.AppendLine("      $fileEntry = $batchMeta.files.PSObject.Properties[$png.Name]");
+        script.AppendLine("      if ($fileEntry) {");
+        script.AppendLine("        if ($fileEntry.Value.promptSuffix) { $prompt = $prompt + ', ' + [string]$fileEntry.Value.promptSuffix }");
+        script.AppendLine("        if ($fileEntry.Value.denoiseScale) { $denoise = [Math]::Max(0.2, [Math]::Min(1.0, $denoise * [double]$fileEntry.Value.denoiseScale)) }");
+        script.AppendLine("      }");
+        script.AppendLine("    }");
         script.AppendLine("    $img = [System.Drawing.Image]::FromFile($png.FullName)");
         script.AppendLine("    $w = $img.Width; $h = $img.Height; $img.Dispose()");
         script.AppendLine("    $targetW = $w * 4; $targetH = $h * 4");
@@ -603,12 +734,19 @@ public sealed class ArtisticWorkerSetupService
         script.AppendLine("    $painted = Join-Path $work ($png.BaseName + '-painted.png')");
         script.AppendLine("    $sdArguments = @(");
         script.AppendLine("      '-m', $model,");
-        script.AppendLine("      '--control-net', $controlNet,");
+        if (isUltra)
+        {
+            script.AppendLine("      '--vae', $sdxlVae,");
+        }
+        else
+        {
+            script.AppendLine("      '--control-net', $controlNet,");
+            script.AppendLine("      '--control-image', $up,");
+            script.AppendLine("      '--control-strength', ([double]$config.controlStrength).ToString($culture),");
+        }
         script.AppendLine("      '-i', $up,");
-        script.AppendLine("      '--control-image', $up,");
-        script.AppendLine("      '--strength', ([double]$config.denoiseStrength).ToString($culture),");
-        script.AppendLine("      '--control-strength', ([double]$config.controlStrength).ToString($culture),");
-        script.AppendLine("      '-p', [string]$config.prompt,");
+        script.AppendLine("      '--strength', $denoise.ToString($culture),");
+        script.AppendLine("      '-p', $prompt,");
         script.AppendLine("      '-n', [string]$config.negativePrompt,");
         script.AppendLine("      '--cfg-scale', ([double]$config.cfgScale).ToString($culture),");
         script.AppendLine("      '--steps', ([int]$config.steps).ToString($culture),");

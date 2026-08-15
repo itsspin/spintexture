@@ -48,17 +48,39 @@ Requirements:
   rebuild individual textures and must reproduce the recorded pack exactly.
 - Exit code 0 on success; any other exit code triggers the safe fallback.
 
+SpinTexture may also write a `batch-meta.json` sidecar into the input
+directory with optional per-file art direction: `promptSuffix` (material and
+zone vocabulary composed deterministically from the texture's name and its
+zone archive) and `denoiseScale` (below 1.0 for water, lava, flame, and
+other animated-surface families so consecutive animation frames stay
+coherent). The generated one-click worker honors it; a custom worker that
+only enumerates `*.png` can safely ignore it.
+
 ## One-click setup (recommended)
 
-The **Set Up Diffusion Repaint (~2.9 GB)** button in the Graphic Painted
-panel installs everything automatically: the stable-diffusion.cpp **Vulkan**
-build (AMD, NVIDIA, and Intel GPUs — no CUDA, no Python), the DreamShaper 8
-painterly checkpoint, and ControlNet v1.1 Tile. Every download is pinned to
-an exact size and SHA-256 and refused on any mismatch; an interrupted setup
-resumes safely when re-run. After download, SpinTexture generates the worker
-scripts and verifies them on your PC by repainting a test image twice —
-checking exact 4x output and byte-identical determinism — before the worker
-is enabled.
+The **Set Up Diffusion Repaint** button in the Graphic Painted panel
+installs everything automatically: the stable-diffusion.cpp **Vulkan**
+runtime (AMD, NVIDIA, and Intel GPUs — no CUDA, no Python) plus the models
+for the **Model quality** tier you pick:
+
+- **Ultra — SDXL Turbo (recommended, ~7.3 GB)**: DreamShaper XL Turbo v2.1
+  with the fp16-fix SDXL VAE. The richest painted detail; best with 12 GB+
+  of GPU memory. stable-diffusion.cpp has no SDXL ControlNet, so layout is
+  held by a conservative repaint strength (and Turbo's few steps keep build
+  time comparable to Standard despite the larger model).
+- **Standard — SD 1.5 + ControlNet (~2.9 GB)**: DreamShaper 8 with
+  ControlNet v1.1 Tile. Smaller download and the hardest structural lock —
+  the safest choice for 8 GB GPUs and text-heavy zones.
+
+Switch tiers any time by picking the other tier and running setup again —
+already-verified components are kept, your art style carries over (re-mapped
+to settings tuned for the new model), and a hand-edited custom config is
+reset to the default recipe because its values were tuned for the other
+model. Every download is pinned to an exact size and SHA-256 and refused on
+any mismatch; an interrupted setup resumes safely when re-run. After
+download, SpinTexture generates the worker scripts and verifies them on your
+PC by repainting a test image twice — checking exact 4x output and
+byte-identical determinism — before the worker is enabled.
 
 ### Art styles
 
@@ -81,6 +103,18 @@ Advanced settings (prompt, denoise strength, steps, seed, maximum diffusion
 resolution) live in `Tools\artistic-worker\worker-config.json`; hand-editing
 it past a recipe shows as **Custom** in the dropdown and is used as-is.
 Re-running setup never resets your style choice.
+
+### Full-resolution repaint (tiled)
+
+By default the diffusion pass is bounded (1152px edge) and larger textures
+are bicubically upscaled to their final size, which softens painted detail
+on 2K/4K textures. The **Full-resolution repaint** checkbox paints oversized
+textures in overlapping 1152px tiles instead — every pixel is diffusion
+detail — and blends the tiles with wide linear ramps so no tile seams show.
+The worker itself is unaware of tiling (each tile is an ordinary contract
+file), the tile grid is a pure function of the texture's size so repairs
+reproduce it exactly, and a 4K texture becomes ~25 diffusion passes: expect
+builds several times slower with it on.
 
 **Caveat:** the chosen style is part of the worker, not the pack recording.
 Keep the style unchanged between building a pack and repairing it —

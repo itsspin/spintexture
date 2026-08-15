@@ -61,12 +61,17 @@ internal static class PaintedThemeResolver
             return options with { PaintedTheme = PaintedTheme.ClassicPainted };
         }
 
+        // The zone stem rides along for every illustrated artifact so the
+        // diffusion prompt composer can flavor known zones regardless of the
+        // chosen palette theme. Non-zone archives resolve to null.
+        var zoneName = TryNormalizeZoneArchive(relativeInstallPath);
+        options = options with { ZoneArchiveStem = zoneName };
+
         if (options.PaintedTheme != PaintedTheme.ZoneAware)
         {
             return options;
         }
 
-        var zoneName = TryNormalizeZoneArchive(relativeInstallPath);
         if (zoneName is null)
         {
             return options with { PaintedTheme = PaintedTheme.ClassicPainted };

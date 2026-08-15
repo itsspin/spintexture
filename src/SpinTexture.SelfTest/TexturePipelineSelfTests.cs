@@ -98,6 +98,9 @@ public static class TexturePipelineSelfTests
             .ConfigureAwait(false);
         TestTextureModelSelection();
         TestArtisticWorkerCommand();
+        TestLightingBaker();
+        TestDiffusionTiler();
+        await TestCrispMipChainAsync(cancellationToken).ConfigureAwait(false);
         TestPresetAwareFidelityGate();
         TestPaintedFinalValidationPolicyAndCappedMetrics();
         await output.WriteLineAsync("Texture model discovery and preset fidelity-gate tests passed.").ConfigureAwait(false);
@@ -2197,6 +2200,279 @@ public static class TexturePipelineSelfTests
         AssertEqual(lava.Index, replacement.Index, "released preview indices should be reused deterministically");
     }
 
+    private static async Task TestCrispMipChainAsync(CancellationToken cancellationToken)
+    {
+        const int width = 128;
+        const int height = 64;
+        var fixtureBytes = new byte[18 + (width * height * 4)];
+        fixtureBytes[2] = 2;
+        BinaryPrimitives.WriteUInt16LittleEndian(fixtureBytes.AsSpan(12), width);
+        BinaryPrimitives.WriteUInt16LittleEndian(fixtureBytes.AsSpan(14), height);
+        fixtureBytes[16] = 32;
+        fixtureBytes[17] = 0x28;
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                var offset = 18 + (((y * width) + x) * 4);
+                fixtureBytes[offset] = (byte)((x * 5) & 0xFF);
+                fixtureBytes[offset + 1] = (byte)((y * 9) & 0xFF);
+                fixtureBytes[offset + 2] = (byte)((x ^ y) & 0xFF);
+                fixtureBytes[offset + 3] = byte.MaxValue;
+            }
+        }
+
+        var image = TgaPixelBuffer.Read(fixtureBytes);
+        var mipCount = TextureMipPolicy.Calculate(width, height, generateMipMaps: true, useCutoutFloor: false);
+        var dds = CrispMipChain.BuildPreMippedDds(image, mipCount, 0.6, wrapEdges: true);
+        Assert(
+            dds.AsSpan().SequenceEqual(CrispMipChain.BuildPreMippedDds(image, mipCount, 0.6, wrapEdges: true)),
+            "the crisp mip chain must be deterministic");
+
+        var expectedPayload = 0;
+        int levelWidth = width, levelHeight = height;
+        for (var level = 0; level < mipCount; level++)
+        {
+            expectedPayload += levelWidth * levelHeight * 4;
+            levelWidth = Math.Max(1, levelWidth >> 1);
+            levelHeight = Math.Max(1, levelHeight >> 1);
+        }
+
+        AssertEqual(
+            4 + 124 + expectedPayload,
+            dds.Length,
+            "the pre-mipped DDS must contain the full chain down to 1x1");
+
+        var ddsPath = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-crisp-{Guid.NewGuid():N}.dds");
+        try
+        {
+            await File.WriteAllBytesAsync(ddsPath, dds, cancellationToken).ConfigureAwait(false);
+            var sniffed = await new TextureHeaderSniffer().ReadFileAsync(ddsPath, cancellationToken).ConfigureAwait(false);
+            Assert(
+                sniffed is
+                {
+                    FileFormat: TextureFileFormat.Dds,
+                    Width: width,
+                    Height: height,
+                    BitsPerPixel: 32,
+                    IsCompressed: false
+                }
+                && sniffed.MipCount == mipCount,
+                "SpinTexture's own header sniffer must accept the generated pre-mipped DDS");
+        }
+        finally
+        {
+            File.Delete(ddsPath);
+        }
+
+        // The top level must be byte-exact source data — only the distance
+        // mips are re-sharpened. TGA pixel bytes are already B,G,R,A, the
+        // same memory order the A8R8G8B8 DDS uses.
+        for (var pixel = 0; pixel < width * height; pixel++)
+        {
+            var source = 18 + (pixel * 4);
+            var packed = 128 + (pixel * 4);
+            for (var channel = 0; channel < 4; channel++)
+            {
+                Assert(
+                    dds[packed + channel] == fixtureBytes[source + channel],
+                    "the top mip level must be byte-exact");
+            }
+        }
+
+        // Gate: crisp mips serve only opaque power-of-two DDS color textures.
+        var opaqueMetadata = new TextureMetadata(
+            TextureFileFormat.Dds, "BC1_UNORM", 256, 256, 9, 4, TextureAlphaStatus.None,
+            true, true, false, false, 1, "BC1_UNORM");
+        var colorClassification = new TextureClassification(
+            TextureKind.Color, ClassificationConfidence.High, true, false, false, []);
+        var crispOptions = UpscaleOptions.Recommended with { MipSharpen = 0.5 };
+        var request = new NativeTextureProcessRequest(
+            "wall.dds", "out.dds", "work", opaqueMetadata, colorClassification, crispOptions);
+        var dimensions = new UpscaleDimensions(256, 256, 1024, 1024, 4);
+        Assert(
+            NativeTextureProcessor.ShouldUseCrispMips(request, 11, false, "merged.tga", dimensions),
+            "opaque power-of-two DDS color textures qualify for crisp mips");
+        Assert(
+            !NativeTextureProcessor.ShouldUseCrispMips(
+                request with { Options = crispOptions with { MipSharpen = 0 } }, 11, false, "merged.tga", dimensions)
+            && !NativeTextureProcessor.ShouldUseCrispMips(
+                request with { Options = crispOptions with { Preset = TexturePreset.Faithful } }, 11, false, "merged.tga", dimensions)
+            && !NativeTextureProcessor.ShouldUseCrispMips(
+                request with { Metadata = opaqueMetadata with { AlphaStatus = TextureAlphaStatus.Explicit } }, 11, false, "merged.tga", dimensions)
+            && !NativeTextureProcessor.ShouldUseCrispMips(
+                request with { Classification = colorClassification with { Kind = TextureKind.Normal } }, 11, false, "merged.tga", dimensions)
+            && !NativeTextureProcessor.ShouldUseCrispMips(request, 1, false, "merged.tga", dimensions)
+            && !NativeTextureProcessor.ShouldUseCrispMips(request, 11, false, "wall.dds", dimensions)
+            && !NativeTextureProcessor.ShouldUseCrispMips(
+                request, 11, false, "merged.tga", new UpscaleDimensions(256, 256, 1000, 1024, 4)),
+            "cutouts, normals, faithful, single-mip, non-TGA staging, and non-power-of-two stay on the standard path");
+    }
+
+    private static void TestDiffusionTiler()
+    {
+        // Axis plans cover every pixel with fixed-size tiles and end exactly
+        // at the edge; single-tile axes stay untouched.
+        var axis = DiffusionTiler.PlanAxis(576);
+        Assert(
+            axis.SequenceEqual([0, 256, 288])
+            && axis.All(position => position + DiffusionTiler.TileInputSize <= 576),
+            "the 576px axis plan must stride by tile-minus-overlap and end flush");
+        Assert(
+            DiffusionTiler.PlanAxis(DiffusionTiler.TileInputSize).SequenceEqual([0]),
+            "an axis that fits one tile plans exactly one tile");
+        Assert(
+            !DiffusionTiler.NeedsTiling(288, 288) && DiffusionTiler.NeedsTiling(289, 100),
+            "tiling triggers only when either axis exceeds the tile size");
+        var plan = DiffusionTiler.PlanTiles(576, 320);
+        AssertEqual(6, plan.Count, "576x320 plans a 3x2 tile grid");
+
+        // Splitting an image into the planned tiles and blending them back
+        // unchanged must reproduce the image: the blend is a weighted average
+        // of agreeing values, so any deviation means broken weights.
+        const int width = 576;
+        const int height = 320;
+        var fixtureBytes = new byte[18 + (width * height * 4)];
+        fixtureBytes[2] = 2;
+        BinaryPrimitives.WriteUInt16LittleEndian(fixtureBytes.AsSpan(12), width);
+        BinaryPrimitives.WriteUInt16LittleEndian(fixtureBytes.AsSpan(14), height);
+        fixtureBytes[16] = 32;
+        fixtureBytes[17] = 0x28;
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                var offset = 18 + (((y * width) + x) * 4);
+                var hash = (uint)((x * 374761393) + (y * 668265263));
+                hash = (hash ^ (hash >> 13)) * 1274126177u;
+                fixtureBytes[offset] = (byte)(hash & 0xFF);
+                fixtureBytes[offset + 1] = (byte)((hash >> 8) & 0xFF);
+                fixtureBytes[offset + 2] = (byte)((hash >> 16) & 0xFF);
+                fixtureBytes[offset + 3] = (byte)(255 - (hash & 0x3F));
+            }
+        }
+
+        var image = TgaPixelBuffer.Read(fixtureBytes);
+        var tiles = plan
+            .Select(position => (
+                position,
+                image.Crop(
+                    position.X,
+                    position.Y,
+                    Math.Min(DiffusionTiler.TileInputSize, width),
+                    Math.Min(DiffusionTiler.TileInputSize, height))))
+            .ToArray();
+        var blended = DiffusionTiler.BlendTiles(tiles, width, height, scale: 1);
+        AssertEqual(width, blended.Width, "the blended repaint keeps its width");
+        AssertEqual(height, blended.Height, "the blended repaint keeps its height");
+        var maximumDelta = 0;
+        for (var index = 0; index < width * height * 4; index++)
+        {
+            maximumDelta = Math.Max(
+                maximumDelta,
+                Math.Abs(image.RgbaPixels.Span[index] - blended.RgbaPixels.Span[index]));
+        }
+
+        Assert(
+            maximumDelta <= 1,
+            $"splitting and re-blending unchanged tiles must be the identity (max delta {maximumDelta})");
+    }
+
+    private static void TestLightingBaker()
+    {
+        const int size = 96;
+        var fixtureBytes = new byte[18 + (size * size * 4)];
+        fixtureBytes[2] = 2;
+        BinaryPrimitives.WriteUInt16LittleEndian(fixtureBytes.AsSpan(12), size);
+        BinaryPrimitives.WriteUInt16LittleEndian(fixtureBytes.AsSpan(14), size);
+        fixtureBytes[16] = 32;
+        fixtureBytes[17] = 0x28;
+        for (var y = 0; y < size; y++)
+        {
+            for (var x = 0; x < size; x++)
+            {
+                // Periodic masonry-like pattern with a bright saturated "window"
+                // and a transparent hole so every code path is exercised.
+                var mortar = (x % 24) < 2 || (y % 24) < 2;
+                var window = ((x + 40) % size) < 8 && ((y + 40) % size) < 8;
+                var offset = 18 + (((y * size) + x) * 4);
+                fixtureBytes[offset] = mortar ? (byte)70 : window ? (byte)250 : (byte)150;
+                fixtureBytes[offset + 1] = mortar ? (byte)66 : window ? (byte)190 : (byte)128;
+                fixtureBytes[offset + 2] = mortar ? (byte)60 : window ? (byte)80 : (byte)110;
+                fixtureBytes[offset + 3] = ((x + 12) % size) < 6 && ((y + 70) % size) < 6
+                    ? (byte)0
+                    : byte.MaxValue;
+            }
+        }
+
+        var source = TgaPixelBuffer.Read(fixtureBytes);
+        var untouched = source.ApplyLightingBake(0, 0, wrapEdges: true);
+        Assert(
+            untouched.RgbaPixels.Span.SequenceEqual(source.RgbaPixels.Span),
+            "a zero-strength lighting bake must be byte-identical to its input");
+
+        var baked = source.ApplyLightingBake(0.6, 0.5, wrapEdges: true);
+        var bakedAgain = source.ApplyLightingBake(0.6, 0.5, wrapEdges: true);
+        Assert(
+            baked.RgbaPixels.Span.SequenceEqual(bakedAgain.RgbaPixels.Span),
+            "the lighting bake must be deterministic");
+        var changed = false;
+        for (var pixel = 0; pixel < size * size; pixel++)
+        {
+            var offset = pixel * 4;
+            AssertEqual(
+                source.RgbaPixels.Span[offset + 3],
+                baked.RgbaPixels.Span[offset + 3],
+                "the lighting bake must never touch the alpha plane");
+            changed |= source.RgbaPixels.Span[offset] != baked.RgbaPixels.Span[offset];
+        }
+
+        Assert(changed, "a non-zero lighting bake should visibly shade the fixture");
+
+        // Tiling safety: baking a circularly shifted tile and shifting the
+        // result back must match baking the original (within float rounding),
+        // which is exactly the property that keeps wrapped seams invisible.
+        const int shiftX = 37;
+        const int shiftY = 19;
+        var shiftedBytes = (byte[])fixtureBytes.Clone();
+        for (var y = 0; y < size; y++)
+        {
+            for (var x = 0; x < size; x++)
+            {
+                var from = 18 + ((((y + shiftY) % size * size) + ((x + shiftX) % size)) * 4);
+                var to = 18 + (((y * size) + x) * 4);
+                for (var channel = 0; channel < 4; channel++)
+                {
+                    shiftedBytes[to + channel] = fixtureBytes[from + channel];
+                }
+            }
+        }
+
+        var shiftedBaked = TgaPixelBuffer.Read(shiftedBytes).ApplyLightingBake(0.6, 0.5, wrapEdges: true);
+        var maximumSeamDelta = 0;
+        for (var y = 0; y < size; y++)
+        {
+            for (var x = 0; x < size; x++)
+            {
+                var original = (((y + shiftY) % size * size) + ((x + shiftX) % size)) * 4;
+                var shifted = (((y * size) + x)) * 4;
+                for (var channel = 0; channel < 3; channel++)
+                {
+                    maximumSeamDelta = Math.Max(
+                        maximumSeamDelta,
+                        Math.Abs(baked.RgbaPixels.Span[original + channel]
+                            - shiftedBaked.RgbaPixels.Span[shifted + channel]));
+                }
+            }
+        }
+
+        Assert(
+            maximumSeamDelta <= 1,
+            $"the wrapped lighting bake must be translation-invariant so tiles stay seamless (max delta {maximumSeamDelta})");
+    }
+
     private static void TestArtisticWorkerCommand()
     {
         var scriptPath = Path.Combine(Path.GetTempPath(), "artistic", "worker.bat");
@@ -2249,6 +2525,40 @@ public static class TexturePipelineSelfTests
             Assert(component.SizeBytes > 0, $"artistic component {component.Name} must pin its size");
         }
 
+        // Per-file diffusion art direction is a pure function of name + zone
+        // so single-texture repairs reproduce the exact batch-time prompt.
+        var lava = DiffusionPromptComposer.Compose("lavarock01.tga", "lavastorm");
+        Assert(
+            lava.PromptSuffix is not null
+            && lava.PromptSuffix.Contains("molten", StringComparison.Ordinal)
+            && lava.PromptSuffix.Contains("volcanic", StringComparison.Ordinal),
+            "lava textures in lavastorm compose material and zone prompt clauses");
+        Assert(
+            lava.DenoiseScale == DiffusionPromptComposer.CoherentSurfaceDenoiseScale,
+            "fluid and fire surfaces restrain denoise for animation coherence");
+        AssertEqual(
+            lava,
+            DiffusionPromptComposer.Compose("lavarock01.tga", "lavastorm"),
+            "prompt composition must be deterministic");
+        var water = DiffusionPromptComposer.Compose("water3.bmp", null);
+        Assert(
+            water.PromptSuffix is not null && water.DenoiseScale < 1d,
+            "water frame sequences get coherence-restrained denoise even without a zone");
+        var stone = DiffusionPromptComposer.Compose("stonewall2.dds", "unknownzone123");
+        Assert(
+            stone.PromptSuffix is not null
+            && stone.PromptSuffix.Contains("stone", StringComparison.Ordinal)
+            && stone == DiffusionPromptComposer.Compose("stonewall2.dds", null)
+            && stone.DenoiseScale == 1d,
+            "unreviewed zones contribute no zone clause and leave denoise unscaled");
+        Assert(
+            DiffusionPromptComposer.Compose("qrc2n.tga", null).IsDefault,
+            "names without material tokens compose no directive at all");
+        var cloak = DiffusionPromptComposer.Compose("cloak01.dds", null);
+        Assert(
+            cloak.PromptSuffix is null || !cloak.PromptSuffix.Contains("wood", StringComparison.Ordinal),
+            "equipment names like cloak must not false-positive as wood");
+
         Assert(
             ArtisticWorkerSetupService.StylePresets.Count >= 5
             && ArtisticWorkerSetupService.StylePresets.Select(preset => preset.Key).Distinct().Count()
@@ -2282,6 +2592,7 @@ public static class TexturePipelineSelfTests
             var setup = new ArtisticWorkerSetupService(setupRoot);
             Directory.CreateDirectory(setup.WorkerDirectory);
             setup.WriteWorkerScripts(
+                ArtisticWorkerSetupService.ModelTierStandard,
                 Path.Combine(setupRoot, "realesrgan-ncnn-vulkan.exe"),
                 Path.Combine(setupRoot, "models"));
             var generatedScript = File.ReadAllText(Path.Combine(setup.WorkerDirectory, "worker.ps1"));
@@ -2291,6 +2602,11 @@ public static class TexturePipelineSelfTests
                 && generatedScript.Contains("DreamShaper_8_pruned.safetensors", StringComparison.Ordinal)
                 && generatedScript.Contains("$targetW = $w * 4", StringComparison.Ordinal),
                 "the generated worker script pins seed, models, and the exact-4x contract");
+            Assert(
+                generatedScript.Contains("batch-meta.json", StringComparison.Ordinal)
+                && generatedScript.Contains("promptSuffix", StringComparison.Ordinal)
+                && generatedScript.Contains("denoiseScale", StringComparison.Ordinal),
+                "the generated worker script honors SpinTexture's per-file art direction sidecar");
             Assert(
                 File.Exists(Path.Combine(setup.WorkerDirectory, "worker.bat"))
                 && File.Exists(Path.Combine(setup.WorkerDirectory, "worker-config.json")),
@@ -2335,12 +2651,49 @@ public static class TexturePipelineSelfTests
                 "applying a preset preserves the user's seed, steps, and resolution knobs");
 
             setup.WriteWorkerScripts(
+                ArtisticWorkerSetupService.ModelTierStandard,
                 Path.Combine(setupRoot, "realesrgan-ncnn-vulkan.exe"),
                 Path.Combine(setupRoot, "models"));
             AssertEqual(
                 "dark-oil",
                 setup.GetActiveStylePresetKey(),
                 "re-running setup never resets the chosen art style");
+
+            // Ultra (SDXL Turbo) tier: turbo settings, no ControlNet (sd.cpp
+            // supports ControlNet for SD 1.5 only), fp16-fix VAE, and the
+            // active style survives the tier switch re-mapped for SDXL.
+            var ultraConfig = ArtisticWorkerSetupService.StylePresets[0]
+                .ToConfig(ArtisticWorkerSetupService.ModelTierUltra);
+            Assert(
+                ultraConfig.ModelTier == ArtisticWorkerSetupService.ModelTierUltra
+                && ultraConfig.Steps == 8
+                && ultraConfig.CfgScale is >= 2.0 and <= 2.6
+                && ultraConfig.DenoiseStrength < ArtisticWorkerSetupService.StylePresets[0].DenoiseStrength
+                && ultraConfig.Seed == 90210,
+                "the Ultra tier maps presets to turbo settings with the shared seed");
+            setup.WriteWorkerScripts(
+                ArtisticWorkerSetupService.ModelTierUltra,
+                Path.Combine(setupRoot, "realesrgan-ncnn-vulkan.exe"),
+                Path.Combine(setupRoot, "models"));
+            var ultraScript = File.ReadAllText(Path.Combine(setup.WorkerDirectory, "worker.ps1"));
+            Assert(
+                ultraScript.Contains("DreamShaperXL_Turbo_v2_1.safetensors", StringComparison.Ordinal)
+                && ultraScript.Contains("sdxl_vae.safetensors", StringComparison.Ordinal)
+                && !ultraScript.Contains("--control-net", StringComparison.Ordinal),
+                "the Ultra worker script loads SDXL with the fp16-fix VAE and no ControlNet");
+            AssertEqual(
+                "dark-oil",
+                setup.GetActiveStylePresetKey(),
+                "switching model tiers keeps the active art style, re-mapped for the new model");
+            Assert(
+                setup.TryReadConfig() is { ModelTier: ArtisticWorkerSetupService.ModelTierUltra, Steps: 8, Seed: 1234 },
+                "the tier switch adopts turbo steps while preserving the user's seed");
+            Assert(
+                ArtisticWorkerSetupService.GetTotalDownloadBytes(ArtisticWorkerSetupService.ModelTierUltra)
+                    > ArtisticWorkerSetupService.GetTotalDownloadBytes(ArtisticWorkerSetupService.ModelTierStandard)
+                && ArtisticWorkerSetupService.GetComponents(ArtisticWorkerSetupService.ModelTierUltra)
+                    .Any(component => component.IsZipArchive),
+                "each tier bundles the shared runtime plus its own pinned models");
         }
         finally
         {
@@ -4217,9 +4570,9 @@ public static class TexturePipelineSelfTests
     private static void TestPaintedProfileReportCompatibility()
     {
         AssertEqual(
-            5,
+            6,
             TextureBuildReport.CurrentIllustratedProfileRevision,
-            "Graphic Painted profile revision should advance independently to revision five (bold painterly stylizer)");
+            "Graphic Painted profile revision should advance independently to revision six (material and zone aware diffusion prompts)");
         AssertEqual(
             1,
             TextureBuildReport.CurrentRusticPaintedProfileRevision,
@@ -4245,9 +4598,9 @@ public static class TexturePipelineSelfTests
             TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.RusticPainted),
             "unchanged Rustic Painted builds should retain the base resume operation key");
         AssertEqual(
-            $"{TexturePackWorkflow.FreshBuildResumeOperationKey}-illustrated-5",
+            $"{TexturePackWorkflow.FreshBuildResumeOperationKey}-illustrated-6",
             TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.Illustrated),
-            "Graphic Painted revision five should use a fenced resume operation key");
+            "Graphic Painted revision six should use a fenced resume operation key");
 
         var report = new TextureBuildReport(
             TextureBuildReport.CurrentSchemaVersion,

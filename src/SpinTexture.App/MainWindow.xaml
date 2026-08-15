@@ -906,6 +906,25 @@
                                             <TextBlock Text="DIFFUSION REPAINT (EXPERIMENTAL)" Style="{StaticResource FieldLabelStyle}" />
                                             <TextBlock Text="{Binding ArtisticWorkerStatusText}" Margin="0,6,0,0"
                                                        Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" LineHeight="17" />
+                                            <Grid Margin="0,10,0,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="220" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Margin="0,0,14,0">
+                                                    <TextBlock Text="MODEL QUALITY" Style="{StaticResource FieldLabelStyle}"
+                                                               ToolTip="Which diffusion model the one-click setup installs. Switch any time by picking the other tier and running setup again; your art style choice carries over." />
+                                                    <ComboBox Margin="0,6,0,0"
+                                                              ItemsSource="{Binding ArtisticModelTierOptions}"
+                                                              SelectedItem="{Binding SelectedArtisticModelTierOption}"
+                                                              DisplayMemberPath="Name"
+                                                              AutomationProperties.Name="Diffusion model quality tier" />
+                                                </StackPanel>
+                                                <TextBlock Grid.Column="1" VerticalAlignment="Center"
+                                                           Text="{Binding SelectedArtisticModelTierOption.Description}"
+                                                           Style="{StaticResource CaptionStyle}"
+                                                           TextWrapping="Wrap" LineHeight="17" />
+                                            </Grid>
                                             <Grid Margin="0,10,0,0"
                                                   Visibility="{Binding IsArtisticWorkerInstalled, Converter={StaticResource BooleanToVisibilityConverter}}">
                                                 <Grid.ColumnDefinitions>
@@ -926,8 +945,16 @@
                                                            Style="{StaticResource CaptionStyle}"
                                                            TextWrapping="Wrap" LineHeight="17" />
                                             </Grid>
+                                            <CheckBox Margin="0,9,0,0"
+                                                      IsChecked="{Binding FullResolutionRepaint}"
+                                                      Visibility="{Binding IsArtisticWorkerInstalled, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                                      Foreground="{StaticResource PrimaryTextBrush}"
+                                                      AutomationProperties.Name="Full-resolution repaint"
+                                                      ToolTip="Paints textures larger than the diffusion bound in overlapping full-resolution tiles instead of one bounded pass. Maximum painted detail on 2K/4K textures, but a large texture becomes many diffusion passes — expect builds several times slower. Recorded in the pack, so repairs match.">
+                                                <TextBlock Text="Full-resolution repaint (tiled — maximum detail, much slower)" TextWrapping="Wrap" />
+                                            </CheckBox>
                                             <WrapPanel Margin="0,9,0,0">
-                                                <Button Content="Set Up Diffusion Repaint (~2.9 GB)"
+                                                <Button Content="{Binding SetupArtisticWorkerButtonText}"
                                                         Command="{Binding SetupArtisticWorkerCommand}"
                                                         Background="#231A33" BorderBrush="#4E3A6A" Padding="10,4"
                                                         AutomationProperties.Name="Set up diffusion repaint worker" />
@@ -938,6 +965,45 @@
                                             </WrapPanel>
                                         </StackPanel>
                                     </Border>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Margin="0,14,0,0" Padding="13" CornerRadius="7" Background="#0D1117"
+                                    BorderBrush="#343B46" BorderThickness="1">
+                                <StackPanel>
+                                    <TextBlock Text="VISUAL ENHANCEMENTS (OPTIONAL)" Style="{StaticResource FieldLabelStyle}" />
+                                    <Grid Margin="0,8,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="18" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="18" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="BAKED DEPTH" Style="{StaticResource FieldLabelStyle}"
+                                                       ToolTip="Bakes subtle carved-in shading into the color: mortar lines and cracks recess, blocks and planks pop forward. The classic renderer has no normal maps, so this is how surfaces gain depth. 0 is off; around 0.4 is a good start." />
+                                            <Slider Value="{Binding BakedDepth, Delay=200}" Minimum="0" Maximum="1"
+                                                    LargeChange="0.1" SmallChange="0.05"
+                                                    AutomationProperties.Name="Baked depth strength" />
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="2">
+                                            <TextBlock Text="EMISSIVE GLOW" Style="{StaticResource FieldLabelStyle}"
+                                                       ToolTip="Pushes bright, saturated regions (windows, lava cracks, runes) toward a glow with a soft light spill, so they read as light sources at night and in dungeons. 0 is off; around 0.35 is a good start." />
+                                            <Slider Value="{Binding EmissiveGlow, Delay=200}" Minimum="0" Maximum="1"
+                                                    LargeChange="0.1" SmallChange="0.05"
+                                                    AutomationProperties.Name="Emissive glow strength" />
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="4">
+                                            <TextBlock Text="CRISP DISTANCE DETAIL" Style="{StaticResource FieldLabelStyle}"
+                                                       ToolTip="Most of what you see in-game is mip levels, not the full texture, and each halving washes out contrast. This regenerates the mip chain with a bounded per-level re-sharpen so walls and ground stay defined at a distance. Opaque world textures only; the full-size texture is untouched. 0 is off; around 0.5 is a good start." />
+                                            <Slider Value="{Binding MipSharpen, Delay=200}" Minimum="0" Maximum="1"
+                                                    LargeChange="0.1" SmallChange="0.05"
+                                                    AutomationProperties.Name="Crisp distance detail strength" />
+                                        </StackPanel>
+                                    </Grid>
+                                    <TextBlock Margin="0,7,0,0" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap"
+                                               Text="Applies to every preset except Faithful and soft spell effects, tiles seamlessly, and is recorded in the pack so repairs match. Signage and icons automatically receive a gentler bake; cutout foliage keeps its established mip handling. All at 0 = exactly the previous behavior." />
                                 </StackPanel>
                             </Border>
 

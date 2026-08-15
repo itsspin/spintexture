@@ -48,7 +48,31 @@ public sealed record UpscaleOptions(
     WorldExpansion? WorldExpansions = null,
     [property: System.Text.Json.Serialization.JsonIgnore(
         Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
-    PaintedStyleSettings? PaintedStyle = null)
+    PaintedStyleSettings? PaintedStyle = null,
+    // Per-artifact context resolved during a build (never a user choice):
+    // the normalized zone archive stem, used to flavor diffusion prompts.
+    // Null in recorded manifests keeps older payloads readable unchanged.
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string? ZoneArchiveStem = null,
+    // Optional baked-lighting finishing (0 = off, the compatibility default
+    // for every manifest recorded before these passes existed).
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    double BakedDepth = 0,
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    double EmissiveGlow = 0,
+    // Opt-in: paint oversized textures for the diffusion worker in
+    // overlapping full-resolution tiles instead of one bounded pass.
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    bool FullResolutionRepaint = false,
+    // Optional per-mip contrast recovery for opaque DDS color textures
+    // (0 = off, the compatibility default).
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    double MipSharpen = 0)
 {
     /// <summary>
     /// The effective painted style: explicit settings when present, otherwise

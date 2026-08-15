@@ -18,7 +18,7 @@ public interface IUserDialogService
 {
     bool ConfirmApplyLatest();
     bool ConfirmRestore();
-    bool ConfirmArtisticWorkerSetup(long totalDownloadBytes);
+    bool ConfirmArtisticWorkerSetup(long totalDownloadBytes, IReadOnlyList<string> componentSummaries);
     bool ConfirmArtisticWorkerRemove();
     void ShowArtisticWorkerNotice(string message, bool isError);
 }
@@ -316,14 +316,16 @@ public sealed class UserDialogService : IUserDialogService
             MessageBoxResult.No) == MessageBoxResult.Yes;
     }
 
-    public bool ConfirmArtisticWorkerSetup(long totalDownloadBytes)
+    public bool ConfirmArtisticWorkerSetup(long totalDownloadBytes, IReadOnlyList<string> componentSummaries)
     {
+        var componentList = string.Join(
+            "\n",
+            componentSummaries.Select(summary => $"  \u2022 {summary}"));
         var message =
             $"Set up the experimental diffusion repaint worker (~{totalDownloadBytes / (1024.0 * 1024 * 1024):N1} GB download)?\n\n"
-            + "SpinTexture will download three pinned, SHA-256-verified components:\n"
-            + "  \u2022 stable-diffusion.cpp Vulkan build (MIT license) \u2014 runs on AMD, NVIDIA, and Intel GPUs; no CUDA, no Python\n"
-            + "  \u2022 DreamShaper 8 painterly model (CreativeML OpenRAIL-M license)\n"
-            + "  \u2022 ControlNet v1.1 Tile (OpenRAIL license)\n\n"
+            + "SpinTexture will download pinned, SHA-256-verified components:\n"
+            + componentList
+            + "\n\n"
             + "After download, SpinTexture verifies the worker on this PC by repainting a test image twice and checking the results are identical and exactly 4x. Only a verified worker is enabled.\n\n"
             + "When enabled, Graphic Painted Fantasy builds repaint each texture with Stable Diffusion. Expect builds to take several times longer than today (try one zone first), and around 8 GB of GPU memory to be used while building. Alpha, tiling seams, fidelity gates, themes, and all backup/restore guarantees still apply, and any worker problem falls back automatically to the built-in painterly stylization.\n\n"
             + "If the download is interrupted, run setup again \u2014 verified components are kept and the rest resumes.";
@@ -339,7 +341,7 @@ public sealed class UserDialogService : IUserDialogService
     public bool ConfirmArtisticWorkerRemove()
     {
         return MessageBox.Show(
-            "Remove the artistic worker and its downloaded models (~2.9 GB)?\n\nGraphic Painted Fantasy returns to the built-in painterly stylization. Completed packs are not affected.",
+            "Remove the artistic worker and its downloaded models?\n\nGraphic Painted Fantasy returns to the built-in painterly stylization. Completed packs are not affected.",
             "Remove artistic worker",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question,

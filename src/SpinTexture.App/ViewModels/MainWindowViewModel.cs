@@ -23,6 +23,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private string _artisticWorkerStatusText = string.Empty;
     private bool _isArtisticWorkerInstalled;
     private ArtisticStyleOptionViewModel? _selectedArtisticStyleOption;
+    private ArtisticModelTierOptionViewModel _selectedArtisticModelTierOption;
     private bool _suppressArtisticStyleApply;
     private readonly IEnhancedLauncherService _enhancedLauncher;
     private readonly AppPreferencesStore _preferences;
@@ -46,6 +47,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private double _paintedDetailPreservation;
     private double _paintedColorSimplification;
     private double _paintedCanvasGrain;
+    private double _bakedDepth;
+    private double _emissiveGlow;
+    private bool _fullResolutionRepaint;
+    private double _mipSharpen;
     private ScopeOptionViewModel _selectedScopeOption;
     private string? _selectedZone;
     private int _selectedMaximumDimension = 2048;
@@ -214,6 +219,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _paintedDetailPreservation = rememberedStyle.DetailPreservation;
         _paintedColorSimplification = rememberedStyle.ColorSimplification;
         _paintedCanvasGrain = rememberedStyle.CanvasGrain;
+        _bakedDepth = Math.Clamp(rememberedPreferences.BakedDepth, 0d, 1d);
+        _emissiveGlow = Math.Clamp(rememberedPreferences.EmissiveGlow, 0d, 1d);
+        _fullResolutionRepaint = rememberedPreferences.FullResolutionRepaint;
+        _mipSharpen = Math.Clamp(rememberedPreferences.MipSharpen, 0d, 1d);
         var rememberedInstall = rememberedPreferences.LastInstallPath;
         if (!string.IsNullOrWhiteSpace(rememberedInstall)
             && Directory.Exists(rememberedInstall)
@@ -243,6 +252,18 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             _ => !IsBusy && IsClientSignaturePresent);
         RestoreCommand = new AsyncRelayCommand(RestoreAsync, CanRestore);
         CancelCommand = new RelayCommand(_ => Cancel(), _ => IsBusy);
+        ArtisticModelTierOptions =
+        [
+            new ArtisticModelTierOptionViewModel(
+                ArtisticWorkerSetupService.ModelTierUltra,
+                "Ultra — SDXL Turbo (recommended)",
+                "The richest painted detail from a much larger model. ~7.3 GB download; best with 12 GB+ of GPU memory. Layout is held by a conservative repaint strength; signage additionally gets its own gentler treatment."),
+            new ArtisticModelTierOptionViewModel(
+                ArtisticWorkerSetupService.ModelTierStandard,
+                "Standard — SD 1.5 + ControlNet",
+                "Smaller download (~2.9 GB) and the hardest structural lock (ControlNet Tile pins every line in place). The safest choice for 8 GB GPUs and text-heavy zones.")
+        ];
+        _selectedArtisticModelTierOption = ArtisticModelTierOptions[0];
         SetupArtisticWorkerCommand = new AsyncRelayCommand(
             SetupArtisticWorkerAsync,
             () => !IsBusy);
@@ -582,6 +603,82 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             var style = EffectivePaintedStyleOrDefault;
             return style == PaintedStyleSettings.Default ? null : style;
         }
+    }
+
+    public double BakedDepth
+    {
+        get => _bakedDepth;
+        set
+        {
+            var clamped = Math.Clamp(double.IsFinite(value) ? value : 0d, 0d, 1d);
+            if (SetProperty(ref _bakedDepth, clamped))
+            {
+                PersistLighting();
+                UpdateOptionPreviewSelection();
+            }
+        }
+    }
+
+    public double EmissiveGlow
+    {
+        get => _emissiveGlow;
+        set
+        {
+            var clamped = Math.Clamp(double.IsFinite(value) ? value : 0d, 0d, 1d);
+            if (SetProperty(ref _emissiveGlow, clamped))
+            {
+                PersistLighting();
+                UpdateOptionPreviewSelection();
+            }
+        }
+    }
+
+    public double MipSharpen
+    {
+        get => _mipSharpen;
+        set
+        {
+            var clamped = Math.Clamp(double.IsFinite(value) ? value : 0d, 0d, 1d);
+            if (SetProperty(ref _mipSharpen, clamped))
+            {
+                PersistLighting();
+                UpdateOptionPreviewSelection();
+            }
+        }
+    }
+
+    public bool FullResolutionRepaint
+    {
+        get => _fullResolutionRepaint;
+        set
+        {
+            if (SetProperty(ref _fullResolutionRepaint, value))
+            {
+                PersistLighting();
+                UpdateOptionPreviewSelection();
+            }
+        }
+    }
+
+    private void PersistLighting()
+    {
+        var depth = _bakedDepth;
+        var glow = _emissiveGlow;
+        var fullResolution = _fullResolutionRepaint;
+        var mipSharpen = _mipSharpen;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _preferences.WriteEnhancementsAsync(depth, glow, fullResolution, mipSharpen).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is
+                IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                // Remembering slider positions is best-effort; the build itself
+                // always uses the live in-memory values.
+            }
+        });
     }
 
     public ScopeOptionViewModel SelectedScopeOption
@@ -995,7 +1092,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 IsSelectedZoneScope ? SelectedZone : null,
                 PaintedTheme: EffectivePaintedTheme,
                 WorldExpansions: EffectiveWorldExpansionSelection,
-                PaintedStyle: EffectivePaintedStyle);
+                PaintedStyle: EffectivePaintedStyle,
+                BakedDepth: _bakedDepth,
+                EmissiveGlow: _emissiveGlow,
+                FullResolutionRepaint: _fullResolutionRepaint,
+                MipSharpen: _mipSharpen);
 
             TexturePackBuildResult result = await _workflow.BuildAsync(
                 InstallPath,
@@ -2058,7 +2159,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             IsSelectedZoneScope ? SelectedZone : null,
             PaintedTheme: EffectivePaintedTheme,
             WorldExpansions: EffectiveWorldExpansionSelection,
-            PaintedStyle: EffectivePaintedStyle);
+            PaintedStyle: EffectivePaintedStyle,
+            BakedDepth: _bakedDepth,
+            EmissiveGlow: _emissiveGlow,
+            FullResolutionRepaint: _fullResolutionRepaint,
+            MipSharpen: _mipSharpen);
         OptionPreview.UpdateSelection(
             InstallPath,
             previewOptions,
@@ -2094,6 +2199,23 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         get => _isArtisticWorkerInstalled;
         private set => SetProperty(ref _isArtisticWorkerInstalled, value);
     }
+
+    public IReadOnlyList<ArtisticModelTierOptionViewModel> ArtisticModelTierOptions { get; }
+
+    public ArtisticModelTierOptionViewModel SelectedArtisticModelTierOption
+    {
+        get => _selectedArtisticModelTierOption;
+        set
+        {
+            if (value is not null && SetProperty(ref _selectedArtisticModelTierOption, value))
+            {
+                OnPropertyChanged(nameof(SetupArtisticWorkerButtonText));
+            }
+        }
+    }
+
+    public string SetupArtisticWorkerButtonText =>
+        $"Set Up Diffusion Repaint (~{ArtisticWorkerSetupService.GetTotalDownloadBytes(_selectedArtisticModelTierOption.Key) / (1024.0 * 1024 * 1024):0.#} GB)";
 
     public ArtisticStyleOptionViewModel? SelectedArtisticStyleOption
     {
@@ -2131,16 +2253,32 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         var status = _artisticWorkerSetup.GetStatus();
         IsArtisticWorkerInstalled = status.IsInstalled;
+        if (status.IsInstalled
+            && status.ModelTier is { } installedTier
+            && ArtisticModelTierOptions.FirstOrDefault(option =>
+                    string.Equals(option.Key, installedTier, StringComparison.OrdinalIgnoreCase))
+                is { } installedOption
+            && !ReferenceEquals(_selectedArtisticModelTierOption, installedOption))
+        {
+            _selectedArtisticModelTierOption = installedOption;
+            OnPropertyChanged(nameof(SelectedArtisticModelTierOption));
+            OnPropertyChanged(nameof(SetupArtisticWorkerButtonText));
+        }
+
+        var installedTierName = ArtisticModelTierOptions.FirstOrDefault(option =>
+                string.Equals(option.Key, status.ModelTier, StringComparison.OrdinalIgnoreCase))?.Name
+            ?? "Standard";
         ArtisticWorkerStatusText = status switch
         {
             { IsInstalled: false } =>
-                "Not installed. One click downloads a pinned, SHA-256-verified toolchain (~2.9 GB): "
-                + "stable-diffusion.cpp (Vulkan \u2014 AMD, NVIDIA, and Intel GPUs), the DreamShaper 8 painterly model, "
-                + "and ControlNet Tile. The worker is verified on this PC before it is enabled.",
+                "Not installed. One click downloads a pinned, SHA-256-verified toolchain: the stable-diffusion.cpp "
+                + "Vulkan runtime (AMD, NVIDIA, and Intel GPUs) plus the models for the quality tier you pick below. "
+                + "The worker is verified on this PC before it is enabled.",
             { IsEnabled: true } =>
-                "Installed and verified. Graphic Painted builds repaint each texture with the diffusion worker using the "
+                $"Installed and verified ({installedTierName}). Graphic Painted builds repaint each texture with the diffusion worker using the "
                 + "art style below; the style sliders do not apply. The painted theme still runs on top \u2014 choose "
-                + "Classic painted to see the art style with no extra color treatment. Builds take several times longer \u2014 try one zone first.",
+                + "Classic painted to see the art style with no extra color treatment. Builds take several times longer \u2014 try one zone first. "
+                + "To switch model quality, pick the other tier and run setup again.",
             var disabled =>
                 $"Installed but disabled: {disabled.DisabledReason} Run setup again to retry verification."
         };
@@ -2207,7 +2345,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task SetupArtisticWorkerAsync(CancellationToken cancellationToken)
     {
-        if (!_dialogs.ConfirmArtisticWorkerSetup(ArtisticWorkerSetupService.TotalDownloadBytes))
+        var modelTier = _selectedArtisticModelTierOption.Key;
+        var tierComponents = ArtisticWorkerSetupService.GetComponents(modelTier);
+        if (!_dialogs.ConfirmArtisticWorkerSetup(
+            ArtisticWorkerSetupService.GetTotalDownloadBytes(modelTier),
+            tierComponents.Select(component => $"{component.Name} ({component.License} license)").ToArray()))
         {
             return;
         }
@@ -2238,6 +2380,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 StatusText = update.Message;
             });
             await _artisticWorkerSetup.SetupAsync(
+                    modelTier,
                     tools.RealEsrganPath!,
                     tools.RealEsrganModelsPath!,
                     progress,

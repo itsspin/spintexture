@@ -1188,13 +1188,51 @@ public sealed class NativeTextureProcessor
 
         try
         {
+            var tiledJobs = new Dictionary<int, List<(DiffusionTiler.TilePosition Position, string FileName, int TileWidth, int TileHeight)>>();
             foreach (var job in jobs.OrderBy(candidate => candidate.RequestIndex))
             {
+                if (key.WorkerKind == NeuralWorkerKind.ExternalArtistic
+                    && job.Request.Options.FullResolutionRepaint)
+                {
+                    var bordered = await TgaPixelBuffer.ReadPngFileAsync(
+                        job.NeuralInputPath,
+                        cancellationToken).ConfigureAwait(false);
+                    if (DiffusionTiler.NeedsTiling(bordered.Width, bordered.Height))
+                    {
+                        var tileWidth = Math.Min(DiffusionTiler.TileInputSize, bordered.Width);
+                        var tileHeight = Math.Min(DiffusionTiler.TileInputSize, bordered.Height);
+                        var plan = DiffusionTiler.PlanTiles(bordered.Width, bordered.Height);
+                        var tileFiles = new List<(DiffusionTiler.TilePosition, string, int, int)>(plan.Count);
+                        for (var tileIndex = 0; tileIndex < plan.Count; tileIndex++)
+                        {
+                            var position = plan[tileIndex];
+                            var tileName = $"j{job.RequestIndex:D8}t{tileIndex:D3}.png";
+                            await bordered.Crop(position.X, position.Y, tileWidth, tileHeight)
+                                .WritePngFileAsync(
+                                    Path.Combine(inputDirectory, tileName),
+                                    cancellationToken).ConfigureAwait(false);
+                            expectedNames.Add(tileName, job);
+                            tileFiles.Add((position, tileName, tileWidth, tileHeight));
+                        }
+
+                        tiledJobs.Add(job.RequestIndex, tileFiles);
+                        continue;
+                    }
+                }
+
                 var fileName = $"j{job.RequestIndex:D8}.png";
                 expectedNames.Add(fileName, job);
                 await CopyTemporaryFileAsync(
                     job.NeuralInputPath,
                     Path.Combine(inputDirectory, fileName),
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            if (key.WorkerKind == NeuralWorkerKind.ExternalArtistic)
+            {
+                await WriteArtisticBatchMetadataAsync(
+                    inputDirectory,
+                    expectedNames,
                     cancellationToken).ConfigureAwait(false);
             }
 
@@ -1264,11 +1302,51 @@ public sealed class NativeTextureProcessor
                     + $"Unexpected: {string.Join(", ", unexpected)}.");
             }
 
-            return new NeuralBatchInvocation(
-                groupDirectory,
-                expectedNames.ToDictionary(
-                    pair => pair.Value.RequestIndex,
-                    pair => Path.Combine(outputDirectory, pair.Key)));
+            var outputPaths = new Dictionary<int, string>();
+            foreach (var pair in expectedNames)
+            {
+                if (!tiledJobs.ContainsKey(pair.Value.RequestIndex))
+                {
+                    outputPaths[pair.Value.RequestIndex] = Path.Combine(outputDirectory, pair.Key);
+                }
+            }
+
+            // Reassemble tiled repaints: verify every painted tile is exactly
+            // its input tile at the neural scale, then blend across the
+            // overlaps. The merged file takes the single-file output's place.
+            foreach (var (requestIndex, tileFiles) in tiledJobs)
+            {
+                var job = expectedNames[tileFiles[0].FileName];
+                var painted = new List<(DiffusionTiler.TilePosition, TgaPixelBuffer)>(tileFiles.Count);
+                foreach (var (position, tileName, tileWidth, tileHeight) in tileFiles)
+                {
+                    var paintedTile = await TgaPixelBuffer.ReadPngFileAsync(
+                        Path.Combine(outputDirectory, tileName),
+                        cancellationToken).ConfigureAwait(false);
+                    if (paintedTile.Width != tileWidth * key.NeuralScale
+                        || paintedTile.Height != tileHeight * key.NeuralScale)
+                    {
+                        throw new InvalidDataException(
+                            $"Painted tile {tileName} was {paintedTile.Width}x{paintedTile.Height}; "
+                            + $"expected {tileWidth * key.NeuralScale}x{tileHeight * key.NeuralScale}.");
+                    }
+
+                    painted.Add((position, paintedTile));
+                }
+
+                var borderedWidth = checked(job.Request.Metadata.Width + (job.Request.WrapPadding * 2));
+                var borderedHeight = checked(job.Request.Metadata.Height + (job.Request.WrapPadding * 2));
+                var merged = DiffusionTiler.BlendTiles(
+                    painted,
+                    borderedWidth,
+                    borderedHeight,
+                    key.NeuralScale);
+                var mergedPath = Path.Combine(groupDirectory, $"j{requestIndex:D8}-merged.png");
+                await merged.WritePngFileAsync(mergedPath, cancellationToken).ConfigureAwait(false);
+                outputPaths[requestIndex] = mergedPath;
+            }
+
+            return new NeuralBatchInvocation(groupDirectory, outputPaths);
         }
         catch
         {
@@ -1276,6 +1354,55 @@ public sealed class NativeTextureProcessor
             throw;
         }
     }
+
+    /// <summary>
+    /// Writes the optional per-file art-direction sidecar the generated
+    /// diffusion worker understands. Entries are derived deterministically
+    /// from each texture's own name and zone, so a single-texture repair
+    /// composes the identical hint the original batch used. Custom workers
+    /// that only enumerate *.png simply never see the file.
+    /// </summary>
+    private static async Task WriteArtisticBatchMetadataAsync(
+        string inputDirectory,
+        IReadOnlyDictionary<string, PreparedColorJob> stagedFiles,
+        CancellationToken cancellationToken)
+    {
+        var entries = new SortedDictionary<string, object>(StringComparer.Ordinal);
+        foreach (var (fileName, job) in stagedFiles)
+        {
+            var directive = DiffusionPromptComposer.Compose(
+                Path.GetFileName(job.Request.SourcePath),
+                job.Request.Options.ZoneArchiveStem);
+            if (directive.IsDefault)
+            {
+                continue;
+            }
+
+            entries[fileName] = new
+            {
+                promptSuffix = directive.PromptSuffix,
+                denoiseScale = directive.DenoiseScale
+            };
+        }
+
+        if (entries.Count == 0)
+        {
+            return;
+        }
+
+        var payload = JsonSerializer.Serialize(
+            new { schemaVersion = 1, files = entries },
+            ArtisticBatchMetadataJsonOptions);
+        await File.WriteAllTextAsync(
+            Path.Combine(inputDirectory, "batch-meta.json"),
+            payload,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static readonly JsonSerializerOptions ArtisticBatchMetadataJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true
+    };
 
     private async Task<NativeTextureProcessResult> CompleteColorJobAsync(
         PreparedColorJob job,
@@ -1389,7 +1516,10 @@ public sealed class NativeTextureProcessor
                         job.Request.Options.PaintedTheme,
                         GetPaintedThemeStrength(job.Request, job.PreserveAlphaCoverage)
                             * themeStrengthScale);
-                    cropped = themed.Image;
+                    cropped = ApplyConfiguredLightingBake(
+                        themed.Image,
+                        job,
+                        attenuateForUvCriticalDetail: requiresFinalValidation);
                     var candidateMipResult = await EncodeCurrentImageAsync(
                             cropped,
                             encodedCandidatePath)
@@ -1434,18 +1564,20 @@ public sealed class NativeTextureProcessor
             var painted = cropped.ApplyRusticPaintedGrade(
                 GetRusticPaintedStrength(job.Request));
             ValidateStylizedOutput(CalculateFidelityMetrics(job.Decoded, painted));
-            cropped = painted;
+            cropped = ApplyConfiguredLightingBake(painted, job);
             mipResult = await EncodeCurrentImageAsync(cropped).ConfigureAwait(false);
         }
         else
         {
+            cropped = ApplyConfiguredLightingBake(cropped, job);
             mipResult = await EncodeCurrentImageAsync(cropped).ConfigureAwait(false);
         }
 
         return new NativeTextureProcessResult(
             job.Request.DestinationPath,
             job.Dimensions,
-            GetProcessingRoute(job, key, graphicPaintedScale, paintedThemeScale),
+            GetProcessingRoute(job, key, graphicPaintedScale, paintedThemeScale)
+                + FormatLightingBakeRoute(job),
             DateTimeOffset.UtcNow - job.Started,
             mipResult.MipCount,
             mipResult.UsedCutoutFloor);
@@ -1488,6 +1620,57 @@ public sealed class NativeTextureProcessor
                     ? "FANT"
                     : "CUBIC").ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Applies the optional baked-lighting finishing recorded in the build
+    /// options. Faithful output and soft-translucent effects are exempt (their
+    /// contract is "unchanged"), and UV-critical detail such as signage gets
+    /// an attenuated bake so the strict post-encode validation keeps passing.
+    /// </summary>
+    private static TgaPixelBuffer ApplyConfiguredLightingBake(
+        TgaPixelBuffer image,
+        PreparedColorJob job,
+        bool attenuateForUvCriticalDetail = false)
+    {
+        if (job.HasSoftTranslucentAlpha
+            || job.EffectivePreset == TexturePreset.Faithful)
+        {
+            return image;
+        }
+
+        var depth = Math.Clamp(job.Request.Options.BakedDepth, 0d, 1d);
+        var glow = Math.Clamp(job.Request.Options.EmissiveGlow, 0d, 1d);
+        if (attenuateForUvCriticalDetail)
+        {
+            depth *= 0.5;
+            glow *= 0.35;
+        }
+
+        if (depth <= 0d && glow <= 0d)
+        {
+            return image;
+        }
+
+        return image.ApplyLightingBake(depth, glow, job.Request.WrapEdges);
+    }
+
+    private static string FormatLightingBakeRoute(PreparedColorJob job)
+    {
+        if (job.HasSoftTranslucentAlpha || job.EffectivePreset == TexturePreset.Faithful)
+        {
+            return string.Empty;
+        }
+
+        var depth = Math.Clamp(job.Request.Options.BakedDepth, 0d, 1d);
+        var glow = Math.Clamp(job.Request.Options.EmissiveGlow, 0d, 1d);
+        return (depth > 0d, glow > 0d) switch
+        {
+            (true, true) => " + baked depth and emissive glow",
+            (true, false) => " + baked depth",
+            (false, true) => " + emissive glow",
+            _ => string.Empty
+        };
     }
 
     private static string GetProcessingRoute(
@@ -2357,6 +2540,23 @@ public sealed class NativeTextureProcessor
                 request.Options.GenerateMipMaps,
                 usedCutoutMipFloor)
             : 1;
+        if (ShouldUseCrispMips(request, mipCount, preserveAlphaCoverage, inputPath, dimensions))
+        {
+            var crisp = await TryEncodeCrispMipsAsync(
+                    request,
+                    dimensions,
+                    inputPath,
+                    operationDirectory,
+                    mipCount,
+                    nativeProgress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (crisp is not null)
+            {
+                return crisp;
+            }
+        }
+
         var encodedDirectory = CreateDirectory(operationDirectory, "encoded");
         await RunCheckedAsync(
             _directXTex.CreateEncode(
@@ -2383,6 +2583,111 @@ public sealed class NativeTextureProcessor
         var encodedPath = FindSingleOutput(encodedDirectory, extension);
         await CopyFileAsync(encodedPath, request.DestinationPath, cancellationToken).ConfigureAwait(false);
         return new GeneratedMipResult(mipCount, usedCutoutMipFloor);
+    }
+
+    /// <summary>
+    /// Crisp distance detail is deliberately narrow: opaque power-of-two DDS
+    /// color textures on non-Faithful presets, from a TGA staging input. Any
+    /// other shape (cutouts and their coverage handling, vector normals,
+    /// masks, palettes) keeps the established texconv mip path untouched.
+    /// </summary>
+    internal static bool ShouldUseCrispMips(
+        NativeTextureProcessRequest request,
+        int mipCount,
+        bool preserveAlphaCoverage,
+        string inputPath,
+        UpscaleDimensions dimensions)
+    {
+        return request.Options.MipSharpen > 0d
+            && request.Options.Preset != TexturePreset.Faithful
+            && request.Metadata.FileFormat == TextureFileFormat.Dds
+            && request.Metadata.TexconvFormat is not null
+            && mipCount > 1
+            && !request.Metadata.HasAlpha
+            && !preserveAlphaCoverage
+            && request.Classification.Kind == TextureKind.Color
+            && inputPath.EndsWith(".tga", StringComparison.OrdinalIgnoreCase)
+            && int.IsPow2(dimensions.OutputWidth)
+            && int.IsPow2(dimensions.OutputHeight);
+    }
+
+    /// <summary>
+    /// Builds the sharpened mip chain on the CPU, hands texconv a pre-mipped
+    /// uncompressed DDS at final dimensions (so it only block-compresses),
+    /// and verifies the encoded header before accepting the result. Any
+    /// surprise — texconv failing, or the output not carrying the exact
+    /// expected dimensions and mip count — falls back to the standard path.
+    /// </summary>
+    private async Task<GeneratedMipResult?> TryEncodeCrispMipsAsync(
+        NativeTextureProcessRequest request,
+        UpscaleDimensions dimensions,
+        string inputPath,
+        string operationDirectory,
+        int mipCount,
+        IProgress<NativeOutputLine>? nativeProgress,
+        CancellationToken cancellationToken)
+    {
+        var image = await TgaPixelBuffer.ReadFileAsync(inputPath, cancellationToken).ConfigureAwait(false);
+        if (image.Width < dimensions.OutputWidth || image.Height < dimensions.OutputHeight)
+        {
+            return null;
+        }
+
+        if (image.Width != dimensions.OutputWidth || image.Height != dimensions.OutputHeight)
+        {
+            image = image.ResizeArea(dimensions.OutputWidth, dimensions.OutputHeight);
+        }
+
+        var preMippedPath = Path.Combine(operationDirectory, "crisp-premipped.dds");
+        await File.WriteAllBytesAsync(
+            preMippedPath,
+            CrispMipChain.BuildPreMippedDds(
+                image,
+                mipCount,
+                Math.Clamp(request.Options.MipSharpen, 0d, 1d),
+                request.WrapEdges),
+            cancellationToken).ConfigureAwait(false);
+        var crispDirectory = CreateDirectory(operationDirectory, "encoded-crisp");
+        try
+        {
+            await RunCheckedAsync(
+                _directXTex.CreateEncode(
+                    _tools.TexconvPath!,
+                    preMippedPath,
+                    crispDirectory,
+                    request.Metadata,
+                    dimensions.OutputWidth,
+                    dimensions.OutputHeight,
+                    mipCount,
+                    preserveAlphaCoverage: false,
+                    wrapSampling: request.WrapEdges),
+                nativeProgress,
+                cancellationToken).ConfigureAwait(false);
+            var crispPath = FindSingleOutput(crispDirectory, ".dds");
+            var encodedMetadata = await new TextureHeaderSniffer()
+                .ReadFileAsync(crispPath, cancellationToken)
+                .ConfigureAwait(false);
+            if (encodedMetadata is null
+                || encodedMetadata.Width != dimensions.OutputWidth
+                || encodedMetadata.Height != dimensions.OutputHeight
+                || encodedMetadata.MipCount != mipCount)
+            {
+                nativeProgress?.Report(new NativeOutputLine(
+                    NativeOutputStream.StandardError,
+                    $"{Path.GetFileName(request.SourcePath)}: the crisp-mip encode did not preserve the expected layout; using the standard mip path."));
+                return null;
+            }
+
+            await CopyFileAsync(crispPath, request.DestinationPath, cancellationToken).ConfigureAwait(false);
+            return new GeneratedMipResult(mipCount, UsedCutoutFloor: false);
+        }
+        catch (NativeProcessException exception)
+        {
+            nativeProgress?.Report(new NativeOutputLine(
+                NativeOutputStream.StandardError,
+                $"{Path.GetFileName(request.SourcePath)}: the crisp-mip encode failed and the standard mip path was used instead. {exception.Message}"));
+            return null;
+        }
     }
 
     private async Task RunCheckedAsync(
