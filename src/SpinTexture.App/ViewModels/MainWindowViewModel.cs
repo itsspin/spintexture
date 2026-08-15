@@ -2253,16 +2253,32 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         var status = _artisticWorkerSetup.GetStatus();
         IsArtisticWorkerInstalled = status.IsInstalled;
+        if (status.IsInstalled
+            && status.ModelTier is { } installedTier
+            && ArtisticModelTierOptions.FirstOrDefault(option =>
+                    string.Equals(option.Key, installedTier, StringComparison.OrdinalIgnoreCase))
+                is { } installedOption
+            && !ReferenceEquals(_selectedArtisticModelTierOption, installedOption))
+        {
+            _selectedArtisticModelTierOption = installedOption;
+            OnPropertyChanged(nameof(SelectedArtisticModelTierOption));
+            OnPropertyChanged(nameof(SetupArtisticWorkerButtonText));
+        }
+
+        var installedTierName = ArtisticModelTierOptions.FirstOrDefault(option =>
+                string.Equals(option.Key, status.ModelTier, StringComparison.OrdinalIgnoreCase))?.Name
+            ?? "Standard";
         ArtisticWorkerStatusText = status switch
         {
             { IsInstalled: false } =>
-                "Not installed. One click downloads a pinned, SHA-256-verified toolchain (~2.9 GB): "
-                + "stable-diffusion.cpp (Vulkan \u2014 AMD, NVIDIA, and Intel GPUs), the DreamShaper 8 painterly model, "
-                + "and ControlNet Tile. The worker is verified on this PC before it is enabled.",
+                "Not installed. One click downloads a pinned, SHA-256-verified toolchain: the stable-diffusion.cpp "
+                + "Vulkan runtime (AMD, NVIDIA, and Intel GPUs) plus the models for the quality tier you pick below. "
+                + "The worker is verified on this PC before it is enabled.",
             { IsEnabled: true } =>
-                "Installed and verified. Graphic Painted builds repaint each texture with the diffusion worker using the "
+                $"Installed and verified ({installedTierName}). Graphic Painted builds repaint each texture with the diffusion worker using the "
                 + "art style below; the style sliders do not apply. The painted theme still runs on top \u2014 choose "
-                + "Classic painted to see the art style with no extra color treatment. Builds take several times longer \u2014 try one zone first.",
+                + "Classic painted to see the art style with no extra color treatment. Builds take several times longer \u2014 try one zone first. "
+                + "To switch model quality, pick the other tier and run setup again.",
             var disabled =>
                 $"Installed but disabled: {disabled.DisabledReason} Run setup again to retry verification."
         };

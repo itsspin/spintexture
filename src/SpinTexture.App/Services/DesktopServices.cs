@@ -341,7 +341,7 @@ public sealed class UserDialogService : IUserDialogService
     public bool ConfirmArtisticWorkerRemove()
     {
         return MessageBox.Show(
-            "Remove the artistic worker and its downloaded models (~2.9 GB)?\n\nGraphic Painted Fantasy returns to the built-in painterly stylization. Completed packs are not affected.",
+            "Remove the artistic worker and its downloaded models?\n\nGraphic Painted Fantasy returns to the built-in painterly stylization. Completed packs are not affected.",
             "Remove artistic worker",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question,
