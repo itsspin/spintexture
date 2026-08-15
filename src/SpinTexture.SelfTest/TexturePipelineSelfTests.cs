@@ -2480,6 +2480,7 @@ public static class TexturePipelineSelfTests
             var setup = new ArtisticWorkerSetupService(setupRoot);
             Directory.CreateDirectory(setup.WorkerDirectory);
             setup.WriteWorkerScripts(
+                ArtisticWorkerSetupService.ModelTierStandard,
                 Path.Combine(setupRoot, "realesrgan-ncnn-vulkan.exe"),
                 Path.Combine(setupRoot, "models"));
             var generatedScript = File.ReadAllText(Path.Combine(setup.WorkerDirectory, "worker.ps1"));
@@ -2538,12 +2539,49 @@ public static class TexturePipelineSelfTests
                 "applying a preset preserves the user's seed, steps, and resolution knobs");
 
             setup.WriteWorkerScripts(
+                ArtisticWorkerSetupService.ModelTierStandard,
                 Path.Combine(setupRoot, "realesrgan-ncnn-vulkan.exe"),
                 Path.Combine(setupRoot, "models"));
             AssertEqual(
                 "dark-oil",
                 setup.GetActiveStylePresetKey(),
                 "re-running setup never resets the chosen art style");
+
+            // Ultra (SDXL Turbo) tier: turbo settings, no ControlNet (sd.cpp
+            // supports ControlNet for SD 1.5 only), fp16-fix VAE, and the
+            // active style survives the tier switch re-mapped for SDXL.
+            var ultraConfig = ArtisticWorkerSetupService.StylePresets[0]
+                .ToConfig(ArtisticWorkerSetupService.ModelTierUltra);
+            Assert(
+                ultraConfig.ModelTier == ArtisticWorkerSetupService.ModelTierUltra
+                && ultraConfig.Steps == 8
+                && ultraConfig.CfgScale is >= 2.0 and <= 2.6
+                && ultraConfig.DenoiseStrength < ArtisticWorkerSetupService.StylePresets[0].DenoiseStrength
+                && ultraConfig.Seed == 90210,
+                "the Ultra tier maps presets to turbo settings with the shared seed");
+            setup.WriteWorkerScripts(
+                ArtisticWorkerSetupService.ModelTierUltra,
+                Path.Combine(setupRoot, "realesrgan-ncnn-vulkan.exe"),
+                Path.Combine(setupRoot, "models"));
+            var ultraScript = File.ReadAllText(Path.Combine(setup.WorkerDirectory, "worker.ps1"));
+            Assert(
+                ultraScript.Contains("DreamShaperXL_Turbo_v2_1.safetensors", StringComparison.Ordinal)
+                && ultraScript.Contains("sdxl_vae.safetensors", StringComparison.Ordinal)
+                && !ultraScript.Contains("--control-net", StringComparison.Ordinal),
+                "the Ultra worker script loads SDXL with the fp16-fix VAE and no ControlNet");
+            AssertEqual(
+                "dark-oil",
+                setup.GetActiveStylePresetKey(),
+                "switching model tiers keeps the active art style, re-mapped for the new model");
+            Assert(
+                setup.TryReadConfig() is { ModelTier: ArtisticWorkerSetupService.ModelTierUltra, Steps: 8, Seed: 1234 },
+                "the tier switch adopts turbo steps while preserving the user's seed");
+            Assert(
+                ArtisticWorkerSetupService.GetTotalDownloadBytes(ArtisticWorkerSetupService.ModelTierUltra)
+                    > ArtisticWorkerSetupService.GetTotalDownloadBytes(ArtisticWorkerSetupService.ModelTierStandard)
+                && ArtisticWorkerSetupService.GetComponents(ArtisticWorkerSetupService.ModelTierUltra)
+                    .Any(component => component.IsZipArchive),
+                "each tier bundles the shared runtime plus its own pinned models");
         }
         finally
         {

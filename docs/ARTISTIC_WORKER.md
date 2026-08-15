@@ -58,15 +58,29 @@ only enumerates `*.png` can safely ignore it.
 
 ## One-click setup (recommended)
 
-The **Set Up Diffusion Repaint (~2.9 GB)** button in the Graphic Painted
-panel installs everything automatically: the stable-diffusion.cpp **Vulkan**
-build (AMD, NVIDIA, and Intel GPUs — no CUDA, no Python), the DreamShaper 8
-painterly checkpoint, and ControlNet v1.1 Tile. Every download is pinned to
-an exact size and SHA-256 and refused on any mismatch; an interrupted setup
-resumes safely when re-run. After download, SpinTexture generates the worker
-scripts and verifies them on your PC by repainting a test image twice —
-checking exact 4x output and byte-identical determinism — before the worker
-is enabled.
+The **Set Up Diffusion Repaint** button in the Graphic Painted panel
+installs everything automatically: the stable-diffusion.cpp **Vulkan**
+runtime (AMD, NVIDIA, and Intel GPUs — no CUDA, no Python) plus the models
+for the **Model quality** tier you pick:
+
+- **Ultra — SDXL Turbo (recommended, ~7.3 GB)**: DreamShaper XL Turbo v2.1
+  with the fp16-fix SDXL VAE. The richest painted detail; best with 12 GB+
+  of GPU memory. stable-diffusion.cpp has no SDXL ControlNet, so layout is
+  held by a conservative repaint strength (and Turbo's few steps keep build
+  time comparable to Standard despite the larger model).
+- **Standard — SD 1.5 + ControlNet (~2.9 GB)**: DreamShaper 8 with
+  ControlNet v1.1 Tile. Smaller download and the hardest structural lock —
+  the safest choice for 8 GB GPUs and text-heavy zones.
+
+Switch tiers any time by picking the other tier and running setup again —
+already-verified components are kept, your art style carries over (re-mapped
+to settings tuned for the new model), and a hand-edited custom config is
+reset to the default recipe because its values were tuned for the other
+model. Every download is pinned to an exact size and SHA-256 and refused on
+any mismatch; an interrupted setup resumes safely when re-run. After
+download, SpinTexture generates the worker scripts and verifies them on your
+PC by repainting a test image twice — checking exact 4x output and
+byte-identical determinism — before the worker is enabled.
 
 ### Art styles
 

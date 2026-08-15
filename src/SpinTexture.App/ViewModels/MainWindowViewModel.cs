@@ -23,6 +23,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private string _artisticWorkerStatusText = string.Empty;
     private bool _isArtisticWorkerInstalled;
     private ArtisticStyleOptionViewModel? _selectedArtisticStyleOption;
+    private ArtisticModelTierOptionViewModel _selectedArtisticModelTierOption;
     private bool _suppressArtisticStyleApply;
     private readonly IEnhancedLauncherService _enhancedLauncher;
     private readonly AppPreferencesStore _preferences;
@@ -249,6 +250,18 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             _ => !IsBusy && IsClientSignaturePresent);
         RestoreCommand = new AsyncRelayCommand(RestoreAsync, CanRestore);
         CancelCommand = new RelayCommand(_ => Cancel(), _ => IsBusy);
+        ArtisticModelTierOptions =
+        [
+            new ArtisticModelTierOptionViewModel(
+                ArtisticWorkerSetupService.ModelTierUltra,
+                "Ultra — SDXL Turbo (recommended)",
+                "The richest painted detail from a much larger model. ~7.3 GB download; best with 12 GB+ of GPU memory. Layout is held by a conservative repaint strength; signage additionally gets its own gentler treatment."),
+            new ArtisticModelTierOptionViewModel(
+                ArtisticWorkerSetupService.ModelTierStandard,
+                "Standard — SD 1.5 + ControlNet",
+                "Smaller download (~2.9 GB) and the hardest structural lock (ControlNet Tile pins every line in place). The safest choice for 8 GB GPUs and text-heavy zones.")
+        ];
+        _selectedArtisticModelTierOption = ArtisticModelTierOptions[0];
         SetupArtisticWorkerCommand = new AsyncRelayCommand(
             SetupArtisticWorkerAsync,
             () => !IsBusy);
@@ -2168,6 +2181,23 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _isArtisticWorkerInstalled, value);
     }
 
+    public IReadOnlyList<ArtisticModelTierOptionViewModel> ArtisticModelTierOptions { get; }
+
+    public ArtisticModelTierOptionViewModel SelectedArtisticModelTierOption
+    {
+        get => _selectedArtisticModelTierOption;
+        set
+        {
+            if (value is not null && SetProperty(ref _selectedArtisticModelTierOption, value))
+            {
+                OnPropertyChanged(nameof(SetupArtisticWorkerButtonText));
+            }
+        }
+    }
+
+    public string SetupArtisticWorkerButtonText =>
+        $"Set Up Diffusion Repaint (~{ArtisticWorkerSetupService.GetTotalDownloadBytes(_selectedArtisticModelTierOption.Key) / (1024.0 * 1024 * 1024):0.#} GB)";
+
     public ArtisticStyleOptionViewModel? SelectedArtisticStyleOption
     {
         get => _selectedArtisticStyleOption;
@@ -2280,7 +2310,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task SetupArtisticWorkerAsync(CancellationToken cancellationToken)
     {
-        if (!_dialogs.ConfirmArtisticWorkerSetup(ArtisticWorkerSetupService.TotalDownloadBytes))
+        var modelTier = _selectedArtisticModelTierOption.Key;
+        var tierComponents = ArtisticWorkerSetupService.GetComponents(modelTier);
+        if (!_dialogs.ConfirmArtisticWorkerSetup(
+            ArtisticWorkerSetupService.GetTotalDownloadBytes(modelTier),
+            tierComponents.Select(component => $"{component.Name} ({component.License} license)").ToArray()))
         {
             return;
         }
@@ -2311,6 +2345,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 StatusText = update.Message;
             });
             await _artisticWorkerSetup.SetupAsync(
+                    modelTier,
                     tools.RealEsrganPath!,
                     tools.RealEsrganModelsPath!,
                     progress,
