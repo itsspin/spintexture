@@ -15,10 +15,13 @@ internal static class LegacyIndexedBmp
 
     public static bool CanEncode(ReadOnlySpan<byte> source)
     {
+        // Thin classic trim strips (16-wide beams and pillars) and low-color
+        // painted surfaces are legitimate world art; only genuinely tiny or
+        // near-degenerate palettes stay on the preserved path.
         return TryReadLayout(source, out var layout)
-            && layout.Width >= 32
-            && layout.Height >= 32
-            && CountUsedIndices(source, layout) >= 16;
+            && layout.Width >= 16
+            && layout.Height >= 16
+            && CountUsedIndices(source, layout) >= 8;
     }
 
     public static byte[] Encode(

@@ -1092,6 +1092,19 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 cancellationToken);
 
             AddLog("DONE", $"Staged {result.Report.Statistics.EnhancedTextures:N0} enhanced textures without changing the live client.");
+            if (result.Report.Statistics.PreservedTextures > 0)
+            {
+                var preservedSummary = string.Join(
+                    " · ",
+                    result.Report.Statistics.PreservedReasons
+                        .OrderByDescending(pair => pair.Value)
+                        .Take(5)
+                        .Select(pair => $"{pair.Key}: {pair.Value:N0}"));
+                AddLog(
+                    "INFO",
+                    $"{result.Report.Statistics.PreservedTextures:N0} texture(s) kept their originals by policy — {preservedSummary}");
+            }
+
             if (result.Report.Statistics.FallbackTextures > 0)
             {
                 AddLog(
