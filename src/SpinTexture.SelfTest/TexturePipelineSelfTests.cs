@@ -2249,6 +2249,31 @@ public static class TexturePipelineSelfTests
             Assert(component.SizeBytes > 0, $"artistic component {component.Name} must pin its size");
         }
 
+        Assert(
+            ArtisticWorkerSetupService.StylePresets.Count >= 5
+            && ArtisticWorkerSetupService.StylePresets.Select(preset => preset.Key).Distinct().Count()
+                == ArtisticWorkerSetupService.StylePresets.Count,
+            "art style presets must have unique keys");
+        foreach (var preset in ArtisticWorkerSetupService.StylePresets)
+        {
+            Assert(
+                preset.Key != ArtisticStylePreset.CustomKey
+                && !string.IsNullOrWhiteSpace(preset.Name)
+                && !string.IsNullOrWhiteSpace(preset.Description)
+                && !string.IsNullOrWhiteSpace(preset.Prompt)
+                && !string.IsNullOrWhiteSpace(preset.NegativePrompt),
+                $"art style preset {preset.Key} must be fully described");
+            Assert(
+                preset.DenoiseStrength is >= 0.35 and <= 0.6
+                && preset.ControlStrength is >= 0.6 and <= 0.9
+                && preset.CfgScale is >= 4.0 and <= 8.0,
+                $"art style preset {preset.Key} strengths must stay in the layout-preserving range");
+            var config = preset.ToConfig();
+            Assert(
+                config.Steps == 18 && config.Seed == 90210 && config.MaximumDiffusionEdge == 1152,
+                $"art style preset {preset.Key} must share the deterministic performance knobs");
+        }
+
         var setupRoot = Path.Combine(
             Path.GetTempPath(),
             $"spintexture-artistic-{Guid.NewGuid():N}");
@@ -2273,6 +2298,49 @@ public static class TexturePipelineSelfTests
             Assert(
                 setup.GetStatus() is { IsInstalled: true, IsEnabled: true },
                 "generated scripts report as installed and enabled");
+            AssertEqual(
+                ArtisticWorkerSetupService.StylePresets[0].Key,
+                setup.GetActiveStylePresetKey(),
+                "a fresh install starts on the default art style");
+
+            setup.ApplyStylePreset("epic-cinematic");
+            AssertEqual(
+                "epic-cinematic",
+                setup.GetActiveStylePresetKey(),
+                "applying a preset makes it the active style");
+            var applied = setup.TryReadConfig();
+            Assert(
+                applied is { Seed: 90210, Steps: 18, MaximumDiffusionEdge: 1152 },
+                "applying a preset writes the shared deterministic knobs");
+
+            var customized = applied! with { Seed = 1234, Prompt = applied.Prompt + " extra" };
+            File.WriteAllText(
+                setup.ConfigPath,
+                System.Text.Json.JsonSerializer.Serialize(
+                    customized,
+                    new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)));
+            AssertEqual(
+                ArtisticStylePreset.CustomKey,
+                setup.GetActiveStylePresetKey(),
+                "hand-editing a style-bearing field reports the config as custom");
+
+            setup.ApplyStylePreset("dark-oil");
+            var reapplied = setup.TryReadConfig();
+            AssertEqual(
+                "dark-oil",
+                setup.GetActiveStylePresetKey(),
+                "presets can be applied over a customized config");
+            Assert(
+                reapplied is { Seed: 1234 },
+                "applying a preset preserves the user's seed, steps, and resolution knobs");
+
+            setup.WriteWorkerScripts(
+                Path.Combine(setupRoot, "realesrgan-ncnn-vulkan.exe"),
+                Path.Combine(setupRoot, "models"));
+            AssertEqual(
+                "dark-oil",
+                setup.GetActiveStylePresetKey(),
+                "re-running setup never resets the chosen art style");
         }
         finally
         {

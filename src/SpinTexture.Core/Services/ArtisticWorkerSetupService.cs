@@ -23,6 +23,48 @@ public sealed record ArtisticWorkerSetupStatus(
     string WorkerDirectory,
     string? DisabledReason);
 
+public sealed record ArtisticWorkerConfig(
+    int SchemaVersion,
+    string Preset,
+    string Prompt,
+    string NegativePrompt,
+    double DenoiseStrength,
+    double ControlStrength,
+    double CfgScale,
+    int Steps,
+    long Seed,
+    int MaximumDiffusionEdge);
+
+/// <summary>
+/// A curated diffusion style recipe. The seed, step count, and resolution
+/// bound stay shared so switching styles changes the art direction, not the
+/// performance or determinism characteristics.
+/// </summary>
+public sealed record ArtisticStylePreset(
+    string Key,
+    string Name,
+    string Description,
+    string Prompt,
+    string NegativePrompt,
+    double DenoiseStrength,
+    double ControlStrength,
+    double CfgScale)
+{
+    public const string CustomKey = "custom";
+
+    public ArtisticWorkerConfig ToConfig() => new(
+        SchemaVersion: 1,
+        Preset: Key,
+        Prompt: Prompt,
+        NegativePrompt: NegativePrompt,
+        DenoiseStrength: DenoiseStrength,
+        ControlStrength: ControlStrength,
+        CfgScale: CfgScale,
+        Steps: 18,
+        Seed: 90210,
+        MaximumDiffusionEdge: 1152);
+}
+
 /// <summary>
 /// One-click installer for the experimental diffusion-based artistic painted
 /// worker. Downloads a pinned, SHA-256-verified toolchain — the
@@ -69,6 +111,60 @@ public sealed class ArtisticWorkerSetupService
     ];
 
     public static long TotalDownloadBytes => Components.Sum(component => component.SizeBytes);
+
+    /// <summary>
+    /// Curated art directions for the diffusion repaint. Higher denoise means
+    /// the repaint departs further from the reconstructed surface; ControlNet
+    /// Tile keeps layout, text, and UV mapping locked in every preset.
+    /// </summary>
+    public static IReadOnlyList<ArtisticStylePreset> StylePresets { get; } =
+    [
+        new(
+            "painted-fantasy",
+            "Painted Fantasy",
+            "Bold hand-painted look with visible brush strokes and rich saturated color. The balanced default.",
+            "masterpiece hand-painted fantasy game texture, oil painting, visible brush strokes, rich saturated color, stylized",
+            "photorealistic, photo, blurry, jpeg artifacts, watermark",
+            0.45,
+            0.8,
+            5.5),
+        new(
+            "epic-cinematic",
+            "Epic Cinematic",
+            "Dramatic concept-art energy: cinematic lighting, atmospheric depth, rich color grading. The most transformative look.",
+            "epic fantasy concept art, cinematic dramatic lighting, painterly game texture, highly detailed, atmospheric, rich color grading, golden rim light, masterpiece",
+            "photorealistic, photo, flat, dull, washed out, blurry, jpeg artifacts, watermark",
+            0.5,
+            0.78,
+            6.0),
+        new(
+            "dark-oil",
+            "Dark Oil Painting",
+            "Old-master chiaroscuro: heavy impasto strokes, deep shadow, a muted ominous palette. Made for dungeons and dark cities.",
+            "dark fantasy oil painting, chiaroscuro, rembrandt lighting, heavy impasto brush strokes, muted earthy palette, ominous atmosphere, game texture, masterpiece",
+            "photorealistic, photo, bright, cheerful, neon, blurry, jpeg artifacts, watermark",
+            0.5,
+            0.8,
+            5.5),
+        new(
+            "storybook-watercolor",
+            "Storybook Watercolor",
+            "Soft washes, gentle ink lines, warm whimsical color. Fits pastoral zones and bright cities.",
+            "storybook watercolor illustration, soft color washes, delicate ink outlines, warm whimsical fantasy palette, hand-painted game texture",
+            "photorealistic, photo, harsh contrast, neon, blurry, jpeg artifacts, watermark",
+            0.5,
+            0.8,
+            5.0),
+        new(
+            "comic-ink",
+            "Comic Ink",
+            "Bold cel-shaded planes with strong ink lines and vivid flat color. The most graphic, stylized option.",
+            "bold comic book art, cel shading, strong clean ink lines, vivid flat colors, graphic fantasy game texture, high contrast",
+            "photorealistic, photo, soft gradients, muddy, blurry, jpeg artifacts, watermark",
+            0.55,
+            0.75,
+            6.5)
+    ];
 
     private static readonly HttpClient Http = CreateHttpClient();
 
@@ -370,27 +466,91 @@ public sealed class ArtisticWorkerSetupService
         }
     }
 
+    private static readonly JsonSerializerOptions ConfigJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true
+    };
+
+    public string ConfigPath => Path.Combine(WorkerDirectory, "worker-config.json");
+
+    public ArtisticWorkerConfig? TryReadConfig()
+    {
+        try
+        {
+            if (!File.Exists(ConfigPath))
+            {
+                return null;
+            }
+
+            return JsonSerializer.Deserialize<ArtisticWorkerConfig>(
+                File.ReadAllText(ConfigPath),
+                ConfigJsonOptions);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Returns the preset key the current config was generated from, or
+    /// "custom" when the file was hand-edited past its recipe (any drift in
+    /// the style-bearing fields counts).
+    /// </summary>
+    public string GetActiveStylePresetKey()
+    {
+        var config = TryReadConfig();
+        if (config is null)
+        {
+            return StylePresets[0].Key;
+        }
+
+        var declared = StylePresets.FirstOrDefault(preset =>
+            string.Equals(preset.Key, config.Preset, StringComparison.OrdinalIgnoreCase));
+        if (declared is null)
+        {
+            return ArtisticStylePreset.CustomKey;
+        }
+
+        var expected = declared.ToConfig() with { Seed = config.Seed, Steps = config.Steps, MaximumDiffusionEdge = config.MaximumDiffusionEdge };
+        return expected == config ? declared.Key : ArtisticStylePreset.CustomKey;
+    }
+
+    public void ApplyStylePreset(string presetKey)
+    {
+        var preset = StylePresets.FirstOrDefault(candidate =>
+                string.Equals(candidate.Key, presetKey, StringComparison.OrdinalIgnoreCase))
+            ?? throw new ArgumentOutOfRangeException(nameof(presetKey));
+        Directory.CreateDirectory(WorkerDirectory);
+        // Preserve the user's performance/determinism knobs when they exist.
+        var current = TryReadConfig();
+        var config = preset.ToConfig();
+        if (current is not null)
+        {
+            config = config with
+            {
+                Seed = current.Seed,
+                Steps = current.Steps,
+                MaximumDiffusionEdge = current.MaximumDiffusionEdge
+            };
+        }
+
+        File.WriteAllText(ConfigPath, JsonSerializer.Serialize(config, ConfigJsonOptions));
+    }
+
     internal void WriteWorkerScripts(string realEsrganPath, string realEsrganModelsPath)
     {
         // The PowerShell implementation reads image sizes, orchestrates the
         // Real-ESRGAN 4x base pass and the diffusion repaint, and guarantees
         // the exact-4x output contract; the .bat is only a shim so the worker
-        // matches SpinTexture's process-invocation contract.
-        var config = new
+        // matches SpinTexture's process-invocation contract. An existing
+        // config survives re-setup so style choices are never reset.
+        if (TryReadConfig() is null)
         {
-            schemaVersion = 1,
-            prompt = "masterpiece hand-painted fantasy game texture, oil painting, visible brush strokes, rich saturated color, stylized",
-            negativePrompt = "photorealistic, photo, blurry, jpeg artifacts, watermark",
-            denoiseStrength = 0.45,
-            controlStrength = 0.8,
-            cfgScale = 5.5,
-            steps = 18,
-            seed = 90210,
-            maximumDiffusionEdge = 1152
-        };
-        File.WriteAllText(
-            Path.Combine(WorkerDirectory, "worker-config.json"),
-            JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(
+                ConfigPath,
+                JsonSerializer.Serialize(StylePresets[0].ToConfig(), ConfigJsonOptions));
+        }
 
         var script = new StringBuilder();
         script.AppendLine("# Generated by SpinTexture \u2014 experimental artistic painted worker.");
