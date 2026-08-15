@@ -196,10 +196,18 @@ public static class TexturePipelineSelfTests
                 AssetScope.CharactersAndEquipmentOnly),
             "a revision-2 character pack should still receive the cutout compatibility upgrade");
         Assert(
-            !TextureProcessingPipeline.RequiresRepair(
+            TextureProcessingPipeline.RequiresRepair(
                 Report(revision: 3),
                 AssetScope.CharactersAndEquipmentOnly),
-            "a revision-3 character-only pack has no environmental celestial work and must not receive a pointless revision-4 repair");
+            "a revision-3 character pack should receive the masked color-key repair for weapon and cutout bitmaps");
+        Assert(
+            TextureProcessingPipeline.GetMissingRepairRuleIds(
+                    Report(revision: 3),
+                    AssetScope.CharactersAndEquipmentOnly)
+                .SequenceEqual(
+                    [TextureProcessingPipeline.MaskedMaterialColorKeySafetyRuleId],
+                    StringComparer.Ordinal),
+            "a revision-3 character-only pack has no environmental celestial work; only the masked color-key rule applies");
         Assert(
             TextureProcessingPipeline.RequiresCutoutMipUpgrade(
                 Report(revision: 0, isRepair: true),
