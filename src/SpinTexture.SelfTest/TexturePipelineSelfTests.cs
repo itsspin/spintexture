@@ -2222,8 +2222,13 @@ public static class TexturePipelineSelfTests
         Assert(
             command.ExecutablePath.EndsWith("cmd.exe", StringComparison.OrdinalIgnoreCase)
             && command.Arguments.Contains("/c")
-            && command.Arguments.Contains(Path.GetFullPath(scriptPath)),
-            "batch workers must run through the command interpreter");
+            && command.Arguments.Contains(".\\worker.bat")
+            && !command.Arguments.Contains(Path.GetFullPath(scriptPath)),
+            "batch workers run through cmd by bare relative name so spaced install paths cannot be mangled by /c quote stripping");
+        AssertEqual(
+            Path.GetDirectoryName(Path.GetFullPath(scriptPath))!,
+            command.WorkingDirectory!,
+            "the batch worker's working directory anchors its bare relative invocation");
         var direct = new ArtisticWorkerCommandBuilder().CreateStylize(
             Path.Combine(Path.GetTempPath(), "artistic", "worker.exe"),
             Path.Combine(Path.GetTempPath(), "in"),
