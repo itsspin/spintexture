@@ -34,7 +34,12 @@ public sealed class ArtisticWorkerCommandBuilder
         };
 
         // Batch scripts cannot be started directly with UseShellExecute=false;
-        // route them through the command interpreter explicitly.
+        // route them through the command interpreter explicitly. The script is
+        // invoked by bare relative name with the working directory set to its
+        // folder: cmd's /c quote-stripping mangles a command line that starts
+        // with a quoted absolute path whenever the install lives in a
+        // directory containing spaces (for example "SpinTexture (1)"), while a
+        // command that does not start with a quote is passed through intact.
         var isBatchScript = Path.GetExtension(executablePath) is { } extension
             && (extension.Equals(".bat", StringComparison.OrdinalIgnoreCase)
                 || extension.Equals(".cmd", StringComparison.OrdinalIgnoreCase));
@@ -42,7 +47,9 @@ public sealed class ArtisticWorkerCommandBuilder
             ? Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe"
             : executablePath;
         var arguments = isBatchScript
-            ? new List<string> { "/d", "/c", Path.GetFullPath(executablePath) }.Concat(contractArguments).ToList()
+            ? new List<string> { "/d", "/c", $".\\{Path.GetFileName(executablePath)}" }
+                .Concat(contractArguments)
+                .ToList()
             : contractArguments;
         return new NativeProcessCommand(
             fileName,
