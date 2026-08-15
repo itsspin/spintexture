@@ -532,6 +532,23 @@ public sealed class TgaPixelBuffer
     }
 
     /// <summary>
+    /// Bakes optional cavity/ambient-occlusion shading and emissive glow into
+    /// the diffuse color (the classic renderer cannot add them at draw time).
+    /// Deterministic, hue-preserving within hard gain bounds, tile-safe when
+    /// <paramref name="wrapEdges"/> is set, and alpha is untouched.
+    /// </summary>
+    public TgaPixelBuffer ApplyLightingBake(
+        double bakedDepth,
+        double emissiveGlow,
+        bool wrapEdges)
+    {
+        return new TgaPixelBuffer(
+            Width,
+            Height,
+            LightingBaker.Bake(_rgba, Width, Height, bakedDepth, emissiveGlow, wrapEdges));
+    }
+
+    /// <summary>
     /// Applies one bounded art-direction palette after the shared graphic-paint
     /// finish. Themes reshape only source-derived color and luminance; they never
     /// add random marks, alter geometry, or change alpha. ZoneAware must be resolved

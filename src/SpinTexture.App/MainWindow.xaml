@@ -943,6 +943,36 @@
 
                             <Border Margin="0,14,0,0" Padding="13" CornerRadius="7" Background="#0D1117"
                                     BorderBrush="#343B46" BorderThickness="1">
+                                <StackPanel>
+                                    <TextBlock Text="BAKED LIGHTING (OPTIONAL)" Style="{StaticResource FieldLabelStyle}" />
+                                    <Grid Margin="0,8,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="18" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="BAKED DEPTH" Style="{StaticResource FieldLabelStyle}"
+                                                       ToolTip="Bakes subtle carved-in shading into the color: mortar lines and cracks recess, blocks and planks pop forward. The classic renderer has no normal maps, so this is how surfaces gain depth. 0 is off; around 0.4 is a good start." />
+                                            <Slider Value="{Binding BakedDepth, Delay=200}" Minimum="0" Maximum="1"
+                                                    LargeChange="0.1" SmallChange="0.05"
+                                                    AutomationProperties.Name="Baked depth strength" />
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="2">
+                                            <TextBlock Text="EMISSIVE GLOW" Style="{StaticResource FieldLabelStyle}"
+                                                       ToolTip="Pushes bright, saturated regions (windows, lava cracks, runes) toward a glow with a soft light spill, so they read as light sources at night and in dungeons. 0 is off; around 0.35 is a good start." />
+                                            <Slider Value="{Binding EmissiveGlow, Delay=200}" Minimum="0" Maximum="1"
+                                                    LargeChange="0.1" SmallChange="0.05"
+                                                    AutomationProperties.Name="Emissive glow strength" />
+                                        </StackPanel>
+                                    </Grid>
+                                    <TextBlock Margin="0,7,0,0" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap"
+                                               Text="Applies to every preset except Faithful and soft spell effects, tiles seamlessly, and is recorded in the pack so repairs match. Signage and icons automatically receive a gentler bake. Both at 0 = exactly the previous behavior." />
+                                </StackPanel>
+                            </Border>
+
+                            <Border Margin="0,14,0,0" Padding="13" CornerRadius="7" Background="#0D1117"
+                                    BorderBrush="#343B46" BorderThickness="1">
                                 <Grid>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="1.15*" />

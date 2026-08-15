@@ -46,6 +46,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private double _paintedDetailPreservation;
     private double _paintedColorSimplification;
     private double _paintedCanvasGrain;
+    private double _bakedDepth;
+    private double _emissiveGlow;
     private ScopeOptionViewModel _selectedScopeOption;
     private string? _selectedZone;
     private int _selectedMaximumDimension = 2048;
@@ -214,6 +216,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _paintedDetailPreservation = rememberedStyle.DetailPreservation;
         _paintedColorSimplification = rememberedStyle.ColorSimplification;
         _paintedCanvasGrain = rememberedStyle.CanvasGrain;
+        _bakedDepth = Math.Clamp(rememberedPreferences.BakedDepth, 0d, 1d);
+        _emissiveGlow = Math.Clamp(rememberedPreferences.EmissiveGlow, 0d, 1d);
         var rememberedInstall = rememberedPreferences.LastInstallPath;
         if (!string.IsNullOrWhiteSpace(rememberedInstall)
             && Directory.Exists(rememberedInstall)
@@ -582,6 +586,53 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             var style = EffectivePaintedStyleOrDefault;
             return style == PaintedStyleSettings.Default ? null : style;
         }
+    }
+
+    public double BakedDepth
+    {
+        get => _bakedDepth;
+        set
+        {
+            var clamped = Math.Clamp(double.IsFinite(value) ? value : 0d, 0d, 1d);
+            if (SetProperty(ref _bakedDepth, clamped))
+            {
+                PersistLighting();
+                UpdateOptionPreviewSelection();
+            }
+        }
+    }
+
+    public double EmissiveGlow
+    {
+        get => _emissiveGlow;
+        set
+        {
+            var clamped = Math.Clamp(double.IsFinite(value) ? value : 0d, 0d, 1d);
+            if (SetProperty(ref _emissiveGlow, clamped))
+            {
+                PersistLighting();
+                UpdateOptionPreviewSelection();
+            }
+        }
+    }
+
+    private void PersistLighting()
+    {
+        var depth = _bakedDepth;
+        var glow = _emissiveGlow;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _preferences.WriteLightingAsync(depth, glow).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is
+                IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                // Remembering slider positions is best-effort; the build itself
+                // always uses the live in-memory values.
+            }
+        });
     }
 
     public ScopeOptionViewModel SelectedScopeOption
@@ -995,7 +1046,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 IsSelectedZoneScope ? SelectedZone : null,
                 PaintedTheme: EffectivePaintedTheme,
                 WorldExpansions: EffectiveWorldExpansionSelection,
-                PaintedStyle: EffectivePaintedStyle);
+                PaintedStyle: EffectivePaintedStyle,
+                BakedDepth: _bakedDepth,
+                EmissiveGlow: _emissiveGlow);
 
             TexturePackBuildResult result = await _workflow.BuildAsync(
                 InstallPath,
@@ -2058,7 +2111,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             IsSelectedZoneScope ? SelectedZone : null,
             PaintedTheme: EffectivePaintedTheme,
             WorldExpansions: EffectiveWorldExpansionSelection,
-            PaintedStyle: EffectivePaintedStyle);
+            PaintedStyle: EffectivePaintedStyle,
+            BakedDepth: _bakedDepth,
+            EmissiveGlow: _emissiveGlow);
         OptionPreview.UpdateSelection(
             InstallPath,
             previewOptions,

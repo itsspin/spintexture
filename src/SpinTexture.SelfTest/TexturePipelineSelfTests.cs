@@ -98,6 +98,7 @@ public static class TexturePipelineSelfTests
             .ConfigureAwait(false);
         TestTextureModelSelection();
         TestArtisticWorkerCommand();
+        TestLightingBaker();
         TestPresetAwareFidelityGate();
         TestPaintedFinalValidationPolicyAndCappedMetrics();
         await output.WriteLineAsync("Texture model discovery and preset fidelity-gate tests passed.").ConfigureAwait(false);
@@ -2195,6 +2196,99 @@ public static class TexturePipelineSelfTests
         var replacement = Reserve("lavastorm.s3d", "replacement-material.dds");
         Assert(replacement.Accepted, "failed previews should release their family and archive share");
         AssertEqual(lava.Index, replacement.Index, "released preview indices should be reused deterministically");
+    }
+
+    private static void TestLightingBaker()
+    {
+        const int size = 96;
+        var fixtureBytes = new byte[18 + (size * size * 4)];
+        fixtureBytes[2] = 2;
+        BinaryPrimitives.WriteUInt16LittleEndian(fixtureBytes.AsSpan(12), size);
+        BinaryPrimitives.WriteUInt16LittleEndian(fixtureBytes.AsSpan(14), size);
+        fixtureBytes[16] = 32;
+        fixtureBytes[17] = 0x28;
+        for (var y = 0; y < size; y++)
+        {
+            for (var x = 0; x < size; x++)
+            {
+                // Periodic masonry-like pattern with a bright saturated "window"
+                // and a transparent hole so every code path is exercised.
+                var mortar = (x % 24) < 2 || (y % 24) < 2;
+                var window = ((x + 40) % size) < 8 && ((y + 40) % size) < 8;
+                var offset = 18 + (((y * size) + x) * 4);
+                fixtureBytes[offset] = mortar ? (byte)70 : window ? (byte)250 : (byte)150;
+                fixtureBytes[offset + 1] = mortar ? (byte)66 : window ? (byte)190 : (byte)128;
+                fixtureBytes[offset + 2] = mortar ? (byte)60 : window ? (byte)80 : (byte)110;
+                fixtureBytes[offset + 3] = ((x + 12) % size) < 6 && ((y + 70) % size) < 6
+                    ? (byte)0
+                    : byte.MaxValue;
+            }
+        }
+
+        var source = TgaPixelBuffer.Read(fixtureBytes);
+        var untouched = source.ApplyLightingBake(0, 0, wrapEdges: true);
+        Assert(
+            untouched.RgbaPixels.Span.SequenceEqual(source.RgbaPixels.Span),
+            "a zero-strength lighting bake must be byte-identical to its input");
+
+        var baked = source.ApplyLightingBake(0.6, 0.5, wrapEdges: true);
+        var bakedAgain = source.ApplyLightingBake(0.6, 0.5, wrapEdges: true);
+        Assert(
+            baked.RgbaPixels.Span.SequenceEqual(bakedAgain.RgbaPixels.Span),
+            "the lighting bake must be deterministic");
+        var changed = false;
+        for (var pixel = 0; pixel < size * size; pixel++)
+        {
+            var offset = pixel * 4;
+            AssertEqual(
+                source.RgbaPixels.Span[offset + 3],
+                baked.RgbaPixels.Span[offset + 3],
+                "the lighting bake must never touch the alpha plane");
+            changed |= source.RgbaPixels.Span[offset] != baked.RgbaPixels.Span[offset];
+        }
+
+        Assert(changed, "a non-zero lighting bake should visibly shade the fixture");
+
+        // Tiling safety: baking a circularly shifted tile and shifting the
+        // result back must match baking the original (within float rounding),
+        // which is exactly the property that keeps wrapped seams invisible.
+        const int shiftX = 37;
+        const int shiftY = 19;
+        var shiftedBytes = (byte[])fixtureBytes.Clone();
+        for (var y = 0; y < size; y++)
+        {
+            for (var x = 0; x < size; x++)
+            {
+                var from = 18 + ((((y + shiftY) % size * size) + ((x + shiftX) % size)) * 4);
+                var to = 18 + (((y * size) + x) * 4);
+                for (var channel = 0; channel < 4; channel++)
+                {
+                    shiftedBytes[to + channel] = fixtureBytes[from + channel];
+                }
+            }
+        }
+
+        var shiftedBaked = TgaPixelBuffer.Read(shiftedBytes).ApplyLightingBake(0.6, 0.5, wrapEdges: true);
+        var maximumSeamDelta = 0;
+        for (var y = 0; y < size; y++)
+        {
+            for (var x = 0; x < size; x++)
+            {
+                var original = (((y + shiftY) % size * size) + ((x + shiftX) % size)) * 4;
+                var shifted = (((y * size) + x)) * 4;
+                for (var channel = 0; channel < 3; channel++)
+                {
+                    maximumSeamDelta = Math.Max(
+                        maximumSeamDelta,
+                        Math.Abs(baked.RgbaPixels.Span[original + channel]
+                            - shiftedBaked.RgbaPixels.Span[shifted + channel]));
+                }
+            }
+        }
+
+        Assert(
+            maximumSeamDelta <= 1,
+            $"the wrapped lighting bake must be translation-invariant so tiles stay seamless (max delta {maximumSeamDelta})");
     }
 
     private static void TestArtisticWorkerCommand()

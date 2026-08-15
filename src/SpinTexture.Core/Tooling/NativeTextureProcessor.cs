@@ -1446,7 +1446,10 @@ public sealed class NativeTextureProcessor
                         job.Request.Options.PaintedTheme,
                         GetPaintedThemeStrength(job.Request, job.PreserveAlphaCoverage)
                             * themeStrengthScale);
-                    cropped = themed.Image;
+                    cropped = ApplyConfiguredLightingBake(
+                        themed.Image,
+                        job,
+                        attenuateForUvCriticalDetail: requiresFinalValidation);
                     var candidateMipResult = await EncodeCurrentImageAsync(
                             cropped,
                             encodedCandidatePath)
@@ -1491,18 +1494,20 @@ public sealed class NativeTextureProcessor
             var painted = cropped.ApplyRusticPaintedGrade(
                 GetRusticPaintedStrength(job.Request));
             ValidateStylizedOutput(CalculateFidelityMetrics(job.Decoded, painted));
-            cropped = painted;
+            cropped = ApplyConfiguredLightingBake(painted, job);
             mipResult = await EncodeCurrentImageAsync(cropped).ConfigureAwait(false);
         }
         else
         {
+            cropped = ApplyConfiguredLightingBake(cropped, job);
             mipResult = await EncodeCurrentImageAsync(cropped).ConfigureAwait(false);
         }
 
         return new NativeTextureProcessResult(
             job.Request.DestinationPath,
             job.Dimensions,
-            GetProcessingRoute(job, key, graphicPaintedScale, paintedThemeScale),
+            GetProcessingRoute(job, key, graphicPaintedScale, paintedThemeScale)
+                + FormatLightingBakeRoute(job),
             DateTimeOffset.UtcNow - job.Started,
             mipResult.MipCount,
             mipResult.UsedCutoutFloor);
@@ -1545,6 +1550,57 @@ public sealed class NativeTextureProcessor
                     ? "FANT"
                     : "CUBIC").ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Applies the optional baked-lighting finishing recorded in the build
+    /// options. Faithful output and soft-translucent effects are exempt (their
+    /// contract is "unchanged"), and UV-critical detail such as signage gets
+    /// an attenuated bake so the strict post-encode validation keeps passing.
+    /// </summary>
+    private static TgaPixelBuffer ApplyConfiguredLightingBake(
+        TgaPixelBuffer image,
+        PreparedColorJob job,
+        bool attenuateForUvCriticalDetail = false)
+    {
+        if (job.HasSoftTranslucentAlpha
+            || job.EffectivePreset == TexturePreset.Faithful)
+        {
+            return image;
+        }
+
+        var depth = Math.Clamp(job.Request.Options.BakedDepth, 0d, 1d);
+        var glow = Math.Clamp(job.Request.Options.EmissiveGlow, 0d, 1d);
+        if (attenuateForUvCriticalDetail)
+        {
+            depth *= 0.5;
+            glow *= 0.35;
+        }
+
+        if (depth <= 0d && glow <= 0d)
+        {
+            return image;
+        }
+
+        return image.ApplyLightingBake(depth, glow, job.Request.WrapEdges);
+    }
+
+    private static string FormatLightingBakeRoute(PreparedColorJob job)
+    {
+        if (job.HasSoftTranslucentAlpha || job.EffectivePreset == TexturePreset.Faithful)
+        {
+            return string.Empty;
+        }
+
+        var depth = Math.Clamp(job.Request.Options.BakedDepth, 0d, 1d);
+        var glow = Math.Clamp(job.Request.Options.EmissiveGlow, 0d, 1d);
+        return (depth > 0d, glow > 0d) switch
+        {
+            (true, true) => " + baked depth and emissive glow",
+            (true, false) => " + baked depth",
+            (false, true) => " + emissive glow",
+            _ => string.Empty
+        };
     }
 
     private static string GetProcessingRoute(

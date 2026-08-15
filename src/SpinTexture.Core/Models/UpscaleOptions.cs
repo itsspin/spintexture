@@ -54,7 +54,15 @@ public sealed record UpscaleOptions(
     // Null in recorded manifests keeps older payloads readable unchanged.
     [property: System.Text.Json.Serialization.JsonIgnore(
         Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
-    string? ZoneArchiveStem = null)
+    string? ZoneArchiveStem = null,
+    // Optional baked-lighting finishing (0 = off, the compatibility default
+    // for every manifest recorded before these passes existed).
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    double BakedDepth = 0,
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    double EmissiveGlow = 0)
 {
     /// <summary>
     /// The effective painted style: explicit settings when present, otherwise
