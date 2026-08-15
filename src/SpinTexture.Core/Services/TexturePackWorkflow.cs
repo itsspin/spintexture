@@ -495,10 +495,8 @@ public sealed class TexturePackWorkflow
             baselineReport,
             baseline.Options.Scope,
             baselineArtifactPaths);
-        var isExactOriginalSafetyRepair = !isManualTextureRevision
-            && isTargetedSafetyRepair
-            && missingRepairRules.Count != 0
-            && missingRepairRules.All(ruleId =>
+        var missingExactOriginalRules = missingRepairRules
+            .Where(ruleId =>
                 ruleId.Equals(
                     TextureProcessingPipeline.CelestialSkySafetyRuleId,
                     StringComparison.Ordinal)
@@ -507,6 +505,20 @@ public sealed class TexturePackWorkflow
                     StringComparison.Ordinal)
                 || ruleId.Equals(
                     TextureProcessingPipeline.LegacyTranslucentMaterialSafetyRuleId,
+                    StringComparison.Ordinal))
+            .ToArray();
+        // The masked color-key rule regenerates textures, so it can only run
+        // on the full targeted repair path. A pack that is also missing
+        // exact-original safety rules takes the lighter exact-original path
+        // first (recording only the rules it actually applied); the masked
+        // rule stays missing and is offered as its own follow-up repair.
+        var isExactOriginalSafetyRepair = !isManualTextureRevision
+            && isTargetedSafetyRepair
+            && missingExactOriginalRules.Length != 0
+            && missingRepairRules.All(ruleId =>
+                missingExactOriginalRules.Contains(ruleId, StringComparer.Ordinal)
+                || ruleId.Equals(
+                    TextureProcessingPipeline.MaskedMaterialColorKeySafetyRuleId,
                     StringComparison.Ordinal));
 
         if (baseline.Options.Scope == AssetScope.AllSafeTextures
@@ -593,7 +605,7 @@ public sealed class TexturePackWorkflow
                     baselineInfo,
                     baselineReport,
                     tools,
-                    missingRepairRules,
+                    missingExactOriginalRules,
                     activeInstall,
                     activeInstallDirectory,
                     repairStartedUtc,
@@ -1093,9 +1105,16 @@ public sealed class TexturePackWorkflow
             SafetyUpgradedArtifacts = safetyUpgradedArtifacts,
             TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
             PaintedProfileRevision = baselineReport?.PaintedProfileRevision ?? 0,
-            AppliedRepairRuleIds = TextureProcessingPipeline.GetCurrentRepairRuleIds(
-                baseline.Options.Scope,
-                artifactPaths)
+            // Record only what this exact-original pass actually applied on
+            // top of the pack's prior provenance. Claiming every current rule
+            // here would silently mark repairs (such as the masked color-key
+            // regeneration) as done when this path never performs them.
+            AppliedRepairRuleIds = TextureProcessingPipeline
+                .GetRecordedRepairRuleIds(baselineReport, baseline.Options.Scope)
+                .Concat(missingRepairRules)
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(ruleId => ruleId, StringComparer.Ordinal)
+                .ToArray()
         };
         var reportPath = Path.Combine(staged.BuildDirectory, "texture-report.json");
         await WriteReportAsync(reportPath, report, cancellationToken).ConfigureAwait(false);
