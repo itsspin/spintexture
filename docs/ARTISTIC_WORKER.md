@@ -63,14 +63,16 @@ installs everything automatically: the stable-diffusion.cpp **Vulkan**
 runtime (AMD, NVIDIA, and Intel GPUs — no CUDA, no Python) plus the models
 for the **Model quality** tier you pick:
 
-- **Ultra — SDXL Turbo (recommended, ~7.3 GB)**: DreamShaper XL Turbo v2.1
-  with the fp16-fix SDXL VAE. The richest painted detail; best with 12 GB+
-  of GPU memory. stable-diffusion.cpp has no SDXL ControlNet, so layout is
-  held by a conservative repaint strength (and Turbo's few steps keep build
-  time comparable to Standard despite the larger model).
-- **Standard — SD 1.5 + ControlNet (~2.9 GB)**: DreamShaper 8 with
-  ControlNet v1.1 Tile. Smaller download and the hardest structural lock —
-  the safest choice for 8 GB GPUs and text-heavy zones.
+- **Standard — SD 1.5 + ControlNet (recommended, ~2.9 GB)**: DreamShaper 8
+  with ControlNet v1.1 Tile. The best-performing tier in practice: the
+  structural lock lets the repaint push harder, and the compact model
+  reloads quickly for each texture.
+- **Ultra — SDXL Turbo (experimental, ~7.3 GB)**: DreamShaper XL Turbo v2.1
+  with the fp16-fix SDXL VAE. Be aware of the architecture cost: the worker
+  launches one process per texture, and each launch reloads the ~7 GB model
+  into GPU memory — the GPU idles during every load, so real-world builds
+  run several times slower than Standard. stable-diffusion.cpp also has no
+  SDXL ControlNet, so the repaint must stay more conservative.
 
 Switch tiers any time by picking the other tier and running setup again —
 already-verified components are kept, your art style carries over (re-mapped

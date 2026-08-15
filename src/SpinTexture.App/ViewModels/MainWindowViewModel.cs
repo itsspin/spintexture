@@ -255,13 +255,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         ArtisticModelTierOptions =
         [
             new ArtisticModelTierOptionViewModel(
-                ArtisticWorkerSetupService.ModelTierUltra,
-                "Ultra — SDXL Turbo (recommended)",
-                "The richest painted detail from a much larger model. ~7.3 GB download; best with 12 GB+ of GPU memory. Layout is held by a conservative repaint strength; signage additionally gets its own gentler treatment."),
-            new ArtisticModelTierOptionViewModel(
                 ArtisticWorkerSetupService.ModelTierStandard,
-                "Standard — SD 1.5 + ControlNet",
-                "Smaller download (~2.9 GB) and the hardest structural lock (ControlNet Tile pins every line in place). The safest choice for 8 GB GPUs and text-heavy zones.")
+                "Standard — SD 1.5 + ControlNet (recommended)",
+                "The best-performing tier in practice: ControlNet Tile pins every line in place so the repaint can push harder, and the compact model reloads quickly for each texture. ~2.9 GB download."),
+            new ArtisticModelTierOptionViewModel(
+                ArtisticWorkerSetupService.ModelTierUltra,
+                "Ultra — SDXL Turbo (experimental)",
+                "A much larger model (~7.3 GB) that reloads for every texture, so builds run far slower and the GPU idles while it loads. No ControlNet exists for SDXL here, so the repaint must also stay more conservative. Try it only out of curiosity.")
         ];
         _selectedArtisticModelTierOption = ArtisticModelTierOptions[0];
         SetupArtisticWorkerCommand = new AsyncRelayCommand(

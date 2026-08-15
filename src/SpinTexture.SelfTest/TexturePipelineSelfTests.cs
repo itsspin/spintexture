@@ -2608,6 +2608,21 @@ public static class TexturePipelineSelfTests
                 && generatedScript.Contains("denoiseScale", StringComparison.Ordinal),
                 "the generated worker script honors SpinTexture's per-file art direction sidecar");
             Assert(
+                generatedScript.Contains("SPINTEXTURE-PROGRESS", StringComparison.Ordinal),
+                "the generated worker script reports per-texture progress for the build ETA");
+            Assert(
+                NativeTextureProcessor.ArtisticWorkerProgressAdapter.TryParse(
+                    "SPINTEXTURE-PROGRESS 3/42 j00000005.png", out var progressCurrent, out var progressTotal)
+                && progressCurrent == 3
+                && progressTotal == 42
+                && !NativeTextureProcessor.ArtisticWorkerProgressAdapter.TryParse(
+                    "loading model", out _, out _)
+                && !NativeTextureProcessor.ArtisticWorkerProgressAdapter.TryParse(
+                    "SPINTEXTURE-PROGRESS 0/42 x.png", out _, out _)
+                && !NativeTextureProcessor.ArtisticWorkerProgressAdapter.TryParse(
+                    "SPINTEXTURE-PROGRESS 5/4 x.png", out _, out _),
+                "the worker progress lines parse into phase counts and reject malformed input");
+            Assert(
                 File.Exists(Path.Combine(setup.WorkerDirectory, "worker.bat"))
                 && File.Exists(Path.Combine(setup.WorkerDirectory, "worker-config.json")),
                 "worker shim and editable config are generated");

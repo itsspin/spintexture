@@ -709,7 +709,12 @@ public sealed class ArtisticWorkerSetupService
         script.AppendLine("$batchMetaPath = Join-Path $i 'batch-meta.json'");
         script.AppendLine("if (Test-Path $batchMetaPath) { $batchMeta = Get-Content $batchMetaPath -Raw | ConvertFrom-Json }");
         script.AppendLine("try {");
-        script.AppendLine("  foreach ($png in Get-ChildItem -Path $i -Filter *.png) {");
+        script.AppendLine("  $pngFiles = @(Get-ChildItem -Path $i -Filter *.png)");
+        script.AppendLine("  $current = 0");
+        script.AppendLine("  foreach ($png in $pngFiles) {");
+        script.AppendLine("    $current++");
+        script.AppendLine("    # Structured progress SpinTexture parses into the build ETA.");
+        script.AppendLine("    Write-Host (\"SPINTEXTURE-PROGRESS {0}/{1} {2}\" -f $current, $pngFiles.Count, $png.Name)");
         script.AppendLine("    $prompt = [string]$config.prompt");
         script.AppendLine("    $denoise = [double]$config.denoiseStrength");
         script.AppendLine("    if ($batchMeta -and $batchMeta.files) {");
