@@ -48,6 +48,14 @@ Requirements:
   rebuild individual textures and must reproduce the recorded pack exactly.
 - Exit code 0 on success; any other exit code triggers the safe fallback.
 
+SpinTexture may also write a `batch-meta.json` sidecar into the input
+directory with optional per-file art direction: `promptSuffix` (material and
+zone vocabulary composed deterministically from the texture's name and its
+zone archive) and `denoiseScale` (below 1.0 for water, lava, flame, and
+other animated-surface families so consecutive animation frames stay
+coherent). The generated one-click worker honors it; a custom worker that
+only enumerates `*.png` can safely ignore it.
+
 ## One-click setup (recommended)
 
 The **Set Up Diffusion Repaint (~2.9 GB)** button in the Graphic Painted

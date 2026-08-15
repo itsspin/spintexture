@@ -2249,6 +2249,40 @@ public static class TexturePipelineSelfTests
             Assert(component.SizeBytes > 0, $"artistic component {component.Name} must pin its size");
         }
 
+        // Per-file diffusion art direction is a pure function of name + zone
+        // so single-texture repairs reproduce the exact batch-time prompt.
+        var lava = DiffusionPromptComposer.Compose("lavarock01.tga", "lavastorm");
+        Assert(
+            lava.PromptSuffix is not null
+            && lava.PromptSuffix.Contains("molten", StringComparison.Ordinal)
+            && lava.PromptSuffix.Contains("volcanic", StringComparison.Ordinal),
+            "lava textures in lavastorm compose material and zone prompt clauses");
+        Assert(
+            lava.DenoiseScale == DiffusionPromptComposer.CoherentSurfaceDenoiseScale,
+            "fluid and fire surfaces restrain denoise for animation coherence");
+        AssertEqual(
+            lava,
+            DiffusionPromptComposer.Compose("lavarock01.tga", "lavastorm"),
+            "prompt composition must be deterministic");
+        var water = DiffusionPromptComposer.Compose("water3.bmp", null);
+        Assert(
+            water.PromptSuffix is not null && water.DenoiseScale < 1d,
+            "water frame sequences get coherence-restrained denoise even without a zone");
+        var stone = DiffusionPromptComposer.Compose("stonewall2.dds", "unknownzone123");
+        Assert(
+            stone.PromptSuffix is not null
+            && stone.PromptSuffix.Contains("stone", StringComparison.Ordinal)
+            && stone == DiffusionPromptComposer.Compose("stonewall2.dds", null)
+            && stone.DenoiseScale == 1d,
+            "unreviewed zones contribute no zone clause and leave denoise unscaled");
+        Assert(
+            DiffusionPromptComposer.Compose("qrc2n.tga", null).IsDefault,
+            "names without material tokens compose no directive at all");
+        var cloak = DiffusionPromptComposer.Compose("cloak01.dds", null);
+        Assert(
+            cloak.PromptSuffix is null || !cloak.PromptSuffix.Contains("wood", StringComparison.Ordinal),
+            "equipment names like cloak must not false-positive as wood");
+
         Assert(
             ArtisticWorkerSetupService.StylePresets.Count >= 5
             && ArtisticWorkerSetupService.StylePresets.Select(preset => preset.Key).Distinct().Count()
@@ -2291,6 +2325,11 @@ public static class TexturePipelineSelfTests
                 && generatedScript.Contains("DreamShaper_8_pruned.safetensors", StringComparison.Ordinal)
                 && generatedScript.Contains("$targetW = $w * 4", StringComparison.Ordinal),
                 "the generated worker script pins seed, models, and the exact-4x contract");
+            Assert(
+                generatedScript.Contains("batch-meta.json", StringComparison.Ordinal)
+                && generatedScript.Contains("promptSuffix", StringComparison.Ordinal)
+                && generatedScript.Contains("denoiseScale", StringComparison.Ordinal),
+                "the generated worker script honors SpinTexture's per-file art direction sidecar");
             Assert(
                 File.Exists(Path.Combine(setup.WorkerDirectory, "worker.bat"))
                 && File.Exists(Path.Combine(setup.WorkerDirectory, "worker-config.json")),
@@ -4217,9 +4256,9 @@ public static class TexturePipelineSelfTests
     private static void TestPaintedProfileReportCompatibility()
     {
         AssertEqual(
-            5,
+            6,
             TextureBuildReport.CurrentIllustratedProfileRevision,
-            "Graphic Painted profile revision should advance independently to revision five (bold painterly stylizer)");
+            "Graphic Painted profile revision should advance independently to revision six (material and zone aware diffusion prompts)");
         AssertEqual(
             1,
             TextureBuildReport.CurrentRusticPaintedProfileRevision,
@@ -4245,9 +4284,9 @@ public static class TexturePipelineSelfTests
             TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.RusticPainted),
             "unchanged Rustic Painted builds should retain the base resume operation key");
         AssertEqual(
-            $"{TexturePackWorkflow.FreshBuildResumeOperationKey}-illustrated-5",
+            $"{TexturePackWorkflow.FreshBuildResumeOperationKey}-illustrated-6",
             TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.Illustrated),
-            "Graphic Painted revision five should use a fenced resume operation key");
+            "Graphic Painted revision six should use a fenced resume operation key");
 
         var report = new TextureBuildReport(
             TextureBuildReport.CurrentSchemaVersion,

@@ -48,7 +48,13 @@ public sealed record UpscaleOptions(
     WorldExpansion? WorldExpansions = null,
     [property: System.Text.Json.Serialization.JsonIgnore(
         Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
-    PaintedStyleSettings? PaintedStyle = null)
+    PaintedStyleSettings? PaintedStyle = null,
+    // Per-artifact context resolved during a build (never a user choice):
+    // the normalized zone archive stem, used to flavor diffusion prompts.
+    // Null in recorded manifests keeps older payloads readable unchanged.
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string? ZoneArchiveStem = null)
 {
     /// <summary>
     /// The effective painted style: explicit settings when present, otherwise

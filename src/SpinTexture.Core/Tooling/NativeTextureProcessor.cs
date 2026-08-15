@@ -1198,6 +1198,14 @@ public sealed class NativeTextureProcessor
                     cancellationToken).ConfigureAwait(false);
             }
 
+            if (key.WorkerKind == NeuralWorkerKind.ExternalArtistic)
+            {
+                await WriteArtisticBatchMetadataAsync(
+                    inputDirectory,
+                    expectedNames,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             var command = key.WorkerKind switch
             {
                 NeuralWorkerKind.ExternalArtistic => _artisticWorker.CreateStylize(
@@ -1276,6 +1284,55 @@ public sealed class NativeTextureProcessor
             throw;
         }
     }
+
+    /// <summary>
+    /// Writes the optional per-file art-direction sidecar the generated
+    /// diffusion worker understands. Entries are derived deterministically
+    /// from each texture's own name and zone, so a single-texture repair
+    /// composes the identical hint the original batch used. Custom workers
+    /// that only enumerate *.png simply never see the file.
+    /// </summary>
+    private static async Task WriteArtisticBatchMetadataAsync(
+        string inputDirectory,
+        IReadOnlyDictionary<string, PreparedColorJob> stagedFiles,
+        CancellationToken cancellationToken)
+    {
+        var entries = new SortedDictionary<string, object>(StringComparer.Ordinal);
+        foreach (var (fileName, job) in stagedFiles)
+        {
+            var directive = DiffusionPromptComposer.Compose(
+                Path.GetFileName(job.Request.SourcePath),
+                job.Request.Options.ZoneArchiveStem);
+            if (directive.IsDefault)
+            {
+                continue;
+            }
+
+            entries[fileName] = new
+            {
+                promptSuffix = directive.PromptSuffix,
+                denoiseScale = directive.DenoiseScale
+            };
+        }
+
+        if (entries.Count == 0)
+        {
+            return;
+        }
+
+        var payload = JsonSerializer.Serialize(
+            new { schemaVersion = 1, files = entries },
+            ArtisticBatchMetadataJsonOptions);
+        await File.WriteAllTextAsync(
+            Path.Combine(inputDirectory, "batch-meta.json"),
+            payload,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static readonly JsonSerializerOptions ArtisticBatchMetadataJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true
+    };
 
     private async Task<NativeTextureProcessResult> CompleteColorJobAsync(
         PreparedColorJob job,
