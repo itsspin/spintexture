@@ -3,11 +3,27 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Text.Json;
 using System.Windows.Data;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using SpinTexture.Core.Services;
 using SpinTexture.Core.Models;
+using SpinTexture.Core.Textures;
 
 namespace SpinTexture.App.ViewModels;
+
+/// <summary>Both panes of one texture rendered on demand from managed bytes.</summary>
+public sealed record OnDemandPreviewPanes(
+    DecodedTexturePreview? Original,
+    DecodedTexturePreview? Enhanced);
+
+/// <summary>
+/// Resolves the original and staged bytes of one pack texture when the build
+/// did not capture a full preview image pair for it.
+/// </summary>
+public delegate Task<OnDemandPreviewPanes> OnDemandPreviewLoader(
+    string archivePath,
+    string logicalName,
+    CancellationToken cancellationToken);
 
 public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
 {
@@ -21,6 +37,7 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
     };
 
     private readonly string manifestDirectory;
+    private readonly OnDemandPreviewLoader? onDemandLoader;
     private PreviewGalleryEntryViewModel? selectedEntry;
     private BitmapSource? selectedOriginalImage;
     private BitmapSource? selectedEnhancedImage;
@@ -31,13 +48,17 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
     private bool isImageLoading;
     private double zoom = 1;
 
-    public PreviewGalleryViewModel(string manifestPath, bool canApplyChoices = false)
+    public PreviewGalleryViewModel(
+        string manifestPath,
+        bool canApplyChoices = false,
+        OnDemandPreviewLoader? onDemandLoader = null)
     {
         if (string.IsNullOrWhiteSpace(manifestPath))
         {
             throw new ArgumentException("A preview manifest path is required.", nameof(manifestPath));
         }
 
+        this.onDemandLoader = onDemandLoader;
         ManifestPath = Path.GetFullPath(manifestPath);
         CanApplyChoices = canApplyChoices;
         manifestDirectory = Path.GetDirectoryName(ManifestPath) ?? Environment.CurrentDirectory;
@@ -330,7 +351,7 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
         try
         {
             ImageLoadResult result = await Task.Run(
-                () => LoadImagePair(entry, cancellation.Token),
+                () => LoadImagePairAsync(entry, cancellation.Token),
                 cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
 
@@ -365,7 +386,7 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
         }
     }
 
-    private static ImageLoadResult LoadImagePair(
+    private async Task<ImageLoadResult> LoadImagePairAsync(
         PreviewGalleryEntryViewModel entry,
         CancellationToken cancellationToken)
     {
@@ -373,18 +394,55 @@ public sealed class PreviewGalleryViewModel : ObservableObject, IDisposable
         BitmapSource? original = LoadBitmap(entry.OriginalImagePath, decodePixelWidth: null);
         cancellationToken.ThrowIfCancellationRequested();
         BitmapSource? enhanced = LoadBitmap(entry.EnhancedImagePath, decodePixelWidth: null);
+        var renderedOnDemand = false;
+        if ((original is null || enhanced is null) && onDemandLoader is not null)
+        {
+            var panes = await onDemandLoader(
+                    entry.ArchivePath,
+                    entry.LogicalName,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            original ??= CreateBitmap(panes.Original);
+            enhanced ??= CreateBitmap(panes.Enhanced);
+            renderedOnDemand = original is not null || enhanced is not null;
+        }
 
         string status = (original, enhanced) switch
         {
+            (not null, not null) when renderedOnDemand =>
+                "Rendered on demand - original from verified source bytes, enhanced from the staged pack",
             (not null, not null) => "Full-resolution pair loaded - both sides use identical output dimensions",
+            (null, not null) when renderedOnDemand =>
+                "Enhanced side rendered from the staged pack; the verified original bytes are not reachable right now",
             (null, not null) => "Original preview image is missing",
             (not null, null) => "Enhanced preview image is missing",
             _ when !entry.HasImagePair =>
-                "Indexed texture - choose Keep original or a Redo style; a full image pair was not captured",
+                "Preview could not be rendered for this texture container - choose Keep original or a Redo style",
             _ => "Both preview images are missing"
         };
 
         return new ImageLoadResult(original, enhanced, status);
+    }
+
+    private static BitmapSource? CreateBitmap(DecodedTexturePreview? decoded)
+    {
+        if (decoded is null)
+        {
+            return null;
+        }
+
+        var bitmap = BitmapSource.Create(
+            decoded.Width,
+            decoded.Height,
+            96,
+            96,
+            PixelFormats.Bgra32,
+            null,
+            decoded.BgraPixels,
+            decoded.Width * 4);
+        bitmap.Freeze();
+        return bitmap;
     }
 
     private double CalculateFitZoom()
@@ -523,7 +581,7 @@ public sealed class PreviewGalleryEntryViewModel : ObservableObject
         || !string.IsNullOrWhiteSpace(EnhancedImagePath);
     public string PreviewAvailabilityText => HasImagePair
         ? "FULL BEFORE / AFTER"
-        : "INDEXED • SELECTABLE";
+        : "ON-DEMAND • SELECTABLE";
 
     public string ArchiveName => string.IsNullOrWhiteSpace(ArchivePath)
         ? "Loose texture"

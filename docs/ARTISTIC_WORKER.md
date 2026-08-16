@@ -155,3 +155,15 @@ Expect roughly seconds per texture on a modern GPU — a full world build can
 take hours, so trial a single zone first. Review results in the Staged Pack
 Library preview before installing; everything remains protected by the same
 verification, backup, and restore guarantees as every other build.
+
+## Renderer provenance and repairs
+
+Every Graphic Painted Fantasy pack records which renderer produced it: the
+external diffusion worker or the built-in painterly stylization. A repair
+regenerates retried textures with whichever renderer is configured at repair
+time, so SpinTexture refuses a repair whose current renderer does not match
+the pack's recorded one instead of quietly mixing two art styles in one pack.
+Set the worker up again (or remove it) to match the pack, or rebuild the pack
+under the renderer you want going forward. Packs created before this marker
+existed repair with the currently configured renderer and note that in the
+build warnings.

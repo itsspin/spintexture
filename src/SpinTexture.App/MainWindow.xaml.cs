@@ -340,6 +340,49 @@ public partial class MainWindow : Window
         ShowPreview(manifestPath, applyChoices: null, returnsToPacks: false);
     }
 
+    /// <summary>
+    /// Builds the gallery's fallback renderer for textures without a captured
+    /// preview pair: the enhanced side decodes from the staged pack payload
+    /// and the original side from verified original bytes (live client or
+    /// exact managed backups). Null when no valid install is configured.
+    /// </summary>
+    private OnDemandPreviewLoader? CreateOnDemandPreviewLoader(string previewManifestPath)
+    {
+        var installPath = _viewModel.InstallPath;
+        if (string.IsNullOrWhiteSpace(installPath) || !System.IO.Directory.Exists(installPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var previewPaths = WorkspaceLocator.ForInstall(installPath);
+            var previewWorkflow = new TexturePackWorkflow();
+            return async (archivePath, logicalName, cancellationToken) => new OnDemandPreviewPanes(
+                await previewWorkflow.LoadOriginalTexturePreviewAsync(
+                        previewPaths,
+                        previewManifestPath,
+                        archivePath,
+                        logicalName,
+                        cancellationToken)
+                    .ConfigureAwait(false),
+                await previewWorkflow.LoadStagedTexturePreviewAsync(
+                        previewPaths,
+                        previewManifestPath,
+                        archivePath,
+                        logicalName,
+                        cancellationToken)
+                    .ConfigureAwait(false));
+        }
+        catch (Exception exception) when (exception is IOException
+                                               or UnauthorizedAccessException
+                                               or ArgumentException
+                                               or InvalidDataException)
+        {
+            return null;
+        }
+    }
+
     private void ShowPreview(
         string manifestPath,
         Func<IReadOnlyList<SpinTexture.Core.Models.TextureOverride>, Task>? applyChoices,
@@ -361,7 +404,10 @@ public partial class MainWindow : Window
                 }
 
                 _previewGalleryView?.Dispose();
-                _previewGalleryView = new PreviewGalleryWindow(fullManifestPath, applyChoices);
+                _previewGalleryView = new PreviewGalleryWindow(
+                    fullManifestPath,
+                    applyChoices,
+                    CreateOnDemandPreviewLoader(fullManifestPath));
                 _previewGalleryView.CloseRequested += (_, _) =>
                 {
                     if (_previewReturnsToPacks && _packLibraryView is not null)

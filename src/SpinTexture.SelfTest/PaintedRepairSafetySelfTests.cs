@@ -33,6 +33,146 @@ internal static class PaintedRepairSafetySelfTests
             .ConfigureAwait(false);
         await TestRetriedPreservedFailureSurvivesForeignCompressionAsync(cancellationToken)
             .ConfigureAwait(false);
+        await TestPaintedRendererMismatchStopsRepairAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A Graphic Painted Fantasy pack records which renderer produced it (the
+    /// external diffusion worker or the built-in stylization). A repair that
+    /// would regenerate textures with the other renderer must stop instead of
+    /// quietly mixing two art styles into one pack.
+    /// </summary>
+    private static async Task TestPaintedRendererMismatchStopsRepairAsync(
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-painted-renderer-{Guid.NewGuid():N}");
+        var installPath = Path.Combine(root, "EverQuest");
+        var workspacePath = Path.Combine(root, "Workspace");
+        Directory.CreateDirectory(installPath);
+        try
+        {
+            var paths = new ProjectPaths(installPath, workspacePath);
+            await File.WriteAllBytesAsync(
+                    Path.Combine(installPath, "eqgame.exe"),
+                    "synthetic-eqgame"u8.ToArray(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await File.WriteAllTextAsync(
+                    Path.Combine(installPath, "paintzone.xmi"),
+                    "synthetic-zone-marker",
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var archivePath = Path.Combine(installPath, "paintzone.s3d");
+            await WriteArchiveAsync(
+                    archivePath,
+                    [new("surface.tga", CreateTarga(32, 32, seed: 83))],
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var enhancedArchive = Path.Combine(root, "enhanced-paintzone.s3d");
+            await WriteArchiveAsync(
+                    enhancedArchive,
+                    [new("surface.tga", CreateTarga(128, 128, seed: 84))],
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            var options = new UpscaleOptions(
+                TexturePreset.Illustrated,
+                AssetScope.WorldOnly,
+                MaximumDimension: 1024,
+                GenerateMipMaps: false,
+                InstallAfterBuild: false,
+                PaintedTheme: PaintedTheme.ComicInk);
+            var baseline = await new StagedBuildService().BuildAsync(
+                    new StagedBuildRequest(
+                        paths,
+                        options,
+                        [
+                            new StagedBuildItem(
+                                "paintzone.s3d",
+                                new DelegateStagedArtifactBuilder(async (context, token) =>
+                                {
+                                    var bytes = await File.ReadAllBytesAsync(enhancedArchive, token)
+                                        .ConfigureAwait(false);
+                                    await File.WriteAllBytesAsync(context.DestinationPath, bytes, token)
+                                        .ConfigureAwait(false);
+                                }))
+                        ],
+                        "painted-renderer-baseline"),
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            // Current painted profile, one missing targeted rule (expanded
+            // coverage) so the repair reaches regeneration planning, and a
+            // recorded diffusion renderer that this environment does not have.
+            var recordedRules = TextureProcessingPipeline
+                .GetCurrentRepairRuleIds(options.Scope, ["paintzone.s3d"])
+                .Where(ruleId => !ruleId.Equals(
+                    TextureProcessingPipeline.ExpandedClassicCoverageRuleId,
+                    StringComparison.Ordinal))
+                .ToArray();
+            await using (var reportStream = new FileStream(
+                Path.Combine(baseline.BuildDirectory, "texture-report.json"),
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None))
+            {
+                await JsonSerializer.SerializeAsync(
+                        reportStream,
+                        new TextureBuildReport(
+                            TextureBuildReport.CurrentSchemaVersion,
+                            baseline.BuildId,
+                            DateTimeOffset.UtcNow,
+                            installPath,
+                            baseline.BuildDirectory,
+                            1,
+                            new TextureBuildStatistics(
+                                1,
+                                1,
+                                0,
+                                1,
+                                1,
+                                new Dictionary<string, int>(),
+                                []))
+                        {
+                            TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
+                            PaintedProfileRevision =
+                                TextureBuildReport.CurrentIllustratedProfileRevision,
+                            UsedExternalArtisticWorker = true,
+                            AppliedRepairRuleIds = recordedRules
+                        },
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            var baselineFingerprint = await FileIntegrity.FingerprintAsync(
+                    Path.Combine(baseline.BuildDirectory, "payload", "paintzone.s3d"),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var failure = await AssertThrowsAsync<InvalidOperationException>(
+                    () => new TexturePackWorkflow(clientClosedGuard: () => { })
+                        .RepairStagedPackAsync(
+                            paths,
+                            baseline.ManifestPath,
+                            cancellationToken: cancellationToken),
+                    "a diffusion-rendered painted pack must not be repaired by the built-in renderer")
+                .ConfigureAwait(false);
+            Assert(
+                failure.Message.Contains("diffusion repaint worker", StringComparison.OrdinalIgnoreCase),
+                "renderer mismatch failure should name the missing diffusion worker");
+            AssertEqual(
+                baselineFingerprint,
+                await FileIntegrity.FingerprintAsync(
+                        Path.Combine(baseline.BuildDirectory, "payload", "paintzone.s3d"),
+                        cancellationToken)
+                    .ConfigureAwait(false),
+                "renderer mismatch leaves the immutable baseline unchanged");
+        }
+        finally
+        {
+            DeleteTree(root);
+        }
     }
 
     private static async Task TestLegacyPaintedManualReprocessFailsClosedAsync(

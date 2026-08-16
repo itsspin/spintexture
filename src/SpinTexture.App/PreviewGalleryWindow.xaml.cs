@@ -11,12 +11,16 @@ public partial class PreviewGalleryWindow : UserControl, IDisposable
 
     public PreviewGalleryWindow(
         string previewManifestPath,
-        Func<IReadOnlyList<SpinTexture.Core.Models.TextureOverride>, Task>? applyChoices = null)
+        Func<IReadOnlyList<SpinTexture.Core.Models.TextureOverride>, Task>? applyChoices = null,
+        SpinTexture.App.ViewModels.OnDemandPreviewLoader? onDemandLoader = null)
     {
         InitializeComponent();
 
         this.applyChoices = applyChoices;
-        viewModel = new PreviewGalleryViewModel(previewManifestPath, applyChoices is not null);
+        viewModel = new PreviewGalleryViewModel(
+            previewManifestPath,
+            applyChoices is not null,
+            onDemandLoader);
         ManifestPath = viewModel.ManifestPath;
         DataContext = viewModel;
     }
