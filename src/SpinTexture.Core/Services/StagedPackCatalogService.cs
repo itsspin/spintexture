@@ -252,50 +252,46 @@ public sealed class StagedPackCatalogService
     {
         ArgumentNullException.ThrowIfNull(paths);
         var age = minimumAge ?? TimeSpan.FromHours(24);
+        if (age < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(minimumAge),
+                "The leftover-build minimum age cannot be negative.");
+        }
+
         if (!Directory.Exists(paths.StagingPath))
         {
             return Array.Empty<StagedPackDebrisInfo>();
         }
 
+        EnsureDebrisRootSafe(paths);
+
         var results = new List<StagedPackDebrisInfo>();
         var cutoff = DateTimeOffset.UtcNow - age;
         foreach (var directory in Directory.EnumerateDirectories(paths.StagingPath))
         {
+            if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidDataException(
+                    $"Leftover cleanup is blocked by a reparse-point directory: {directory}");
+            }
+
             if (!IsBuildDebris(directory))
             {
                 continue;
             }
 
-            DateTimeOffset lastWrite;
-            long bytes = 0;
             try
             {
-                lastWrite = Directory.GetLastWriteTimeUtc(directory);
-                foreach (var file in Directory.EnumerateFiles(
-                             directory,
-                             "*",
-                             SearchOption.AllDirectories))
+                var inspected = InspectBuildDebrisTree(paths, directory);
+                if (inspected.LastWriteUtc <= cutoff)
                 {
-                    bytes += new FileInfo(file).Length;
-                    var fileWrite = File.GetLastWriteTimeUtc(file);
-                    if (fileWrite > lastWrite)
-                    {
-                        lastWrite = fileWrite;
-                    }
+                    results.Add(inspected);
                 }
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
                 continue;
-            }
-
-            if (lastWrite <= cutoff)
-            {
-                results.Add(new StagedPackDebrisInfo(
-                    Path.GetFullPath(directory),
-                    Path.GetFileName(directory),
-                    bytes,
-                    lastWrite));
             }
         }
 
@@ -319,26 +315,51 @@ public sealed class StagedPackCatalogService
         long reclaimedBytes = 0;
         var failures = new List<string>();
         using var libraryLock = StagingLibraryLock.Acquire(paths.WorkspacePath);
+        EnsureDebrisRootSafe(paths);
         foreach (var item in debris)
         {
-            var stagingRoot = Path.GetFullPath(paths.StagingPath);
-            var target = Path.GetFullPath(item.Directory);
-            if (!target.StartsWith(
-                    stagingRoot + Path.DirectorySeparatorChar,
-                    StringComparison.OrdinalIgnoreCase)
-                || !Directory.Exists(target)
-                || !IsBuildDebris(target))
-            {
-                continue;
-            }
-
             try
             {
-                Directory.Delete(target, recursive: true);
+                var target = PathGuard.EnsurePathUnderRoot(
+                    paths.StagingPath,
+                    item.Directory);
+                if (!PathGuard.SamePath(
+                        Path.GetDirectoryName(target)!,
+                        paths.StagingPath)
+                    || !string.Equals(
+                        Path.GetFileName(target),
+                        item.Name,
+                        StringComparison.OrdinalIgnoreCase)
+                    || !Directory.Exists(target))
+                {
+                    throw new InvalidDataException(
+                        "The leftover folder no longer matches the discovered managed target.");
+                }
+
+                if ((File.GetAttributes(target) & FileAttributes.ReparsePoint) != 0
+                    || !IsBuildDebris(target))
+                {
+                    throw new InvalidDataException(
+                        "The leftover folder is now a reparse point, completed pack, or resumable build.");
+                }
+
+                var observed = InspectBuildDebrisTree(paths, target);
+                if (observed.Bytes != item.Bytes
+                    || observed.LastWriteUtc != item.LastWriteUtc)
+                {
+                    throw new InvalidDataException(
+                        "The leftover folder changed after it was reviewed; refresh before trying again.");
+                }
+
+                DeleteDebrisTree(target);
                 deleted++;
-                reclaimedBytes += item.Bytes;
+                reclaimedBytes += observed.Bytes;
             }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            catch (Exception exception) when (exception is
+                IOException or
+                UnauthorizedAccessException or
+                InvalidDataException or
+                ArgumentException)
             {
                 failures.Add($"{item.Name}: {exception.Message}");
             }
@@ -350,6 +371,143 @@ public sealed class StagedPackCatalogService
     private static bool IsBuildDebris(string directory) =>
         !File.Exists(Path.Combine(directory, "manifest.json"))
         && !File.Exists(Path.Combine(directory, "build-checkpoint.json"));
+
+    private static void EnsureDebrisRootSafe(ProjectPaths paths)
+    {
+        if ((File.GetAttributes(paths.StagingPath) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException(
+                "Leftover cleanup is blocked because the staged-pack library root is a reparse point.");
+        }
+    }
+
+    private static StagedPackDebrisInfo InspectBuildDebrisTree(
+        ProjectPaths paths,
+        string directory)
+    {
+        var target = PathGuard.EnsurePathUnderRoot(paths.StagingPath, directory);
+        if (!PathGuard.SamePath(Path.GetDirectoryName(target)!, paths.StagingPath))
+        {
+            throw new InvalidDataException(
+                "Only direct staged-pack build folders can be cleaned as leftovers.");
+        }
+
+        var pending = new Stack<string>();
+        pending.Push(target);
+        long bytes = 0;
+        var lastWriteUtc = new DateTimeOffset(Directory.GetLastWriteTimeUtc(target));
+        while (pending.Count != 0)
+        {
+            var current = pending.Pop();
+            var currentAttributes = File.GetAttributes(current);
+            if ((currentAttributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidDataException(
+                    $"Leftover cleanup is blocked by a reparse point: {current}");
+            }
+
+            var directoryWriteUtc = new DateTimeOffset(
+                Directory.GetLastWriteTimeUtc(current));
+            if (directoryWriteUtc > lastWriteUtc)
+            {
+                lastWriteUtc = directoryWriteUtc;
+            }
+
+            foreach (var entry in Directory.EnumerateFileSystemEntries(
+                         current,
+                         "*",
+                         SearchOption.TopDirectoryOnly))
+            {
+                var attributes = File.GetAttributes(entry);
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    throw new InvalidDataException(
+                        $"Leftover cleanup is blocked by a reparse point: {entry}");
+                }
+
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    pending.Push(entry);
+                    continue;
+                }
+
+                bytes = checked(bytes + new FileInfo(entry).Length);
+                var fileWriteUtc = new DateTimeOffset(File.GetLastWriteTimeUtc(entry));
+                if (fileWriteUtc > lastWriteUtc)
+                {
+                    lastWriteUtc = fileWriteUtc;
+                }
+            }
+        }
+
+        if (!IsBuildDebris(target))
+        {
+            throw new InvalidDataException(
+                "The folder became a completed or resumable build during leftover inspection.");
+        }
+
+        return new StagedPackDebrisInfo(
+            target,
+            Path.GetFileName(target),
+            bytes,
+            lastWriteUtc);
+    }
+
+    private static void DeleteDebrisTree(string root)
+    {
+        var files = new List<string>();
+        var directories = new List<string>();
+        var pending = new Stack<string>();
+        pending.Push(root);
+        while (pending.Count != 0)
+        {
+            var directory = pending.Pop();
+            if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidDataException(
+                    $"The leftover folder changed to an unsafe reparse point: {directory}");
+            }
+
+            directories.Add(directory);
+            foreach (var entry in Directory.EnumerateFileSystemEntries(
+                         directory,
+                         "*",
+                         SearchOption.TopDirectoryOnly))
+            {
+                var attributes = File.GetAttributes(entry);
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    throw new InvalidDataException(
+                        $"The leftover folder changed to contain a reparse point: {entry}");
+                }
+
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    pending.Push(entry);
+                }
+                else
+                {
+                    files.Add(entry);
+                }
+            }
+        }
+
+        if (!IsBuildDebris(root))
+        {
+            throw new InvalidDataException(
+                "The leftover folder became a completed or resumable build before deletion.");
+        }
+
+        foreach (var file in files.OrderByDescending(path => path.Length))
+        {
+            File.Delete(file);
+        }
+
+        foreach (var directory in directories.OrderByDescending(path => path.Length))
+        {
+            Directory.Delete(directory, recursive: false);
+        }
+    }
 
     private static IReadOnlyList<string> EnumerateManifestCandidates(
         string stagingPath,

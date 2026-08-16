@@ -11,6 +11,8 @@ internal static class StagedBuildCheckpointSelfTests
     {
         await TestInvalidWorldExpansionSelectionRejectedBeforeWorkspaceAsync(cancellationToken)
             .ConfigureAwait(false);
+        await TestBeforeManifestCommitFailureNeverPublishesAsync(cancellationToken)
+            .ConfigureAwait(false);
         await TestRestartResumeAndFinalizationAsync(cancellationToken).ConfigureAwait(false);
         await TestManifestFinalizationWindowResumesAsync(cancellationToken).ConfigureAwait(false);
         await TestFinalizerFailureResumesWithoutRebuildingAsync(cancellationToken).ConfigureAwait(false);
@@ -27,6 +29,7 @@ internal static class StagedBuildCheckpointSelfTests
         await TestChangedOperationNeverResumesAsync(cancellationToken).ConfigureAwait(false);
         await TestChangedSourceNeverResumesAsync(cancellationToken).ConfigureAwait(false);
         await TestStatisticsAndPreviewReplayAsync(cancellationToken).ConfigureAwait(false);
+        await TestNoKeyFinalizerFailureNeverPublishesAsync(cancellationToken).ConfigureAwait(false);
         await TestNoKeyBuildIsImmediatelyVisibleAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -61,6 +64,42 @@ internal static class StagedBuildCheckpointSelfTests
         Assert(
             !Directory.Exists(fixture.Paths.WorkspacePath),
             "invalid expansion options are rejected before a checkpoint workspace is created");
+    }
+
+    private static async Task TestBeforeManifestCommitFailureNeverPublishesAsync(
+        CancellationToken cancellationToken)
+    {
+        using var fixture = await Fixture.CreateAsync("precommit-identity", cancellationToken)
+            .ConfigureAwait(false);
+        var counts = new int[2];
+        var request = Request(fixture, CreateBuilders(fixture, counts)) with
+        {
+            BeforeManifestCommitAsync = _ => throw new InvalidOperationException(
+                "simulated renderer identity drift")
+        };
+        await AssertThrowsAsync<InvalidOperationException>(() =>
+                new StagedBuildService().BuildAsync(
+                    request,
+                    cancellationToken: cancellationToken))
+            .ConfigureAwait(false);
+
+        var buildDirectory = Directory.EnumerateDirectories(fixture.Paths.StagingPath)
+            .Single();
+        Assert(
+            !File.Exists(Path.Combine(buildDirectory, "manifest.json"))
+            && File.Exists(Path.Combine(buildDirectory, "build-checkpoint.json")),
+            "a renderer-identity drift check fails before the completed-pack marker while retaining verified resume work");
+
+        var resumed = await new StagedBuildService().BuildAsync(
+                request with { BeforeManifestCommitAsync = static _ => Task.CompletedTask },
+                cancellationToken: cancellationToken,
+                finalizeAsync: static (_, _) => Task.CompletedTask)
+            .ConfigureAwait(false);
+        Assert(
+            resumed.ResumedArtifactCount == 2
+            && counts.SequenceEqual([1, 1])
+            && File.Exists(resumed.ManifestPath),
+            "an unchanged renderer identity resumes payloads and publishes only after the pre-commit check passes");
     }
 
     private static async Task TestCancellationRetainsCheckpointAsync(CancellationToken cancellationToken)
@@ -644,6 +683,44 @@ internal static class StagedBuildCheckpointSelfTests
             fixture.Paths,
             cancellationToken: cancellationToken).ConfigureAwait(false);
         Assert(catalog.Count == 1, "non-resumable build is immediately catalog-visible");
+    }
+
+    private static async Task TestNoKeyFinalizerFailureNeverPublishesAsync(
+        CancellationToken cancellationToken)
+    {
+        using var fixture = await Fixture.CreateAsync("no-key-finalizer", cancellationToken)
+            .ConfigureAwait(false);
+        var counts = new int[2];
+        var checkpointCoveredFinalization = false;
+        await AssertThrowsAsync<IOException>(() => new StagedBuildService().BuildAsync(
+            new StagedBuildRequest(
+                fixture.Paths,
+                fixture.Options,
+                CreateBuilders(fixture, counts)),
+            cancellationToken: cancellationToken,
+            finalizeAsync: async (result, token) =>
+            {
+                checkpointCoveredFinalization = File.Exists(
+                    Path.Combine(result.BuildDirectory, "build-checkpoint.json"));
+                await File.WriteAllTextAsync(
+                    Path.Combine(result.BuildDirectory, "texture-report.json"),
+                    "partial",
+                    token).ConfigureAwait(false);
+                throw new IOException("simulated repair report failure");
+            })).ConfigureAwait(false);
+
+        var catalog = await new StagedPackCatalogService().DiscoverAsync(
+            fixture.Paths,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        Assert(
+            checkpointCoveredFinalization
+            && catalog.Count == 0
+            && !Directory.EnumerateFiles(
+                    fixture.Paths.StagingPath,
+                    "manifest.json",
+                    SearchOption.AllDirectories)
+                .Any(),
+            "a non-resumable repair keeps its checkpoint through metadata finalization and removes every incomplete manifest on failure");
     }
 
     private static async Task TestStatisticsAndPreviewReplayAsync(CancellationToken cancellationToken)

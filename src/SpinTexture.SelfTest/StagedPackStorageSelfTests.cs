@@ -39,6 +39,22 @@ internal static class StagedPackStorageSelfTests
                 Path.Combine(paths.StagingPath, "build-two", "manifest.json"),
                 "manifest-two"u8.ToArray(),
                 cancellationToken).ConfigureAwait(false);
+            var resumableBuild = Path.Combine(paths.StagingPath, "build-resumable");
+            Directory.CreateDirectory(Path.Combine(resumableBuild, "work"));
+            await File.WriteAllBytesAsync(
+                Path.Combine(resumableBuild, "build-checkpoint.json"),
+                "checkpoint"u8.ToArray(),
+                cancellationToken).ConfigureAwait(false);
+            await File.WriteAllBytesAsync(
+                Path.Combine(resumableBuild, "work", "partial.bin"),
+                new byte[512],
+                cancellationToken).ConfigureAwait(false);
+            var leftoverBuild = Path.Combine(paths.StagingPath, "build-leftover");
+            Directory.CreateDirectory(leftoverBuild);
+            await File.WriteAllBytesAsync(
+                Path.Combine(leftoverBuild, "orphan.tmp"),
+                new byte[256],
+                cancellationToken).ConfigureAwait(false);
             var installTransactionDirectory = Path.Combine(paths.BackupPath, "apply-storage-test");
             Directory.CreateDirectory(installTransactionDirectory);
             var installManifestPath = Path.Combine(installTransactionDirectory, "install-manifest.json");
@@ -60,11 +76,21 @@ internal static class StagedPackStorageSelfTests
             var original = await service.InspectAsync(paths, cancellationToken).ConfigureAwait(false);
             Assert(original.UsesDefaultLocation, "initial pack library should use the default location");
             AssertEqual(2, original.PackCount, "completed pack count before migration");
+            AssertEqual(1, original.ResumableBuildCount, "resumable build count before migration");
+            AssertEqual(1, original.LeftoverDirectoryCount, "leftover build count before migration");
+            Assert(original.CompletedPackBytes > original.LeftoverBytes,
+                "completed-pack storage should be broken out from leftovers");
+            Assert(original.ResumableBuildBytes >= 512,
+                "resumable-build storage should include partial payloads");
+            Assert(original.Summary.Contains("resumable", StringComparison.OrdinalIgnoreCase),
+                "storage summary should explain protected resumable space");
+            Assert(original.Summary.Contains("logical", StringComparison.OrdinalIgnoreCase),
+                "storage summary must not overstate hard-linked payload sizes as exact disk use");
 
             var plan = await service.PlanAsync(paths, storageBase, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
             Assert(!plan.IsNoOp, "custom destination should require a move");
-            AssertEqual(4, plan.FileCount, "planned migration file count");
+            AssertEqual(7, plan.FileCount, "planned migration file count");
             var moved = await service.MoveAsync(paths, plan, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
             Assert(moved.OldLibraryRemoved, "verified migration should remove the old managed copy");

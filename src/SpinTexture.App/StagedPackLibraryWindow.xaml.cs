@@ -17,20 +17,26 @@ namespace SpinTexture.App;
 
 public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChanged, IDisposable
 {
+    private const double CompactLayoutBreakpoint = 1320;
     private readonly ProjectPaths paths;
     private readonly StagedPackCatalogService catalog = new();
     private readonly StagedPackDeletionService deletionService = new();
+    private readonly StagedPackStorageService storageService = new();
     private readonly TexturePackWorkflow workflow = new();
     private static readonly JsonSerializerOptions CompositionJsonOptions = CreateCompositionJsonOptions();
     private CancellationTokenSource? operationCancellation;
     private StagedPackRow? selectedPack;
     private bool isBusy;
     private bool closeRequested;
+    private bool isCompactLayout;
     private bool isInstallAcknowledged;
     private string selectedCategoryFilter = "All packs";
     private string statusText = "Loading completed staged builds...";
     private string selectionText = "No packs selected";
-    private string highlightedSelectionText = "No rows highlighted";
+    private string focusedPackText = "No focused pack";
+    private string cleanupSelectionText = "CLEANUP · No packs checked for deletion";
+    private string librarySummaryText = "Measuring pack-library storage...";
+    private string cleanupOverviewText = "Checking which packs are protected and which are safe to remove...";
 
     public StagedPackLibraryWindow(string installPath)
     {
@@ -42,6 +48,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             new PropertyGroupDescription(nameof(StagedPackRow.Category)));
         PacksView.Filter = FilterPackByCategory;
         DataContext = this;
+        SizeChanged += OnLayoutSizeChanged;
         Loaded += async (_, _) => await RefreshAsync().ConfigureAwait(true);
     }
 
@@ -51,6 +58,9 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
     [
         "All packs",
         "Active install",
+        "Protected from deletion",
+        "Recent (3 days)",
+        "Safe old cleanup",
         "Zones",
         "Characters & Equipment",
         "Spell Effects",
@@ -71,6 +81,12 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
     }
     public string PackStorageText => $"Pack storage: {paths.StagingPath}";
 
+    public bool IsCompactLayout
+    {
+        get => isCompactLayout;
+        private set => SetField(ref isCompactLayout, value);
+    }
+
     public StagedPackRow? SelectedPack
     {
         get => selectedPack;
@@ -81,9 +97,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 OnPropertyChanged(nameof(CanRepair));
                 OnPropertyChanged(nameof(CanRepairCheckedPacks));
                 OnPropertyChanged(nameof(CanPreview));
-                OnPropertyChanged(nameof(CanDelete));
                 OnPropertyChanged(nameof(CanRename));
-                OnPropertyChanged(nameof(CanAddHighlightedToCurrent));
             }
         }
     }
@@ -99,10 +113,10 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 OnPropertyChanged(nameof(CanRepair));
                 OnPropertyChanged(nameof(CanRepairCheckedPacks));
                 OnPropertyChanged(nameof(CanPreview));
-                OnPropertyChanged(nameof(CanDelete));
-                OnPropertyChanged(nameof(CanCheckHighlighted));
-                OnPropertyChanged(nameof(CanUncheckHighlighted));
-                OnPropertyChanged(nameof(CanAddHighlightedToCurrent));
+                OnPropertyChanged(nameof(CanDeleteMarked));
+                OnPropertyChanged(nameof(CanSelectSafeOldPacks));
+                OnPropertyChanged(nameof(CanSelectAllForDeletion));
+                OnPropertyChanged(nameof(CanClearDeletionSelection));
                 OnPropertyChanged(nameof(CanCheckCurrentInstall));
                 OnPropertyChanged(nameof(CanCheckAll));
                 OnPropertyChanged(nameof(CanClearChecks));
@@ -126,17 +140,37 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         private set => SetField(ref selectionText, value);
     }
 
-    public string HighlightedSelectionText
+    public string FocusedPackText
     {
-        get => highlightedSelectionText;
-        private set => SetField(ref highlightedSelectionText, value);
+        get => focusedPackText;
+        private set => SetField(ref focusedPackText, value);
     }
 
-    public string DeleteButtonText => GetHighlightedPacks() switch
+    public string CleanupSelectionText
     {
-        { Count: 0 } => "Delete Pack...",
-        { Count: 1 } packs => $"Delete “{TruncateForButton(packs[0].Title)}”...",
-        var packs => $"Delete {packs.Count:N0} Highlighted Packs..."
+        get => cleanupSelectionText;
+        private set => SetField(ref cleanupSelectionText, value);
+    }
+
+    public string LibrarySummaryText
+    {
+        get => librarySummaryText;
+        private set => SetField(ref librarySummaryText, value);
+    }
+
+    public string CleanupOverviewText
+    {
+        get => cleanupOverviewText;
+        private set => SetField(ref cleanupOverviewText, value);
+    }
+
+    public string DeleteButtonText => Packs
+        .Where(pack => pack.IsMarkedForDeletion)
+        .ToArray() switch
+    {
+        { Length: 0 } => "Check Packs to Delete",
+        { Length: 1 } packs => $"Delete “{TruncateForButton(packs[0].Title)}”...",
+        var packs => $"Delete {packs.Length:N0} Checked Packs..."
     };
 
     private static string TruncateForButton(string title) =>
@@ -176,17 +210,21 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         && Packs.Any(pack => pack.IsSelected && pack.CanSelect && pack.CanRepairAny);
     public bool CanPreview => !IsBusy
         && SelectedPack?.PreviewManifestPath is not null;
-    public bool CanDelete => !IsBusy && GetHighlightedPacks().Count != 0;
+    public bool CanDeleteMarked => !IsBusy
+        && Packs.Any(pack => pack.IsMarkedForDeletion);
+    public bool CanSelectSafeOldPacks => !IsBusy
+        && Packs.Any(pack =>
+            pack.IsRecommendedForDeletion
+            && !pack.IsMarkedForDeletion);
+    public bool CanSelectAllForDeletion => !IsBusy
+        && Packs.Any(pack =>
+            pack.CanMarkForDeletion
+            && !pack.IsMarkedForDeletion);
+    public bool CanClearDeletionSelection => !IsBusy
+        && Packs.Any(pack => pack.IsMarkedForDeletion);
     public bool CanRename => !IsBusy && SelectedPack is not null;
     public bool CanCleanupDebris => !IsBusy;
     public bool IsLibraryEmpty => !IsBusy && Packs.Count == 0;
-    public bool CanCheckHighlighted => !IsBusy
-        && GetHighlightedPacks().Any(pack => pack.CanSelect && !pack.IsSelected);
-    public bool CanUncheckHighlighted => !IsBusy
-        && GetHighlightedPacks().Any(pack => pack.CanSelect && pack.IsSelected);
-    public bool CanAddHighlightedToCurrent => !IsBusy
-        && Packs.Any(pack => pack.CanSelect && (pack.IsActive || pack.IsActiveComponent))
-        && GetHighlightedPacks().Any(pack => pack.CanSelect);
     public bool CanCheckCurrentInstall => !IsBusy
         && Packs.Any(pack => pack.CanSelect && (pack.IsActive || pack.IsActiveComponent));
     public bool CanCheckAll => !IsBusy && Packs.Any(pack => pack.CanSelect);
@@ -199,13 +237,23 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
     public event EventHandler<PackPreviewRequestedEventArgs>? PreviewRequested;
     public bool CanNavigateAway => !IsBusy;
 
+    private void OnLayoutSizeChanged(object sender, SizeChangedEventArgs e) =>
+        IsCompactLayout = e.NewSize.Width < CompactLayoutBreakpoint;
+
     private async void Refresh_Click(object sender, RoutedEventArgs e)
     {
         var checkedPaths = Packs
             .Where(pack => pack.IsSelected && pack.CanSelect)
             .Select(pack => Path.GetFullPath(pack.ManifestPath))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        await RefreshAsync(checkedManifestPaths: checkedPaths).ConfigureAwait(true);
+        var deleteMarkedPaths = Packs
+            .Where(pack => pack.IsMarkedForDeletion)
+            .Select(pack => Path.GetFullPath(pack.ManifestPath))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        await RefreshAsync(
+                checkedManifestPaths: checkedPaths,
+                deleteMarkedManifestPaths: deleteMarkedPaths)
+            .ConfigureAwait(true);
     }
 
     private async void Rename_Click(object sender, RoutedEventArgs e)
@@ -248,7 +296,12 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             .Where(candidate => candidate.IsSelected && candidate.CanSelect)
             .Select(candidate => Path.GetFullPath(candidate.ManifestPath))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        await RefreshAsync(pack.ManifestPath, checkedPaths).ConfigureAwait(true);
+        var deleteMarkedPaths = Packs
+            .Where(candidate => candidate.IsMarkedForDeletion)
+            .Select(candidate => Path.GetFullPath(candidate.ManifestPath))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        await RefreshAsync(pack.ManifestPath, checkedPaths, deleteMarkedPaths)
+            .ConfigureAwait(true);
     }
 
     private string? PromptForPackName(string autoTitle, string currentName)
@@ -313,70 +366,93 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             return;
         }
 
-        IReadOnlyList<StagedPackDebrisInfo> debris;
+        operationCancellation = new CancellationTokenSource();
+        var token = operationCancellation.Token;
+        var refreshAfterCleanup = false;
+        string? cleanupCompletionText = null;
+        IsBusy = true;
+        StatusText = "Checking interrupted build leftovers. Completed and resumable packs are read-only.";
         try
         {
-            debris = await Task.Run(() => StagedPackCatalogService.FindBuildDebris(paths))
+            var debris = await Task.Run(
+                    () => StagedPackCatalogService.FindBuildDebris(paths),
+                    token)
                 .ConfigureAwait(true);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            MessageBox.Show(
+            token.ThrowIfCancellationRequested();
+            if (debris.Count == 0)
+            {
+                StatusText = "No interrupted leftovers were found. Completed and resumable packs were not changed.";
+                MessageBox.Show(
+                    Window.GetWindow(this),
+                    "No leftover build folders were found. Every folder in the pack library is a completed pack or a resumable build.",
+                    "Clean up leftovers",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            var totalBytes = debris.Sum(item => item.Bytes);
+            var listing = string.Join(
+                "\n",
+                debris.Take(8).Select(item => $"• {item.Name} · {FormatBytes(item.Bytes)}"));
+            var confirmation = MessageBox.Show(
                 Window.GetWindow(this),
-                $"Leftover scan failed: {exception.Message}",
+                $"{debris.Count:N0} leftover folder(s) from interrupted builds use {FormatBytes(totalBytes)}. "
+                + "They are not completed packs and cannot be resumed (each is at least a day old and has no manifest or checkpoint).\n\n"
+                + listing
+                + (debris.Count > 8 ? "\n…" : string.Empty)
+                + "\n\nDelete them now? Completed packs, resumable builds, backups, and game files are never touched.",
                 "Clean up leftovers",
-                MessageBoxButton.OK,
-                MessageBoxImage.Warning);
-            return;
-        }
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+            if (confirmation != MessageBoxResult.Yes)
+            {
+                StatusText = "Leftover cleanup canceled. No staged packs or game files were changed.";
+                return;
+            }
 
-        if (debris.Count == 0)
-        {
-            MessageBox.Show(
-                Window.GetWindow(this),
-                "No leftover build folders were found. Every folder in the pack library is a completed pack or a resumable build.",
-                "Clean up leftovers",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
-            return;
-        }
-
-        var totalBytes = debris.Sum(item => item.Bytes);
-        var listing = string.Join(
-            "\n",
-            debris.Take(8).Select(item => $"• {item.Name} · {FormatBytes(item.Bytes)}"));
-        var confirmation = MessageBox.Show(
-            Window.GetWindow(this),
-            $"{debris.Count:N0} leftover folder(s) from interrupted builds use {FormatBytes(totalBytes)}. "
-            + "They are not completed packs and cannot be resumed (each is at least a day old and has no manifest or checkpoint).\n\n"
-            + listing
-            + (debris.Count > 8 ? "\n…" : string.Empty)
-            + "\n\nDelete them now? Completed packs, resumable builds, backups, and game files are never touched.",
-            "Clean up leftovers",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Question);
-        if (confirmation != MessageBoxResult.Yes)
-        {
-            return;
-        }
-
-        try
-        {
+            token.ThrowIfCancellationRequested();
             var result = await Task
                 .Run(() => StagedPackCatalogService.DeleteBuildDebris(paths, debris))
                 .ConfigureAwait(true);
-            StatusText = result.Failures.Count == 0
-                ? $"Removed {result.DeletedDirectories:N0} leftover folder(s) and reclaimed {FormatBytes(result.ReclaimedBytes)}."
+            cleanupCompletionText = result.Failures.Count == 0
+                ? $"Removed {result.DeletedDirectories:N0} leftover folder(s) containing {FormatBytes(result.ReclaimedBytes)} of logical file data."
                 : $"Removed {result.DeletedDirectories:N0} leftover folder(s); {result.Failures.Count:N0} could not be removed (files may be open).";
+            StatusText = cleanupCompletionText;
+            refreshAfterCleanup = true;
         }
-        catch (InvalidOperationException exception)
+        catch (OperationCanceledException)
         {
+            StatusText = "Leftover cleanup canceled safely. Completed packs and game files were not changed.";
+        }
+        catch (Exception exception) when (exception is
+            IOException or
+            UnauthorizedAccessException or
+            InvalidDataException or
+            InvalidOperationException or
+            ArgumentException or
+            NotSupportedException)
+        {
+            StatusText = $"Leftover cleanup stopped safely: {exception.Message}";
             MessageBox.Show(
                 Window.GetWindow(this),
-                exception.Message,
+                $"Leftover cleanup stopped safely: {exception.Message}",
                 "Clean up leftovers",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
+        }
+        finally
+        {
+            operationCancellation.Dispose();
+            operationCancellation = null;
+            IsBusy = false;
+            ScheduleDeferredCloseIfRequested();
+        }
+
+        if (refreshAfterCleanup)
+        {
+            await RefreshAsync().ConfigureAwait(true);
+            StatusText = cleanupCompletionText!;
         }
     }
 
@@ -407,57 +483,22 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             return pack.IsActive || pack.IsActiveComponent;
         }
 
+        if (SelectedCategoryFilter == "Protected from deletion")
+        {
+            return pack.IsProtectedFromDeletion;
+        }
+
+        if (SelectedCategoryFilter == "Recent (3 days)")
+        {
+            return pack.IsRecent;
+        }
+
+        if (SelectedCategoryFilter == "Safe old cleanup")
+        {
+            return pack.IsRecommendedForDeletion;
+        }
+
         return string.Equals(pack.Category, SelectedCategoryFilter, StringComparison.Ordinal);
-    }
-
-    private void CheckHighlighted_Click(object sender, RoutedEventArgs e)
-    {
-        var highlighted = GetHighlightedPacks();
-        foreach (var pack in highlighted.Where(pack => pack.CanSelect))
-        {
-            pack.IsSelected = true;
-        }
-
-        StatusText = highlighted.Count == 0
-            ? "Highlight one or more pack rows first."
-            : $"Added {highlighted.Count(pack => pack.CanSelect):N0} highlighted pack(s) to the install set. No game files were changed.";
-        UpdateSelection();
-        UpdateHighlightedSelection();
-    }
-
-    private void UncheckHighlighted_Click(object sender, RoutedEventArgs e)
-    {
-        var highlighted = GetHighlightedPacks();
-        foreach (var pack in highlighted.Where(pack => pack.CanSelect))
-        {
-            pack.IsSelected = false;
-        }
-
-        StatusText = highlighted.Count == 0
-            ? "Highlight one or more pack rows first."
-            : $"Removed {highlighted.Count(pack => pack.CanSelect):N0} highlighted pack(s) from the install set. No game files were changed.";
-        UpdateSelection();
-        UpdateHighlightedSelection();
-    }
-
-    private void AddHighlightedToCurrent_Click(object sender, RoutedEventArgs e)
-    {
-        var highlighted = GetHighlightedPacks()
-            .Where(pack => pack.CanSelect)
-            .ToHashSet();
-        foreach (var pack in Packs.Where(pack => pack.CanSelect))
-        {
-            if (pack.IsActive || pack.IsActiveComponent || highlighted.Contains(pack))
-            {
-                pack.IsSelected = true;
-            }
-        }
-
-        StatusText = highlighted.Count == 0
-            ? "Highlight one or more staged packs to add beside the current install."
-            : $"Kept the current installed components and added {highlighted.Count:N0} highlighted pack(s). No game files were changed.";
-        UpdateSelection();
-        UpdateHighlightedSelection();
     }
 
     private void CheckCurrentInstall_Click(object sender, RoutedEventArgs e)
@@ -496,9 +537,49 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         UpdateHighlightedSelection();
     }
 
+    private void SelectSafeOld_Click(object sender, RoutedEventArgs e)
+    {
+        foreach (var pack in Packs)
+        {
+            pack.IsMarkedForDeletion = pack.IsRecommendedForDeletion;
+        }
+
+        var selected = Packs.Where(pack => pack.IsMarkedForDeletion).ToArray();
+        StatusText = selected.Length == 0
+            ? "No safe old packs were found. Installed dependencies, safety-blocked packs, and packs from the last three days were kept."
+            : $"Checked {selected.Length:N0} safe old pack(s), totaling {FormatBytes(selected.Sum(pack => pack.StagedBytes))}. Installed dependencies and packs from the last three days were kept.";
+        UpdateSelection();
+        UpdateDeletionSelection();
+    }
+
+    private void SelectAllDeletable_Click(object sender, RoutedEventArgs e)
+    {
+        foreach (var pack in Packs.Where(pack => pack.CanMarkForDeletion))
+        {
+            pack.IsMarkedForDeletion = true;
+        }
+
+        var selected = Packs.Count(pack => pack.IsMarkedForDeletion);
+        StatusText = $"Checked all {selected:N0} removable pack(s). Installed packs, installed dependencies, unfinished builds, and packs with an incomplete safety preflight remain protected.";
+        UpdateSelection();
+        UpdateDeletionSelection();
+    }
+
+    private void ClearDeleteChecks_Click(object sender, RoutedEventArgs e)
+    {
+        foreach (var pack in Packs)
+        {
+            pack.IsMarkedForDeletion = false;
+        }
+
+        StatusText = "Cleared the cleanup selection. No staged packs or game files were changed.";
+        UpdateDeletionSelection();
+    }
+
     private async Task RefreshAsync(
         string? selectManifestPath = null,
-        IReadOnlySet<string>? checkedManifestPaths = null)
+        IReadOnlySet<string>? checkedManifestPaths = null,
+        IReadOnlySet<string>? deleteMarkedManifestPaths = null)
     {
         if (IsBusy)
         {
@@ -517,11 +598,34 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             var discovered = await catalog.DiscoverAsync(
                 paths,
                 StagedPackVerificationMode.Metadata).ConfigureAwait(true);
-            var sourceRepairCandidates = await workflow
+            var sourceRepairTask = workflow
                 .FindStagedPackSourceRepairCandidatesAsync(
                     paths,
-                    discovered.Select(info => info.ManifestPath).ToArray())
+                    discovered.Select(info => info.ManifestPath).ToArray());
+            var deletionPlansTask = deletionService.PlanManyAsync(
+                paths,
+                discovered.Select(info => info.ManifestPath).ToArray());
+            var storageStatusTask = storageService.InspectAsync(paths);
+            await Task.WhenAll(
+                    sourceRepairTask,
+                    deletionPlansTask,
+                    storageStatusTask)
                 .ConfigureAwait(true);
+            var sourceRepairCandidates = await sourceRepairTask.ConfigureAwait(true);
+            var deletionPlans = await deletionPlansTask.ConfigureAwait(true);
+            var storageStatus = await storageStatusTask.ConfigureAwait(true);
+            var deletionPlansByPath = deletionPlans.ToDictionary(
+                plan => Path.GetFullPath(plan.ManifestPath),
+                StringComparer.OrdinalIgnoreCase);
+            var nowUtc = DateTimeOffset.UtcNow;
+            var recommendedDeletionPaths = StagedPackCleanupPolicy
+                .RecommendSafeOldPackDeletions(
+                    discovered.Select(info => new StagedPackCleanupCandidate(
+                            info.ManifestPath,
+                            info.Manifest?.CreatedUtc ?? DateTimeOffset.MinValue,
+                            deletionPlansByPath[Path.GetFullPath(info.ManifestPath)]))
+                        .ToArray(),
+                    nowUtc);
             foreach (var old in Packs)
             {
                 old.PropertyChanged -= OnPackSelectionChanged;
@@ -535,6 +639,12 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                     activeState.ComponentManifestPaths.Contains(
                         Path.GetFullPath(info.ManifestPath)),
                     sourceRepairCandidates.Contains(
+                        Path.GetFullPath(info.ManifestPath)),
+                    deletionPlansByPath[Path.GetFullPath(info.ManifestPath)],
+                    StagedPackCleanupPolicy.IsRecent(
+                        info.Manifest?.CreatedUtc ?? DateTimeOffset.MinValue,
+                        nowUtc),
+                    recommendedDeletionPaths.Contains(
                         Path.GetFullPath(info.ManifestPath))))
                 .OrderBy(row => row.CategoryOrder)
                 .ThenByDescending(row => row.CreatedUtc)
@@ -558,6 +668,33 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 }
             }
 
+            if (deleteMarkedManifestPaths is not null)
+            {
+                foreach (var row in Packs)
+                {
+                    row.IsMarkedForDeletion = row.CanMarkForDeletion
+                        && deleteMarkedManifestPaths.Contains(
+                            Path.GetFullPath(row.ManifestPath));
+                }
+            }
+
+            LibrarySummaryText = storageStatus.Summary;
+            var protectedCount = Packs.Count(pack => pack.IsProtectedFromDeletion);
+            var recentCount = Packs.Count(pack =>
+                pack.IsRecent
+                && !pack.IsProtectedFromDeletion);
+            var recommendedRows = Packs
+                .Where(pack => pack.IsRecommendedForDeletion)
+                .ToArray();
+            CleanupOverviewText =
+                $"{protectedCount:N0} protected · {recentCount:N0} recent (last 3 days) · "
+                + (recommendedRows.Length == 0
+                    ? "no safe old packs recommended"
+                    : $"{recommendedRows.Length:N0} safe old pack(s) total {FormatBytes(recommendedRows.Sum(pack => pack.StagedBytes))} logical payload")
+                + (storageStatus.ResumableBuildCount == 0
+                    ? string.Empty
+                    : $" · {storageStatus.ResumableBuildCount:N0} unfinished/resumable build(s) always kept");
+
             SelectedPack = selectManifestPath is null
                 ? Packs.FirstOrDefault(pack => pack.IsActive)
                   ?? Packs.FirstOrDefault(pack => pack.IsActiveComponent)
@@ -566,10 +703,11 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                   ?? Packs.FirstOrDefault();
             PacksView.Refresh();
             UpdateSelection();
+            UpdateDeletionSelection();
             UpdateHighlightedSelection();
             StatusText = Packs.Count == 0
                 ? "No completed staged packs were found. Build one from the main window first."
-                : $"Found {Packs.Count:N0} completed pack(s) grouped by content. Exact SHA-256 verification runs before install, repair, or deletion."
+                : $"Found {Packs.Count:N0} completed pack(s). Delete checkboxes reflect one library-wide active-install and composition safety scan; exact verification runs again before any removal."
                   + (activeState.Warning is null ? string.Empty : $" {activeState.Warning}");
         }
         catch (Exception exception)
@@ -921,6 +1059,10 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             .Where(pack => pack.IsSelected && pack.CanSelect)
             .Select(pack => Path.GetFullPath(pack.ManifestPath))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var deleteMarkedManifestPaths = Packs
+            .Where(pack => pack.IsMarkedForDeletion)
+            .Select(pack => Path.GetFullPath(pack.ManifestPath))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var completed = 0;
         string? lastReplacementManifestPath = null;
         var completedRepairs = new List<TexturePackBuildResult>();
@@ -950,14 +1092,14 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             }
 
             IsBusy = false;
-            await RefreshAsync(lastReplacementManifestPath, checkedManifestPaths).ConfigureAwait(true);
+            await RefreshAsync(lastReplacementManifestPath, checkedManifestPaths, deleteMarkedManifestPaths).ConfigureAwait(true);
             StatusText = $"Repaired {completed:N0} checked pack(s). Each corrected replacement is checked; install the checked packs to update the game files.";
             await OfferInstallAfterRepairAsync(completedRepairs).ConfigureAwait(true);
         }
         catch (OperationCanceledException)
         {
             IsBusy = false;
-            await RefreshAsync(lastReplacementManifestPath, checkedManifestPaths).ConfigureAwait(true);
+            await RefreshAsync(lastReplacementManifestPath, checkedManifestPaths, deleteMarkedManifestPaths).ConfigureAwait(true);
             StatusText = completed == 0
                 ? "Repair canceled safely before any replacement completed."
                 : $"Repair canceled after {completed:N0} replacement(s). Completed replacements remain staged and checked.";
@@ -965,7 +1107,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         catch (Exception exception)
         {
             IsBusy = false;
-            await RefreshAsync(lastReplacementManifestPath, checkedManifestPaths).ConfigureAwait(true);
+            await RefreshAsync(lastReplacementManifestPath, checkedManifestPaths, deleteMarkedManifestPaths).ConfigureAwait(true);
             StatusText = completed == 0
                 ? $"Repair stopped safely: {exception.Message}"
                 : $"Repair stopped after {completed:N0} completed replacement(s): {exception.Message}";
@@ -1012,68 +1154,76 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
 
     private async void Delete_Click(object sender, RoutedEventArgs e)
     {
-        var targets = GetHighlightedPacks();
-        if (targets.Count == 0 || IsBusy)
+        var targets = Packs
+            .Where(pack => pack.IsMarkedForDeletion)
+            .ToArray();
+        if (targets.Length == 0 || IsBusy)
         {
             return;
         }
 
         operationCancellation = new CancellationTokenSource();
         IsBusy = true;
-        StatusText = $"Checking active-install and composition dependencies for {targets.Count:N0} highlighted pack(s)...";
+        StatusText = $"Checking active-install and composition dependencies for {targets.Length:N0} delete-checked pack(s)...";
         var checkedManifestPaths = Packs
             .Where(row => row.IsSelected && row.CanSelect)
+            .Select(row => Path.GetFullPath(row.ManifestPath))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var deleteMarkedManifestPaths = targets
             .Select(row => Path.GetFullPath(row.ManifestPath))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var deletedBuildIds = new List<string>();
         try
         {
-            var plans = new List<(StagedPackRow Pack, StagedPackDeletionPlan Plan)>(targets.Count);
-            foreach (var target in targets)
-            {
-                var plan = await deletionService.PlanAsync(
-                        paths,
-                        target.ManifestPath,
-                        operationCancellation.Token)
-                    .ConfigureAwait(true);
-                plans.Add((target, plan));
-            }
-
-            var blocked = plans.Where(item => !item.Plan.CanDelete).ToArray();
-            if (blocked.Length != 0)
+            var batch = await deletionService.PlanBatchAsync(
+                    paths,
+                    targets.Select(target => target.ManifestPath).ToArray(),
+                    operationCancellation.Token)
+                .ConfigureAwait(true);
+            if (!batch.CanDelete)
             {
                 var details = string.Join(
                     "\n\n",
-                    blocked.Take(5).Select(item => $"{item.Pack.Title}: {item.Plan.Summary}"));
-                if (blocked.Length > 5)
+                    batch.Blockers.Take(6).Select(blocker =>
+                    {
+                        var title = targets.FirstOrDefault(target =>
+                            SamePath(target.ManifestPath, blocker.ManifestPath))?.Title
+                            ?? blocker.BuildId;
+                        return $"{title}: {blocker.Summary}";
+                    }));
+                if (batch.Blockers.Count > 6)
                 {
-                    details += $"\n\n...and {blocked.Length - 5:N0} more blocked pack(s).";
+                    details += $"\n\n...and {batch.Blockers.Count - 6:N0} more blocker(s).";
                 }
 
-                StatusText = $"Bulk delete blocked safely: {blocked.Length:N0} highlighted pack(s) are active, referenced, or could not be verified.";
+                StatusText = "Cleanup blocked safely. Nothing was deleted; adjust the red delete checkboxes using the explanations on each pack.";
                 MessageBox.Show(
                     Window.GetWindow(this),
-                    "Nothing was deleted because every highlighted pack must pass safety preflight.\n\n" + details,
-                    "Highlighted packs cannot be deleted",
+                    "Nothing was deleted because the complete checked set did not pass safety preflight. A source pack can be deleted with an obsolete composition only when both are checked.\n\n" + details,
+                    "Checked packs cannot be deleted",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
                 return;
             }
 
+            var targetsByPath = targets.ToDictionary(
+                target => Path.GetFullPath(target.ManifestPath),
+                StringComparer.OrdinalIgnoreCase);
             var titleList = string.Join(
                 "\n",
-                plans.Take(10).Select(item => $"• {item.Pack.Title}"));
-            if (plans.Count > 10)
+                batch.OrderedPlans.Take(10).Select(plan =>
+                    $"• {targetsByPath[Path.GetFullPath(plan.ManifestPath)].Title}"));
+            if (batch.OrderedPlans.Count > 10)
             {
-                titleList += $"\n• ...and {plans.Count - 10:N0} more";
+                titleList += $"\n• ...and {batch.OrderedPlans.Count - 10:N0} more";
             }
 
             var answer = MessageBox.Show(
                 Window.GetWindow(this),
-                $"Permanently delete {plans.Count:N0} highlighted staged pack(s)?\n\n"
+                $"Permanently delete {batch.OrderedPlans.Count:N0} checked staged pack(s)? Their selected payload totals {FormatBytes(batch.StagedBytes)} logically; actual freed disk space can be lower when repairs or compositions share hard-linked files.\n\n"
                 + titleList
-                + "\n\nEvery pack passed active-install, dependency, path, and reparse-point preflight. Only these managed staging directories will be removed. Live game files will not be changed. This cannot be undone; deleted AI output would have to be rebuilt.",
-                plans.Count == 1 ? "Delete highlighted pack" : "Delete highlighted packs",
+                + "\n\nEvery pack passed active-install, dependency, path, and reparse-point preflight. Generated compositions are removed before source packs. Installed packs, unfinished builds, live game files, and original backups are not touched. This cannot be undone; deleted AI output would have to be rebuilt.",
+                batch.OrderedPlans.Count == 1 ? "Delete checked pack" : "Delete checked packs",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Warning);
             if (answer != MessageBoxResult.Yes)
@@ -1082,38 +1232,45 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 return;
             }
 
-            for (var index = 0; index < plans.Count; index++)
+            for (var index = 0; index < batch.OrderedPlans.Count; index++)
             {
                 operationCancellation.Token.ThrowIfCancellationRequested();
-                var current = plans[index];
+                var current = batch.OrderedPlans[index];
                 var operationNumber = index + 1;
                 var progress = new Progress<ProgressUpdate>(update =>
                 {
                     var detail = string.IsNullOrWhiteSpace(update.CurrentItem)
                         ? update.Message
                         : $"{update.Message}  {update.CurrentItem}";
-                    StatusText = $"Deleting {operationNumber:N0} of {plans.Count:N0}. {detail}";
+                    StatusText = $"Deleting {operationNumber:N0} of {batch.OrderedPlans.Count:N0}. {detail}";
                 });
                 var result = await deletionService.DeleteAsync(
                         paths,
-                        current.Pack.ManifestPath,
+                        current.ManifestPath,
                         progress,
                         operationCancellation.Token)
                     .ConfigureAwait(true);
                 deletedBuildIds.Add(result.BuildId);
-                checkedManifestPaths.Remove(Path.GetFullPath(current.Pack.ManifestPath));
+                checkedManifestPaths.Remove(Path.GetFullPath(current.ManifestPath));
+                deleteMarkedManifestPaths.Remove(Path.GetFullPath(current.ManifestPath));
             }
 
             IsBusy = false;
-            await RefreshAsync(checkedManifestPaths: checkedManifestPaths).ConfigureAwait(true);
-            StatusText = $"Deleted {deletedBuildIds.Count:N0} highlighted staged pack(s). Other completed packs and live game files were not changed.";
+            await RefreshAsync(
+                    checkedManifestPaths: checkedManifestPaths,
+                    deleteMarkedManifestPaths: deleteMarkedManifestPaths)
+                .ConfigureAwait(true);
+            StatusText = $"Deleted {deletedBuildIds.Count:N0} checked staged pack(s). Actual freed disk space depends on payloads still shared by retained packs. Installed packs, unfinished builds, and live game files were not changed.";
         }
         catch (OperationCanceledException)
         {
             if (deletedBuildIds.Count != 0)
             {
                 IsBusy = false;
-                await RefreshAsync(checkedManifestPaths: checkedManifestPaths).ConfigureAwait(true);
+                await RefreshAsync(
+                        checkedManifestPaths: checkedManifestPaths,
+                        deleteMarkedManifestPaths: deleteMarkedManifestPaths)
+                    .ConfigureAwait(true);
             }
 
             StatusText = deletedBuildIds.Count == 0
@@ -1125,7 +1282,10 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             if (deletedBuildIds.Count != 0)
             {
                 IsBusy = false;
-                await RefreshAsync(checkedManifestPaths: checkedManifestPaths).ConfigureAwait(true);
+                await RefreshAsync(
+                        checkedManifestPaths: checkedManifestPaths,
+                        deleteMarkedManifestPaths: deleteMarkedManifestPaths)
+                    .ConfigureAwait(true);
             }
 
             StatusText = deletedBuildIds.Count == 0
@@ -1134,7 +1294,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             MessageBox.Show(
                 Window.GetWindow(this),
                 StatusText,
-                "Delete highlighted packs",
+                "Delete checked packs",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
         }
@@ -1165,6 +1325,10 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             .Where(pack => pack.IsSelected && pack.CanSelect)
             .Select(pack => Path.GetFullPath(pack.ManifestPath))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var deleteMarkedManifestPaths = Packs
+            .Where(pack => pack.IsMarkedForDeletion)
+            .Select(pack => Path.GetFullPath(pack.ManifestPath))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var progress = new Progress<ProgressUpdate>(update =>
         {
             StatusText = string.IsNullOrWhiteSpace(update.CurrentItem)
@@ -1187,7 +1351,8 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
 
             StatusText = successMessage;
             IsBusy = false;
-            await RefreshAsync(selectManifest, checkedManifestPaths).ConfigureAwait(true);
+            await RefreshAsync(selectManifest, checkedManifestPaths, deleteMarkedManifestPaths)
+                .ConfigureAwait(true);
             StatusText = successMessage;
         }
         catch (OperationCanceledException)
@@ -1298,6 +1463,12 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         if (e.PropertyName == nameof(StagedPackRow.IsSelected))
         {
             UpdateSelection();
+            UpdateDeletionSelection();
+        }
+        else if (e.PropertyName == nameof(StagedPackRow.IsMarkedForDeletion))
+        {
+            UpdateSelection();
+            UpdateDeletionSelection();
         }
     }
 
@@ -1309,26 +1480,33 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             : $"INSTALL SET · {selected.Length:N0} pack(s) checked · {selected.Sum(pack => pack.ArtifactCount):N0} source archives · {FormatBytes(selected.Sum(pack => pack.StagedBytes))}";
         OnPropertyChanged(nameof(CanInstall));
         OnPropertyChanged(nameof(InstallButtonText));
-        OnPropertyChanged(nameof(CanCheckHighlighted));
-        OnPropertyChanged(nameof(CanUncheckHighlighted));
-        OnPropertyChanged(nameof(CanAddHighlightedToCurrent));
         OnPropertyChanged(nameof(CanClearChecks));
         OnPropertyChanged(nameof(CanRepairCheckedPacks));
+    }
+
+    private void UpdateDeletionSelection()
+    {
+        var selected = Packs
+            .Where(pack => pack.IsMarkedForDeletion)
+            .ToArray();
+        CleanupSelectionText = selected.Length == 0
+            ? "CLEANUP · No packs checked for deletion"
+            : $"CLEANUP · {selected.Length:N0} pack(s) checked · {FormatBytes(selected.Sum(pack => pack.StagedBytes))} selected payload (logical size; shared files may free less)";
+        OnPropertyChanged(nameof(CanDeleteMarked));
+        OnPropertyChanged(nameof(CanSelectSafeOldPacks));
+        OnPropertyChanged(nameof(CanSelectAllForDeletion));
+        OnPropertyChanged(nameof(CanClearDeletionSelection));
+        OnPropertyChanged(nameof(DeleteButtonText));
     }
 
     private void UpdateHighlightedSelection()
     {
         var highlighted = GetHighlightedPacks();
-        HighlightedSelectionText = highlighted.Count switch
+        FocusedPackText = highlighted.Count switch
         {
-            0 => "No rows highlighted",
-            1 => $"1 row highlighted · focused details: {SelectedPack?.Title ?? highlighted[0].Title}",
-            _ => $"{highlighted.Count:N0} rows highlighted · Ctrl/Shift-click to adjust; focused actions use {SelectedPack?.Title ?? "one row"}"
+            0 => "No focused pack. Click a card to inspect it.",
+            _ => $"Focused: {SelectedPack?.Title ?? highlighted[0].Title}. Install and Delete are controlled only by that card’s checkboxes."
         };
-        OnPropertyChanged(nameof(CanDelete));
-        OnPropertyChanged(nameof(CanCheckHighlighted));
-        OnPropertyChanged(nameof(CanUncheckHighlighted));
-        OnPropertyChanged(nameof(CanAddHighlightedToCurrent));
     }
 
     private IReadOnlyList<StagedPackRow> GetHighlightedPacks()
@@ -1498,12 +1676,16 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
     public sealed class StagedPackRow : INotifyPropertyChanged
     {
         private bool isSelected;
+        private bool isMarkedForDeletion;
 
         public StagedPackRow(
             StagedPackInfo info,
             bool isActive,
             bool isActiveComponent,
-            bool canRepairSourceMismatch)
+            bool canRepairSourceMismatch,
+            StagedPackDeletionPlan deletionPlan,
+            bool isRecent,
+            bool isRecommendedForDeletion)
         {
             ManifestPath = info.ManifestPath;
             BuildDirectory = info.BuildDirectory;
@@ -1511,6 +1693,12 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             CustomName = info.UserMetadata?.DisplayName;
             IsActive = isActive;
             IsActiveComponent = isActiveComponent && !isActive;
+            DeletionPlan = deletionPlan;
+            IsRecent = isRecent;
+            IsRecommendedForDeletion = isRecommendedForDeletion;
+            CanMarkForDeletion = !deletionPlan.IsRequiredByCurrentInstall
+                && deletionPlan.SafetyBlockers.Count == 0;
+            IsProtectedFromDeletion = !CanMarkForDeletion;
             ArtifactPaths = info.Artifacts
                 .Select(artifact => artifact.CanonicalRelativeInstallPath)
                 .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
@@ -1521,7 +1709,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             IsComposition = File.Exists(Path.Combine(info.BuildDirectory, "composition.json"));
             CanSelect = info.IsMetadataValid && !IsComposition;
             isSelected = CanSelect && (IsActive || IsActiveComponent);
-            var report = TryReadReport(info.BuildDirectory);
+            var report = TryReadReport(info);
             var isLegacyRepair = report?.IsIncrementalRepair == true;
             var isSourceRepair = report?.IsSourceMismatchRepair == true;
             // The report property keeps its original compatibility name, but
@@ -1674,8 +1862,11 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 if (componentSummary is not null)
                 {
                     ContentsSummary = componentSummary;
+                    StateText = componentSummary;
                 }
             }
+
+            CoverageSummary = BuildCoverageSummary(report, IsComposition);
 
             var isCharacterScope = manifest?.Options.Scope is
                 AssetScope.CharactersAndEquipmentOnly
@@ -1685,7 +1876,8 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 : TextureProcessingPipeline.GetMissingRepairRuleIds(
                     report,
                     manifest.Options.Scope,
-                    ArtifactPaths);
+                    ArtifactPaths,
+                    manifest.Options.Preset);
             CanRepair = !IsComposition
                 && manifest is not null
                 && missingRepairRules.Count != 0;
@@ -1694,7 +1886,8 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 && TextureProcessingPipeline.RequiresTargetedSafetyRepair(
                     report,
                     manifest.Options.Scope,
-                    ArtifactPaths);
+                    ArtifactPaths,
+                    manifest.Options.Preset);
             CanRepairSourceMismatch = !IsComposition
                 && canRepairSourceMismatch
                 && !isSourceRepair;
@@ -1737,6 +1930,59 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 : IsActiveComponent
                     ? "This source pack is part of the installed combination."
                     : "Include this completed pack in the next installed selection.";
+            if (deletionPlan.IsReferencedByCurrentInstall)
+            {
+                DeletionStateText = "PROTECTED · INSTALLED NOW";
+                DeletionHint = "This exact pack is referenced by the current install. Switch or restore before it can be removed.";
+                DeletionStateForeground = "#79E2B5";
+                DeletionPanelBackground = "#17352B";
+                DeletionPanelBorderBrush = "#356A57";
+            }
+            else if (deletionPlan.CompositionDependencies.Any(dependency =>
+                         dependency.IsReferencedByCurrentInstall))
+            {
+                DeletionStateText = "PROTECTED · NEEDED BY INSTALLED COMBINATION";
+                DeletionHint = "The installed generated combination depends on this source pack, so SpinTexture will not allow it to be deleted.";
+                DeletionStateForeground = "#79E2B5";
+                DeletionPanelBackground = "#17352B";
+                DeletionPanelBorderBrush = "#356A57";
+            }
+            else if (deletionPlan.SafetyBlockers.Count != 0)
+            {
+                DeletionStateText = "PROTECTED · SAFETY CHECK INCOMPLETE";
+                DeletionHint = deletionPlan.Summary;
+                DeletionStateForeground = "#F8CE77";
+                DeletionPanelBackground = "#382B18";
+                DeletionPanelBorderBrush = "#785C2F";
+            }
+            else if (IsRecent)
+            {
+                DeletionStateText = "RECENT · KEPT BY SAFE OLD";
+                DeletionHint = "Created within the last three days. It can still be deleted manually, but Select Safe Old Packs leaves it unchecked.";
+                DeletionStateForeground = "#B9D0FF";
+                DeletionPanelBackground = "#202E46";
+                DeletionPanelBorderBrush = "#4B6797";
+            }
+            else if (deletionPlan.CompositionDependencies.Count != 0)
+            {
+                DeletionStateText = deletionPlan.CompositionDependencies.Count == 1
+                    ? "SAFE OLD · CHECK ITS COMPOSITION TOO"
+                    : $"SAFE OLD · CHECK {deletionPlan.CompositionDependencies.Count:N0} COMPOSITIONS TOO";
+                DeletionHint = deletionPlan.Summary;
+                DeletionStateForeground = "#F6B6BC";
+                DeletionPanelBackground = "#341C20";
+                DeletionPanelBorderBrush = "#7D424A";
+            }
+            else
+            {
+                DeletionStateText = IsRecommendedForDeletion
+                    ? "SAFE OLD · RECOMMENDED FOR CLEANUP"
+                    : "SAFE TO REMOVE";
+                DeletionHint = deletionPlan.Summary;
+                DeletionStateForeground = "#F6B6BC";
+                DeletionPanelBackground = "#341C20";
+                DeletionPanelBorderBrush = "#7D424A";
+            }
             var previewPath = Path.Combine(
                 info.BuildDirectory,
                 "previews",
@@ -1746,7 +1992,11 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 : null;
             CanReviseTextures = !IsComposition
                 && manifest is not null
-                && !RequiresPipelineRepair(report, manifest.Options.Scope, ArtifactPaths)
+                && !RequiresPipelineRepair(
+                    report,
+                    manifest.Options.Scope,
+                    ArtifactPaths,
+                    manifest.Options.Preset)
                 && manifest.Options.Scope is not (AssetScope.AllSafeTextures or AssetScope.SpellEffectsOnly)
                 && ArtifactPaths.All(path => EverQuestInstall.IsPfsArchiveExtension(Path.GetExtension(path)));
         }
@@ -1773,6 +2023,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         public string CardBorderBrush { get; }
         public string Details { get; }
         public string StateText { get; }
+        public string CoverageSummary { get; }
         public string RepairStatusText { get; }
         public string RepairStatusForeground { get; }
         public string RepairBadgeText { get; }
@@ -1780,6 +2031,11 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         public string RepairPanelBorderBrush { get; }
         public string RepairReasonText { get; }
         public string SelectionHint { get; }
+        public string DeletionStateText { get; }
+        public string DeletionHint { get; }
+        public string DeletionStateForeground { get; }
+        public string DeletionPanelBackground { get; }
+        public string DeletionPanelBorderBrush { get; }
         public string Category { get; }
         public int CategoryOrder { get; }
         public DateTimeOffset CreatedUtc { get; }
@@ -1787,6 +2043,11 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         public IReadOnlyList<string> ArtifactPaths { get; }
         public int ArtifactCount { get; }
         public long StagedBytes { get; }
+        public StagedPackDeletionPlan DeletionPlan { get; }
+        public bool CanMarkForDeletion { get; }
+        public bool IsProtectedFromDeletion { get; }
+        public bool IsRecent { get; }
+        public bool IsRecommendedForDeletion { get; }
 
         public bool IsSelected
         {
@@ -1804,13 +2065,115 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 }
 
                 isSelected = value;
+                if (value && isMarkedForDeletion)
+                {
+                    isMarkedForDeletion = false;
+                    PropertyChanged?.Invoke(
+                        this,
+                        new PropertyChangedEventArgs(nameof(IsMarkedForDeletion)));
+                }
+
                 PropertyChanged?.Invoke(
                     this,
                     new PropertyChangedEventArgs(nameof(IsSelected)));
             }
         }
 
+        public bool IsMarkedForDeletion
+        {
+            get => isMarkedForDeletion;
+            set
+            {
+                if (!CanMarkForDeletion && value)
+                {
+                    return;
+                }
+
+                if (isMarkedForDeletion == value)
+                {
+                    return;
+                }
+
+                isMarkedForDeletion = value;
+                if (value && isSelected)
+                {
+                    isSelected = false;
+                    PropertyChanged?.Invoke(
+                        this,
+                        new PropertyChangedEventArgs(nameof(IsSelected)));
+                }
+
+                PropertyChanged?.Invoke(
+                    this,
+                    new PropertyChangedEventArgs(nameof(IsMarkedForDeletion)));
+            }
+        }
+
         public event PropertyChangedEventHandler? PropertyChanged;
+
+        private static string BuildCoverageSummary(
+            TextureBuildReport? report,
+            bool isComposition)
+        {
+            if (isComposition)
+            {
+                return "This is an install composition, not another AI build. Its archive coverage is the union of the named source packs below.";
+            }
+
+            if (report is null)
+            {
+                return "No detailed texture report is available for this older pack. Full scope describes the selected game archives, not a promise that every texture inside them was repainted.";
+            }
+
+            var enhancedOrReused = checked(
+                report.Statistics.EnhancedTextures
+                + report.Statistics.ReusedTextures);
+            var topReasons = report.Statistics.PreservedReasons
+                .Where(pair => pair.Value > 0)
+                .OrderByDescending(pair => pair.Value)
+                .ThenBy(pair => pair.Key, StringComparer.CurrentCultureIgnoreCase)
+                .Take(3)
+                .Select(pair => $"{pair.Key}: {pair.Value:N0}")
+                .ToArray();
+            var reasonText = topReasons.Length == 0
+                ? string.Empty
+                : $" Top original-preservation reasons: {string.Join("; ", topReasons)}.";
+            var fallbackText = report.Statistics.FallbackTextures == 0
+                ? string.Empty
+                : $" {report.Statistics.FallbackTextures:N0} used a validated fallback route.";
+            var isRepairReport = report.IsIncrementalRepair
+                || report.IsSourceMismatchRepair
+                || report.IsSafetyRepair
+                || report.IsCutoutMipRepair
+                || report.IsManualTextureRevision;
+            var newlyRenderedText = report.Statistics.ExternalArtisticTextures == 0
+                                    && report.Statistics.BuiltInPaintedTextures == 0
+                ? string.Empty
+                : $" This repair newly rendered {report.Statistics.ExternalArtisticTextures:N0} with diffusion and {report.Statistics.BuiltInPaintedTextures:N0} with the built-in painter.";
+            var rendererText = report.PaintedRendererOutcome switch
+            {
+                PaintedRendererOutcome.ExternalOnly when isRepairReport =>
+                    " Retained pack painted route: diffusion only." + newlyRenderedText,
+                PaintedRendererOutcome.BuiltInOnly when isRepairReport =>
+                    " Retained pack painted route: built-in only." + newlyRenderedText,
+                PaintedRendererOutcome.Mixed when isRepairReport =>
+                    " MIXED PAINTED RENDERERS are recorded across the retained pack; style-preserving repair is blocked and a rebuild is recommended."
+                    + newlyRenderedText,
+                PaintedRendererOutcome.ExternalOnly =>
+                    $" Painted renderer: diffusion only ({report.Statistics.ExternalArtisticTextures:N0} texture(s)).",
+                PaintedRendererOutcome.BuiltInOnly =>
+                    $" Painted renderer: built-in only ({report.Statistics.BuiltInPaintedTextures:N0} texture(s)).",
+                PaintedRendererOutcome.Mixed =>
+                    $" MIXED PAINTED RENDERERS: {report.Statistics.ExternalArtisticTextures:N0} diffusion and {report.Statistics.BuiltInPaintedTextures:N0} built-in texture(s); style-preserving repair is blocked and a rebuild is recommended.",
+                _ => string.Empty
+            };
+            return $"TEXTURE COVERAGE · {enhancedOrReused:N0} enhanced/reused · "
+                   + $"{report.Statistics.PreservedTextures:N0} kept original for safety, fidelity, unsupported formats, or missing content. "
+                   + "A full-scope build covers all selected archives; it intentionally does not repaint every texture."
+                   + fallbackText
+                   + rendererText
+                   + reasonText;
+        }
 
         private static string BuildRepairReasonText(
             bool isCharacterScope,
@@ -1856,8 +2219,9 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         private static bool RequiresPipelineRepair(
             TextureBuildReport? report,
             AssetScope scope,
-            IReadOnlyList<string> artifactPaths) =>
-            TextureProcessingPipeline.RequiresRepair(report, scope, artifactPaths);
+            IReadOnlyList<string> artifactPaths,
+            TexturePreset preset) =>
+            TextureProcessingPipeline.RequiresRepair(report, scope, artifactPaths, preset);
 
         private static string? DescribeCompositionComponents(StagedPackInfo info)
         {
@@ -1886,14 +2250,18 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                             : StagedPackMetadataStore
                                 .TryRead(Path.Combine(stagingRoot, component.BuildId))?
                                 .DisplayName;
-                        return $"{displayName ?? component.BuildId} ({component.ArtifactCount:N0} archive(s))";
+                        var generatedName = $"{FormatComponentScope(component.Options)} / "
+                                            + FormatComponentPreset(component.Options);
+                        return $"{displayName ?? generatedName} · {component.ArtifactCount:N0} archive(s) · "
+                               + component.CreatedUtc.ToLocalTime().ToString(
+                                   "g",
+                                   CultureInfo.CurrentCulture);
                     })
                     .ToArray();
                 return $"This combination was generated automatically while installing "
                     + $"{composition.Components.Count:N0} checked pack(s) together. It combines: "
                     + string.Join("; ", componentNames)
-                    + ". Deleting a source pack is blocked while this combination references it; "
-                    + "delete the combination first if it is no longer installed.";
+                    + ". To remove an unused source and this generated record in one cleanup, check both red Delete boxes; SpinTexture removes the composition first.";
             }
             catch (Exception exception) when (exception is
                 IOException
@@ -1905,11 +2273,43 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             }
         }
 
-        private static TextureBuildReport? TryReadReport(string buildDirectory)
+        private static string FormatComponentScope(UpscaleOptions options) =>
+            options.Scope switch
+            {
+                AssetScope.SelectedZone => $"Zone {options.SelectedZone ?? "Unknown"}",
+                AssetScope.CharactersAndEquipmentOnly => "Characters + Equipment",
+                AssetScope.WorldCharactersAndEquipment =>
+                    $"World ({FormatWorldExpansionSelection(options.WorldExpansions, compact: true)}) + Characters + Equipment",
+                AssetScope.WorldOnly =>
+                    $"World ({FormatWorldExpansionSelection(options.WorldExpansions, compact: true)})",
+                AssetScope.AllSafeTextures => "All safe textures",
+                AssetScope.SpellEffectsOnly => "Spell effects",
+                _ => options.Scope.ToString()
+            };
+
+        private static string FormatComponentPreset(UpscaleOptions options) =>
+            options.Preset switch
+            {
+                TexturePreset.Faithful => "Original Clarity",
+                TexturePreset.ClassicHd => "Texture HD",
+                TexturePreset.MaximumDetail => "Material Detail",
+                TexturePreset.Illustrated => options.PaintedTheme switch
+                {
+                    PaintedTheme.LightStorybook => "Graphic Painted / Light storybook",
+                    PaintedTheme.DarkGothic => "Graphic Painted / Dark gothic",
+                    PaintedTheme.ComicInk => "Graphic Painted / Comic ink",
+                    PaintedTheme.ZoneAware => "Graphic Painted / Follow each zone",
+                    _ => "Graphic Painted / Classic painted"
+                },
+                TexturePreset.RusticPainted => "Rustic Painted",
+                _ => options.Preset.ToString()
+            };
+
+        private static TextureBuildReport? TryReadReport(StagedPackInfo info)
         {
             try
             {
-                var path = Path.Combine(buildDirectory, "texture-report.json");
+                var path = Path.Combine(info.BuildDirectory, "texture-report.json");
                 if (!File.Exists(path))
                 {
                     return null;
@@ -1922,14 +2322,22 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                     FileShare.ReadWrite | FileShare.Delete,
                     16 * 1024,
                     FileOptions.SequentialScan);
-                return JsonSerializer.Deserialize<TextureBuildReport>(
+                var report = JsonSerializer.Deserialize<TextureBuildReport>(
                     stream,
-                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    CompositionJsonOptions);
+                return TextureBuildReportValidation.IsUsableForStagedPack(
+                    report,
+                    info.CandidateBuildId,
+                    info.Manifest?.InstallPath,
+                    info.BuildDirectory)
+                    ? report
+                    : null;
             }
             catch (Exception exception) when (exception is
                 IOException
                 or UnauthorizedAccessException
                 or JsonException
+                or ArgumentException
                 or NotSupportedException)
             {
                 return null;

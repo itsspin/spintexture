@@ -24,6 +24,8 @@ public sealed class AppPreferencesStore
     };
 
     private readonly string settingsPath;
+    private readonly object writeQueueGate = new();
+    private Task writeQueue = Task.CompletedTask;
 
     public AppPreferencesStore(string? settingsPath = null)
     {
@@ -67,7 +69,7 @@ public sealed class AppPreferencesStore
         }
     }
 
-    public async Task WriteLastInstallPathAsync(
+    public Task WriteLastInstallPathAsync(
         string installPath,
         CancellationToken cancellationToken = default)
     {
@@ -79,66 +81,33 @@ public sealed class AppPreferencesStore
                 "The remembered EverQuest directory must exist and contain eqgame.exe.");
         }
 
-        var current = Read();
-        var document = new PreferencesDocument(
-            CurrentSchemaVersion,
-            normalized,
-            current.PaintedStyle,
-            current.BakedDepth,
-            current.EmissiveGlow,
-            current.FullResolutionRepaint,
-            current.MipSharpen);
-        var parent = Path.GetDirectoryName(settingsPath)
-            ?? throw new InvalidOperationException("The preferences path has no parent directory.");
-        Directory.CreateDirectory(parent);
-        var temporaryPath = AtomicFile.CreateTemporarySiblingPath(settingsPath);
-        try
-        {
-            await File.WriteAllTextAsync(
-                temporaryPath,
-                JsonSerializer.Serialize(document, JsonOptions),
-                cancellationToken).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
-            AtomicFile.CommitTemporaryFile(temporaryPath, settingsPath);
-        }
-        catch
-        {
-            AtomicFile.TryDelete(temporaryPath);
-            throw;
-        }
+        return EnqueueWriteAsync(
+            current => new PreferencesDocument(
+                CurrentSchemaVersion,
+                normalized,
+                current.PaintedStyle,
+                current.BakedDepth,
+                current.EmissiveGlow,
+                current.FullResolutionRepaint,
+                current.MipSharpen),
+            cancellationToken);
     }
 
-    public async Task WritePaintedStyleAsync(
+    public Task WritePaintedStyleAsync(
         PaintedStyleSettings? paintedStyle,
         CancellationToken cancellationToken = default)
     {
-        var current = Read();
-        var document = new PreferencesDocument(
-            CurrentSchemaVersion,
-            current.LastInstallPath,
-            paintedStyle?.Clamped(),
-            current.BakedDepth,
-            current.EmissiveGlow,
-            current.FullResolutionRepaint,
-            current.MipSharpen);
-        var parent = Path.GetDirectoryName(settingsPath)
-            ?? throw new InvalidOperationException("The preferences path has no parent directory.");
-        Directory.CreateDirectory(parent);
-        var temporaryPath = AtomicFile.CreateTemporarySiblingPath(settingsPath);
-        try
-        {
-            await File.WriteAllTextAsync(
-                temporaryPath,
-                JsonSerializer.Serialize(document, JsonOptions),
-                cancellationToken).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
-            AtomicFile.CommitTemporaryFile(temporaryPath, settingsPath);
-        }
-        catch
-        {
-            AtomicFile.TryDelete(temporaryPath);
-            throw;
-        }
+        var clamped = paintedStyle?.Clamped();
+        return EnqueueWriteAsync(
+            current => new PreferencesDocument(
+                CurrentSchemaVersion,
+                current.LastInstallPath,
+                clamped,
+                current.BakedDepth,
+                current.EmissiveGlow,
+                current.FullResolutionRepaint,
+                current.MipSharpen),
+            cancellationToken);
     }
 
     private static string? NormalizeOptionalPath(string? path)
@@ -158,22 +127,56 @@ public sealed class AppPreferencesStore
         }
     }
 
-    public async Task WriteEnhancementsAsync(
+    public Task WriteEnhancementsAsync(
         double bakedDepth,
         double emissiveGlow,
         bool fullResolutionRepaint,
         double mipSharpen,
         CancellationToken cancellationToken = default)
     {
-        var current = Read();
-        var document = new PreferencesDocument(
-            CurrentSchemaVersion,
-            current.LastInstallPath,
-            current.PaintedStyle,
-            Math.Clamp(bakedDepth, 0d, 1d),
-            Math.Clamp(emissiveGlow, 0d, 1d),
-            fullResolutionRepaint,
-            Math.Clamp(mipSharpen, 0d, 1d));
+        var clampedBakedDepth = Math.Clamp(bakedDepth, 0d, 1d);
+        var clampedEmissiveGlow = Math.Clamp(emissiveGlow, 0d, 1d);
+        var clampedMipSharpen = Math.Clamp(mipSharpen, 0d, 1d);
+        return EnqueueWriteAsync(
+            current => new PreferencesDocument(
+                CurrentSchemaVersion,
+                current.LastInstallPath,
+                current.PaintedStyle,
+                clampedBakedDepth,
+                clampedEmissiveGlow,
+                fullResolutionRepaint,
+                clampedMipSharpen),
+            cancellationToken);
+    }
+
+    private Task EnqueueWriteAsync(
+        Func<AppPreferences, PreferencesDocument> update,
+        CancellationToken cancellationToken)
+    {
+        lock (writeQueueGate)
+        {
+            writeQueue = ContinueQueuedWriteAsync(writeQueue, update, cancellationToken);
+            return writeQueue;
+        }
+    }
+
+    private async Task ContinueQueuedWriteAsync(
+        Task previousWrite,
+        Func<AppPreferences, PreferencesDocument> update,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await previousWrite.ConfigureAwait(false);
+        }
+        catch
+        {
+            // A failed best-effort preference update must not permanently
+            // poison the queue. The original caller still observes its error.
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var document = update(Read());
         var parent = Path.GetDirectoryName(settingsPath)
             ?? throw new InvalidOperationException("The preferences path has no parent directory.");
         Directory.CreateDirectory(parent);

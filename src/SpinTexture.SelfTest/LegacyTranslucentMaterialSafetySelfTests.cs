@@ -19,6 +19,10 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
     public static async Task RunAsync(CancellationToken cancellationToken)
     {
         TestWldMaterialGraphDetection();
+        await TestLegacyMaterialEnumRepairInvalidatesFalseColorKeyAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await TestPaintedLegacyMaterialRetryMayKeepVerifiedOriginalAsync(cancellationToken)
+            .ConfigureAwait(false);
         await TestPfsRepairRestoresWaterAndCarriesUnrelatedTextureAsync(cancellationToken)
             .ConfigureAwait(false);
     }
@@ -78,6 +82,166 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
                 .Contains("glasspane.bmp")
             && LegacyTranslucentMaterialSafetyPolicy.FindMaskedTextureNames(maskedBlended).Count == 0,
             "masked-and-blended materials stay under whole-original preservation");
+
+        // The material value is an enum, not a bit field. Diffuse character
+        // variants such as 0x14 made up nearly every member of global_chr.s3d
+        // in the supported live client; treating bit 0x04 as independent
+        // transparency retired those visible skins from every build.
+        foreach (var diffuseType in new uint[] { 0x01, 0x02, 0x0D, 0x12, 0x14, 0x15, 0x19, 0x31, 0x553 })
+        {
+            var diffuse = CreateLegacyWld(["visible.bmp"], 0x80000000 | diffuseType);
+            AssertEqual(
+                0,
+                LegacyTranslucentMaterialSafetyPolicy.FindProtectedTextureNames(diffuse).Count,
+                $"diffuse material 0x{diffuseType:X} is not blended");
+            AssertEqual(
+                0,
+                LegacyTranslucentMaterialSafetyPolicy.FindMaskedTextureNames(diffuse).Count,
+                $"diffuse material 0x{diffuseType:X} is not palette-masked");
+        }
+
+        foreach (var blendedType in new uint[] { 0x05, 0x07, 0x09, 0x0A, 0x0B, 0x0F, 0x10, 0x17 })
+        {
+            var blended = CreateLegacyWld(["blend.bmp"], 0x80000000 | blendedType);
+            AssertTrue(
+                LegacyTranslucentMaterialSafetyPolicy.FindProtectedTextureNames(blended)
+                    .Contains("blend.bmp"),
+                $"blended material 0x{blendedType:X} stays protected");
+        }
+
+        foreach (var legacyFalsePositive in new uint[] { 0x0D, 0x12, 0x14, 0x15, 0x19, 0x31, 0x553 })
+        {
+            var payloadWithFalsePositive = CreateLegacyWld(
+                ["retry.bmp"],
+                0x80000000 | legacyFalsePositive);
+            AssertTrue(
+                LegacyTranslucentMaterialSafetyPolicy
+                    .FindLegacyBitRuleMisclassifiedTextureNames(payloadWithFalsePositive)
+                    .Contains("retry.bmp"),
+                $"legacy material false-positive 0x{legacyFalsePositive:X} is repairable");
+        }
+
+        // The supported live client uses diffuse 0x14 materials for classic
+        // Ogre armor-skin maps. The former bit test preserved these exact
+        // visible members in both Texture HD and Graphic Painted builds.
+        var ogreArmor = CreateLegacyWld(
+            ["ogmhesk11.dds", "ogfchsk03.dds"],
+            materialParameters: 0x80000014);
+        AssertEqual(
+            0,
+            LegacyTranslucentMaterialSafetyPolicy
+                .FindProtectedTextureNames(ogreArmor).Count,
+            "classic Ogre diffuse armor maps are not translucent controls");
+        AssertEqual(
+            0,
+            LegacyTranslucentMaterialSafetyPolicy
+                .FindMaskedTextureNames(ogreArmor).Count,
+            "classic Ogre diffuse armor maps are not palette-key masks");
+        var repairableOgreArmor = LegacyTranslucentMaterialSafetyPolicy
+            .FindLegacyBitRuleMisclassifiedTextureNames(ogreArmor);
+        AssertTrue(
+            repairableOgreArmor.Contains("ogmhesk11.dds")
+            && repairableOgreArmor.Contains("ogfchsk03.dds"),
+            "classic Ogre armor omitted by the legacy bit rule is included in v10 repair");
+    }
+
+    private static async Task TestLegacyMaterialEnumRepairInvalidatesFalseColorKeyAsync(
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-material-enum-{Guid.NewGuid():N}");
+        var sourcePath = Path.Combine(root, "source.s3d");
+        var baselinePath = Path.Combine(root, "baseline.s3d");
+        var destinationPath = Path.Combine(root, "repaired.s3d");
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var wld = CreateLegacyWld(["armor.bmp"], materialParameters: 0x00000553);
+            var sourceBitmap = CreateIndexedBmp(32, 32, seed: 5);
+            var falselyKeyedBaseline = CreateIndexedBmp(128, 128, seed: 17);
+            await WriteArchiveAsync(
+                sourcePath,
+                [
+                    new PfsArchiveItem("global.wld", wld),
+                    new PfsArchiveItem("armor.bmp", sourceBitmap)
+                ],
+                cancellationToken).ConfigureAwait(false);
+            await WriteArchiveAsync(
+                baselinePath,
+                [
+                    new PfsArchiveItem("global.wld", wld),
+                    new PfsArchiveItem("armor.bmp", falselyKeyedBaseline)
+                ],
+                cancellationToken).ConfigureAwait(false);
+
+            var fingerprint = await FileIntegrity.FingerprintAsync(
+                    baselinePath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var processed = 0;
+            var builder = new PfsTextureArchiveBuilder(
+                new NativeTextureProcessor(new ExternalToolPaths(null, null, null, null, null, [])),
+                new TextureBuildCounter(),
+                retryUnchangedEntries: true,
+                rebuildFromReuseArchive: true,
+                repairLegacyMaterialClassification: true,
+                reuseArchivePaths: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["global.s3d"] = baselinePath
+                },
+                reuseArchiveFingerprints: new Dictionary<string, StagedPackFileFingerprint>(
+                    StringComparer.OrdinalIgnoreCase)
+                {
+                    ["global.s3d"] = new(fingerprint.Length, fingerprint.Sha256)
+                },
+                processBatch: (requests, _) =>
+                {
+                    processed += requests.Count;
+                    AssertTrue(
+                        requests.Count == 1
+                        && requests[0].SuppressIndexedColorKeyHeuristic
+                        && !requests[0].HasMaskedColorKey,
+                        "v10 diffuse repair suppresses the legacy palette-key heuristic");
+                    return Task.FromResult<IReadOnlyList<NativeTextureProcessOutcome>>(
+                        requests.Select(_ => new NativeTextureProcessOutcome(
+                            Result: null,
+                            Error: new NotSupportedException("synthetic repair stop")))
+                        .ToArray());
+                });
+
+            await builder.BuildAsync(
+                new StagedArtifactBuildContext(
+                    "global.s3d",
+                    sourcePath,
+                    destinationPath,
+                    Path.Combine(root, "work"),
+                    Path.Combine(root, "previews"),
+                    new UpscaleOptions(
+                        TexturePreset.ClassicHd,
+                        AssetScope.CharactersAndEquipmentOnly,
+                        MaximumDimension: 1024,
+                        GenerateMipMaps: true,
+                        InstallAfterBuild: false)),
+                cancellationToken).ConfigureAwait(false);
+
+            AssertEqual(1, processed, "false color-key output is invalidated and regenerated");
+            await using var repaired = await PfsArchive.OpenAsync(
+                destinationPath,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            AssertBytesEqual(
+                sourceBitmap,
+                await repaired.ReadEntryAsync("armor.bmp", cancellationToken).ConfigureAwait(false),
+                "failed v10 regeneration restores the verified diffuse original");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
     }
 
     private static async Task TestPfsRepairRestoresWaterAndCarriesUnrelatedTextureAsync(
@@ -286,6 +450,122 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
         }
     }
 
+    private static async Task TestPaintedLegacyMaterialRetryMayKeepVerifiedOriginalAsync(
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-ogre-painted-material-{Guid.NewGuid():N}");
+        var sourcePath = Path.Combine(root, "globalogm_chr.s3d");
+        var baselinePath = Path.Combine(root, "baseline-globalogm_chr.s3d");
+        var destinationPath = Path.Combine(root, "repaired-globalogm_chr.s3d");
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var wld = CreateLegacyWld(
+                ["ogmhesk11.dds"],
+                materialParameters: 0x80000014);
+            var originalArmor = CreateDxt1(64, 64, mipCount: 1);
+            var originalAtCap = CreateDxt1(1024, 1024, mipCount: 1);
+            var archiveItems = new[]
+            {
+                new PfsArchiveItem("globalogm_chr.wld", wld),
+                new PfsArchiveItem("ogmhesk11.dds", originalArmor),
+                new PfsArchiveItem("ogmchsk03.dds", originalAtCap)
+            };
+            await WriteArchiveAsync(sourcePath, archiveItems, cancellationToken)
+                .ConfigureAwait(false);
+            await WriteArchiveAsync(baselinePath, archiveItems, cancellationToken)
+                .ConfigureAwait(false);
+
+            var baselineFingerprint = await FileIntegrity.FingerprintAsync(
+                    baselinePath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var processed = 0;
+            var counter = new TextureBuildCounter();
+            var builder = new PfsTextureArchiveBuilder(
+                new NativeTextureProcessor(
+                    new ExternalToolPaths(null, null, null, null, null, [])),
+                counter,
+                retryUnchangedEntries: true,
+                rebuildFromReuseArchive: true,
+                requireRequestedVisualProfile: true,
+                allowRequestedVisualProfileRegeneration: true,
+                repairLegacyMaterialClassification: true,
+                repairPaintedAtCap: true,
+                reuseArchivePaths: new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase)
+                {
+                    ["globalogm_chr.s3d"] = baselinePath
+                },
+                reuseArchiveFingerprints: new Dictionary<string, StagedPackFileFingerprint>(
+                    StringComparer.OrdinalIgnoreCase)
+                {
+                    ["globalogm_chr.s3d"] = new(
+                        baselineFingerprint.Length,
+                        baselineFingerprint.Sha256)
+                },
+                processBatch: (requests, _) =>
+                {
+                    processed += requests.Count;
+                    return Task.FromResult<IReadOnlyList<NativeTextureProcessOutcome>>(
+                        requests.Select(_ => new NativeTextureProcessOutcome(
+                                Result: null,
+                                Error: new InvalidDataException(
+                                    "Synthetic painted fidelity rejection.")))
+                            .ToArray());
+                });
+
+            await builder.BuildAsync(
+                new StagedArtifactBuildContext(
+                    "globalogm_chr.s3d",
+                    sourcePath,
+                    destinationPath,
+                    Path.Combine(root, "work"),
+                    Path.Combine(root, "previews"),
+                    new UpscaleOptions(
+                        TexturePreset.Illustrated,
+                        AssetScope.CharactersAndEquipmentOnly,
+                        MaximumDimension: 1024,
+                        GenerateMipMaps: true,
+                        InstallAfterBuild: false)),
+                cancellationToken).ConfigureAwait(false);
+
+            AssertEqual(
+                2,
+                processed,
+                "source-identical Ogre armor and at-cap art enter v10 painted retry");
+            var statistics = counter.Snapshot();
+            AssertEqual(
+                2,
+                statistics.PreservedReasons.GetValueOrDefault(
+                    PfsTextureArchiveBuilder.RetriedPreservedOriginalReason),
+                "rejected false-protected and at-cap painted retries keep verified originals");
+            await using var repaired = await PfsArchive.OpenAsync(
+                destinationPath,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            AssertBytesEqual(
+                originalArmor,
+                await repaired.ReadEntryAsync("ogmhesk11.dds", cancellationToken)
+                    .ConfigureAwait(false),
+                "failed Ogre armor repaint remains the exact verified original");
+            AssertBytesEqual(
+                originalAtCap,
+                await repaired.ReadEntryAsync("ogmchsk03.dds", cancellationToken)
+                    .ConfigureAwait(false),
+                "failed at-cap repaint remains the exact verified original");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
     private static byte[] CreateLegacyWld(
         IReadOnlyList<string> textureNames,
         uint materialParameters = 0x80000007)
@@ -356,6 +636,43 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
         }
 
         return data;
+    }
+
+    private static byte[] CreateIndexedBmp(int width, int height, int seed)
+    {
+        const int paletteOffset = 14 + 40;
+        const int paletteEntries = 256;
+        var pixelOffset = paletteOffset + paletteEntries * 4;
+        var stride = (width + 3) & ~3;
+        var bytes = new byte[pixelOffset + stride * height];
+        bytes[0] = (byte)'B';
+        bytes[1] = (byte)'M';
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(2, 4), (uint)bytes.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(10, 4), (uint)pixelOffset);
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(14, 4), 40);
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(18, 4), width);
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(22, 4), height);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(26, 2), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(28, 2), 8);
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(34, 4), (uint)(stride * height));
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(46, 4), paletteEntries);
+        for (var index = 0; index < paletteEntries; index++)
+        {
+            var paletteIndex = paletteOffset + index * 4;
+            bytes[paletteIndex] = (byte)((index * 17 + seed) & 0xFF);
+            bytes[paletteIndex + 1] = (byte)((index * 29 + seed * 3) & 0xFF);
+            bytes[paletteIndex + 2] = (byte)((index * 43 + seed * 5) & 0xFF);
+        }
+
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                bytes[pixelOffset + y * stride + x] = (byte)(1 + ((x + y + seed) % 31));
+            }
+        }
+
+        return bytes;
     }
 
     private static byte[] CreateDxt1(int width, int height, int mipCount)

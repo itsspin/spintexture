@@ -15,6 +15,18 @@ namespace SpinTexture.Core.Tooling;
 /// </summary>
 public static class DiffusionTiler
 {
+    // BlendTiles holds four float accumulators, one float weight, the final
+    // RGBA image, and every decoded painted tile. Staying below this bound
+    // avoids multi-gigabyte allocations and large-object-heap collapse on the
+    // 2K/4K choices the UI exposes.
+    public const long MaximumBlendWorkingSetBytes = 768L * 1024 * 1024;
+
+    // A non-tiled worker retry retains only one decoded 4x output rather than
+    // every painted tile plus float blend accumulators. Keep that single RGBA
+    // image bounded as well: the post-processing path creates additional
+    // cropped/theme buffers before encoding.
+    public const long MaximumBoundedExternalOutputBytes = 320L * 1024 * 1024;
+
     /// <summary>
     /// Tiles are sized so their 4x output (1152) exactly matches the worker's
     /// default diffusion bound: each tile is painted at full resolution with
@@ -78,6 +90,63 @@ public static class DiffusionTiler
 
         return plan;
     }
+
+    public static long EstimateBlendWorkingSetBytes(
+        int inputWidth,
+        int inputHeight,
+        int scale,
+        int tileSize = TileInputSize,
+        int overlap = TileOverlap)
+    {
+        if (inputWidth <= 0 || inputHeight <= 0 || scale <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(inputWidth));
+        }
+
+        var outputPixels = checked(
+            (long)inputWidth * scale * inputHeight * scale);
+        var tileWidth = Math.Min(tileSize, inputWidth);
+        var tileHeight = Math.Min(tileSize, inputHeight);
+        var tileCount = PlanTiles(inputWidth, inputHeight, tileSize, overlap).Count;
+        var retainedTilePixels = checked(
+            (long)tileWidth * scale * tileHeight * scale * tileCount);
+        const long fixedHeadroom = 64L * 1024 * 1024;
+        return checked(
+            (outputPixels * 24L)
+            + (retainedTilePixels * 4L)
+            + fixedHeadroom);
+    }
+
+    public static bool CanBlendWithinMemoryBudget(
+        int inputWidth,
+        int inputHeight,
+        int scale,
+        long memoryBudgetBytes = MaximumBlendWorkingSetBytes) =>
+        memoryBudgetBytes > 0
+        && EstimateBlendWorkingSetBytes(inputWidth, inputHeight, scale)
+            <= memoryBudgetBytes;
+
+    public static long EstimateExternalOutputBytes(
+        int inputWidth,
+        int inputHeight,
+        int scale)
+    {
+        if (inputWidth <= 0 || inputHeight <= 0 || scale <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(inputWidth));
+        }
+
+        return checked((long)inputWidth * scale * inputHeight * scale * 4L);
+    }
+
+    public static bool CanUseBoundedExternalPass(
+        int inputWidth,
+        int inputHeight,
+        int scale,
+        long outputBudgetBytes = MaximumBoundedExternalOutputBytes) =>
+        outputBudgetBytes > 0
+        && EstimateExternalOutputBytes(inputWidth, inputHeight, scale)
+            <= outputBudgetBytes;
 
     /// <summary>
     /// Blends painted tiles (each scaled by <paramref name="scale"/>) back

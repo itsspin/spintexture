@@ -63,6 +63,37 @@ internal static class StagedPackDeletionSelfTests
             Assert(!Directory.Exists(ordinaryDirectory), "selected ordinary pack should be removed");
             Assert(File.Exists(neighborManifest), "neighbor pack must remain untouched");
 
+            var finalizingManifest = await CreatePackAsync(
+                    paths,
+                    "build-finalizing-delete-guard",
+                    options with { SelectedZone = "finalizing" },
+                    "finalizing.s3d",
+                    "finalizing-source"u8.ToArray(),
+                    "finalizing-enhanced"u8.ToArray(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var finalizingCheckpoint = Path.Combine(
+                Path.GetDirectoryName(finalizingManifest)!,
+                "build-checkpoint.json");
+            await File.WriteAllTextAsync(finalizingCheckpoint, "{}", cancellationToken)
+                .ConfigureAwait(false);
+            var finalizingPlan = await deletion.PlanAsync(
+                    paths,
+                    finalizingManifest,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            Assert(!finalizingPlan.CanDelete,
+                "a finalizing or resumable pack must never be selectable for deletion");
+            await AssertThrowsAsync<InvalidOperationException>(
+                    () => deletion.DeleteAsync(
+                        paths,
+                        finalizingManifest,
+                        cancellationToken: cancellationToken),
+                    "DeleteAsync must recheck the resumable checkpoint under the staging lock")
+                .ConfigureAwait(false);
+            Assert(File.Exists(finalizingManifest),
+                "a checkpoint-protected pack must remain intact");
+
             var componentOne = await CreatePackAsync(
                     paths,
                     "build-component-one",
@@ -100,6 +131,48 @@ internal static class StagedPackDeletionSelfTests
                     cancellationToken)
                 .ConfigureAwait(false);
             Assert(!blockedComponent.CanDelete, "composition component deletion must be blocked");
+            var libraryPlans = await deletion.PlanManyAsync(
+                    paths,
+                    [componentOne, componentTwo, composition.ManifestPath],
+                    cancellationToken)
+                .ConfigureAwait(false);
+            AssertEqual(3, libraryPlans.Count, "library-wide deletion plan count");
+            var blockedBatch = await deletion.PlanBatchAsync(
+                    paths,
+                    [componentOne],
+                    cancellationToken)
+                .ConfigureAwait(false);
+            Assert(!blockedBatch.CanDelete,
+                "a source-only cleanup must keep its retained composition dependency");
+
+            var cleanupCandidates = libraryPlans
+                .Select(plan => new StagedPackCleanupCandidate(
+                    plan.ManifestPath,
+                    PathGuard.SamePath(plan.ManifestPath, componentTwo)
+                        ? DateTimeOffset.UtcNow
+                        : DateTimeOffset.UtcNow - TimeSpan.FromDays(10),
+                    plan))
+                .ToArray();
+            var recommended = StagedPackCleanupPolicy.RecommendSafeOldPackDeletions(
+                cleanupCandidates,
+                DateTimeOffset.UtcNow);
+            Assert(recommended.Contains(Path.GetFullPath(composition.ManifestPath)),
+                "old uninstalled composition should be recommended for cleanup");
+            Assert(recommended.Contains(Path.GetFullPath(componentOne)),
+                "old source should be recommended when its old composition is also removed");
+            Assert(!recommended.Contains(Path.GetFullPath(componentTwo)),
+                "recent source should be retained by the safe-old recommendation");
+            var dependencyAwareBatch = await deletion.PlanBatchAsync(
+                    paths,
+                    recommended.ToArray(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            Assert(dependencyAwareBatch.CanDelete,
+                "recommended cleanup should pass as one dependency-aware batch");
+            AssertEqual(
+                composition.ManifestPath,
+                dependencyAwareBatch.OrderedPlans[0].ManifestPath,
+                "composition must be ordered before its selected source");
             await AssertThrowsAsync<InvalidOperationException>(
                     () => deletion.DeleteAsync(
                         paths,
@@ -175,6 +248,12 @@ internal static class StagedPackDeletionSelfTests
                 .ConfigureAwait(false);
             Assert(!activePlan.CanDelete, "current install pack deletion must be blocked");
             Assert(activePlan.IsReferencedByCurrentInstall, "active install reference flag");
+            var activeBatch = await deletion.PlanBatchAsync(
+                    paths,
+                    [activeManifest],
+                    cancellationToken)
+                .ConfigureAwait(false);
+            Assert(!activeBatch.CanDelete, "batch cleanup must reject the installed pack");
             await AssertThrowsAsync<InvalidOperationException>(
                     () => deletion.DeleteAsync(
                         paths,

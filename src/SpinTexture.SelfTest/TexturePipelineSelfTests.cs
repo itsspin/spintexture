@@ -24,6 +24,10 @@ public static class TexturePipelineSelfTests
             .ConfigureAwait(false);
         await output.WriteLineAsync("Legacy translucent-material safety tests passed.")
             .ConfigureAwait(false);
+        await RepairCoverageExpansionSelfTests.RunAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await output.WriteLineAsync("Omitted-archive safety-repair coverage tests passed.")
+            .ConfigureAwait(false);
         await WorldCutoutRepairSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Immutable World/zone cutout revision-repair tests passed.")
             .ConfigureAwait(false);
@@ -101,8 +105,10 @@ public static class TexturePipelineSelfTests
             .ConfigureAwait(false);
         TestTextureModelSelection();
         TestArtisticWorkerCommand();
+        await TestArtisticWorkerIdentityAsync(cancellationToken).ConfigureAwait(false);
         TestLightingBaker();
         TestExpandedClassicCoverage();
+        await TestPaintedAtCapEligibilityAsync(cancellationToken).ConfigureAwait(false);
         TestMaskedIndexedColorKey();
         TestDiffusionTiler();
         await TestCrispMipChainAsync(cancellationToken).ConfigureAwait(false);
@@ -211,10 +217,41 @@ public static class TexturePipelineSelfTests
                 .SequenceEqual(
                     [
                         TextureProcessingPipeline.MaskedMaterialColorKeySafetyRuleId,
-                        TextureProcessingPipeline.ExpandedClassicCoverageRuleId
+                        TextureProcessingPipeline.ExpandedClassicCoverageRuleId,
+                        TextureProcessingPipeline.LegacyMaterialClassificationRuleId
                     ],
                     StringComparer.Ordinal),
-            "a revision-3 character-only pack has no environmental celestial work; only the masked color-key and expanded-coverage rules apply");
+            "a non-painted revision-3 character pack has no environmental celestial or painted-at-cap work; only material color-key and coverage rules apply");
+        var paintedRevisionThree = Report(revision: 3) with
+        {
+            PaintedProfileRevision = 1
+        };
+        Assert(
+            TextureProcessingPipeline.GetMissingRepairRuleIds(
+                    paintedRevisionThree,
+                    AssetScope.CharactersAndEquipmentOnly)
+                .Contains(
+                    TextureProcessingPipeline.PaintedAtCapRepaintRuleId,
+                    StringComparer.Ordinal),
+            "a painted character pack receives the painted-at-cap compatibility rule");
+        var currentClassicRules = TextureProcessingPipeline.GetCurrentRepairRuleIds(
+            AssetScope.CharactersAndEquipmentOnly,
+            ["globalogm_chr.s3d"],
+            TexturePreset.ClassicHd);
+        var classicWithoutPaintedAtCap = Report(TextureProcessingPipeline.CurrentRevision) with
+        {
+            AppliedRepairRuleIds = currentClassicRules
+        };
+        Assert(
+            !TextureProcessingPipeline.RequiresRepair(
+                classicWithoutPaintedAtCap,
+                AssetScope.CharactersAndEquipmentOnly,
+                ["globalogm_chr.s3d"],
+                TexturePreset.ClassicHd)
+            && !currentClassicRules.Contains(
+                TextureProcessingPipeline.PaintedAtCapRepaintRuleId,
+                StringComparer.Ordinal),
+            "Texture HD packs do not become stale for the painted-only at-cap rule");
         Assert(
             TextureProcessingPipeline.RequiresCutoutMipUpgrade(
                 Report(revision: 0, isRepair: true),
@@ -2366,6 +2403,30 @@ public static class TexturePipelineSelfTests
         Assert(
             PfsTextureArchiveBuilder.GetPreservedReason(trimBitmap, trimClassification, 2048) is null,
             "16:1 classic trim is enhanceable");
+        var legacy24BitBitmap = classicBitmap with
+        {
+            PayloadFormat = "BMP/RGB24",
+            BitsPerPixel = 24
+        };
+        Assert(
+            PfsTextureArchiveBuilder.GetPreservedReason(
+                    legacy24BitBitmap,
+                    classifier.Classify("old-wall.bmp", legacy24BitBitmap),
+                    2048)
+                ?.Contains("24-bit BMP", StringComparison.Ordinal) == true,
+            "unsupported 24-bit BMP preservation must be explicit in the build report");
+        var legacy24BitTarga = legacy24BitBitmap with
+        {
+            FileFormat = TextureFileFormat.Tga,
+            PayloadFormat = "TGA/RGB24"
+        };
+        Assert(
+            PfsTextureArchiveBuilder.GetPreservedReason(
+                    legacy24BitTarga,
+                    classifier.Classify("old-wall.tga", legacy24BitTarga),
+                    2048)
+                ?.Contains("24-bit TGA", StringComparison.Ordinal) == true,
+            "unsupported 24-bit TGA preservation must be explicit in the build report");
         var stripBitmap = classicBitmap with { Width = 8, Height = 256 };
         AssertEqual(
             "Likely sprite strip or packed cells",
@@ -2423,6 +2484,167 @@ public static class TexturePipelineSelfTests
         Assert(
             !LegacyIndexedBmp.CanEncode(BuildIndexedBmp(64, 64, 4)),
             "near-degenerate palettes stay preserved");
+    }
+
+    private static async Task TestPaintedAtCapEligibilityAsync(
+        CancellationToken cancellationToken)
+    {
+        const int cap = 64;
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-painted-at-cap-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var path = Path.Combine(root, "castle_wall.tga");
+            var rgba = new byte[cap * cap * 4];
+            for (var pixel = 0; pixel < cap * cap; pixel++)
+            {
+                rgba[pixel * 4] = (byte)(40 + (pixel % 80));
+                rgba[pixel * 4 + 1] = (byte)(55 + (pixel % 90));
+                rgba[pixel * 4 + 2] = (byte)(70 + (pixel % 100));
+                rgba[pixel * 4 + 3] = 255;
+            }
+
+            await TgaPixelBuffer.FromRgba(cap, cap, rgba)
+                .WriteFileAsync(path, cancellationToken)
+                .ConfigureAwait(false);
+            Assert(
+                await LooseTextureArtifactBuilder.IsCandidateAsync(
+                    path,
+                    "castle_wall.tga",
+                    cap,
+                    TexturePreset.Illustrated,
+                    cancellationToken).ConfigureAwait(false),
+                "Graphic Painted loose textures exactly at the cap must be staged for same-size repaint");
+            Assert(
+                await LooseTextureArtifactBuilder.IsCandidateAsync(
+                    path,
+                    "castle_wall.tga",
+                    cap,
+                    TexturePreset.RusticPainted,
+                    cancellationToken).ConfigureAwait(false),
+                "Rustic Painted loose textures exactly at the cap must be staged for same-size repaint");
+            Assert(
+                !await LooseTextureArtifactBuilder.IsCandidateAsync(
+                    path,
+                    "castle_wall.tga",
+                    cap,
+                    TexturePreset.Faithful,
+                    cancellationToken).ConfigureAwait(false),
+                "non-painted loose textures at the cap remain unchanged");
+
+            var metadata = await new TextureHeaderSniffer()
+                .ReadFileAsync(path, cancellationToken)
+                .ConfigureAwait(false)
+                ?? throw new InvalidDataException("at-cap fixture metadata was not readable");
+            var classification = new TextureSemanticClassifier().Classify("castle_wall.tga", metadata);
+
+            var archivePath = Path.Combine(root, "painted-at-cap.s3d");
+            await using (var archiveOutput = new FileStream(
+                             archivePath,
+                             FileMode.CreateNew,
+                             FileAccess.ReadWrite,
+                             FileShare.None,
+                             4096,
+                             FileOptions.Asynchronous))
+            {
+                await PfsArchiveWriter.WriteAsync(
+                        archiveOutput,
+                        [new PfsArchiveItem("castle_wall.tga", await File.ReadAllBytesAsync(
+                            path,
+                            cancellationToken).ConfigureAwait(false))],
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            await using (var archive = await PfsArchive.OpenAsync(
+                             archivePath,
+                             cancellationToken: cancellationToken).ConfigureAwait(false))
+            {
+                Assert(
+                    TexturePackWorkflow.HasPotentialArchiveCandidate(
+                        archive,
+                        archivePath,
+                        new UpscaleOptions(
+                            TexturePreset.Illustrated,
+                            AssetScope.WorldOnly,
+                            cap,
+                            GenerateMipMaps: true,
+                            InstallAfterBuild: false))
+                    && TexturePackWorkflow.HasPotentialArchiveCandidate(
+                        archive,
+                        archivePath,
+                        new UpscaleOptions(
+                            TexturePreset.RusticPainted,
+                            AssetScope.WorldOnly,
+                            cap,
+                            GenerateMipMaps: true,
+                            InstallAfterBuild: false)),
+                    "fresh-build and repair planning must retain archives whose only painted work is exactly at the cap");
+                Assert(
+                    !TexturePackWorkflow.HasPotentialArchiveCandidate(
+                        archive,
+                        archivePath,
+                        new UpscaleOptions(
+                            TexturePreset.ClassicHd,
+                            AssetScope.WorldOnly,
+                            cap,
+                            GenerateMipMaps: true,
+                            InstallAfterBuild: false)),
+                    "non-painted planning must continue omitting archives with only at-cap work");
+            }
+
+            Assert(
+                PfsTextureArchiveBuilder.GetPreservedReason(
+                    metadata,
+                    classification,
+                    cap,
+                    TexturePreset.Illustrated) is null,
+                "archive textures exactly at the cap must not be preserved for Graphic Painted");
+            Assert(
+                PfsTextureArchiveBuilder.GetPreservedReason(
+                    metadata,
+                    classification,
+                    cap,
+                    TexturePreset.Faithful) == "Already at the selected resolution cap",
+                "archive textures at the cap remain unchanged for non-painted presets");
+
+            var illustrated = new UpscaleOptions(
+                TexturePreset.Illustrated,
+                AssetScope.WorldOnly,
+                cap,
+                GenerateMipMaps: true,
+                InstallAfterBuild: false);
+            var request = new NativeTextureProcessRequest(
+                path,
+                Path.Combine(root, "out.tga"),
+                root,
+                metadata,
+                classification,
+                illustrated,
+                LogicalName: "castle_wall.tga");
+            var dimensions = UpscaleDimensions.Calculate(cap, cap, cap);
+            Assert(
+                NativeTextureProcessor.ShouldRepaintAtSelectedCap(request, dimensions)
+                && NativeTextureProcessor.ShouldRepaintAtSelectedCap(
+                    request with
+                    {
+                        Options = illustrated with { Preset = TexturePreset.RusticPainted }
+                    },
+                    dimensions)
+                && !NativeTextureProcessor.ShouldRepaintAtSelectedCap(
+                    request with
+                    {
+                        Options = illustrated with { Preset = TexturePreset.MaximumDetail }
+                    },
+                    dimensions),
+                "the native no-upscale shortcut must be bypassed only by painted same-size color jobs");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     private static void TestMaskedIndexedColorKey()
@@ -2516,6 +2738,72 @@ public static class TexturePipelineSelfTests
         Assert(
             !DiffusionTiler.NeedsTiling(288, 288) && DiffusionTiler.NeedsTiling(289, 100),
             "tiling triggers only when either axis exceeds the tile size");
+        Assert(
+            DiffusionTiler.CanBlendWithinMemoryBudget(1088, 1088, scale: 4),
+            "a bordered 1K repaint remains within the bounded in-memory blend budget");
+        Assert(
+            !DiffusionTiler.CanBlendWithinMemoryBudget(2112, 2112, scale: 4)
+            && DiffusionTiler.EstimateBlendWorkingSetBytes(2112, 2112, scale: 4)
+                > DiffusionTiler.MaximumBlendWorkingSetBytes,
+            "a bordered 2K repaint must fall back before allocating a multi-gigabyte tile blend");
+        var largePaintedMetadata = new TextureMetadata(
+            TextureFileFormat.Tga,
+            "TGA/RGBA32",
+            2048,
+            2048,
+            1,
+            32,
+            TextureAlphaStatus.None,
+            false,
+            false,
+            false,
+            false,
+            1,
+            null);
+        var largePaintedRequest = new NativeTextureProcessRequest(
+            "large-wall.tga",
+            "out.tga",
+            "work",
+            largePaintedMetadata,
+            new TextureClassification(
+                TextureKind.Color,
+                ClassificationConfidence.High,
+                true,
+                false,
+                false,
+                []),
+            UpscaleOptions.Recommended with
+            {
+                Preset = TexturePreset.Illustrated,
+                MaximumDimension = 4096,
+                FullResolutionRepaint = true
+            });
+        Assert(
+            NativeTextureProcessor.WouldExceedFullResolutionBlendBudget(
+                largePaintedRequest,
+                neuralScale: 4)
+            && NativeTextureProcessor.CanUseBoundedExternalRepaintFallback(
+                largePaintedRequest,
+                neuralScale: 4)
+            && !NativeTextureProcessor.WouldExceedFullResolutionBlendBudget(
+                largePaintedRequest with
+                {
+                    Options = largePaintedRequest.Options with
+                    {
+                        FullResolutionRepaint = false
+                    }
+                },
+                neuralScale: 4),
+            "the processor must disable multi-gigabyte tiling but retain a bounded single-pass external repaint for a 2K texture");
+        var extremePaintedRequest = largePaintedRequest with
+        {
+            Metadata = largePaintedMetadata with { Width = 4096, Height = 4096 }
+        };
+        Assert(
+            !NativeTextureProcessor.CanUseBoundedExternalRepaintFallback(
+                extremePaintedRequest,
+                neuralScale: 4),
+            "an extreme external output must still fall back to the built-in renderer instead of risking a one-gigabyte decoded image");
         var plan = DiffusionTiler.PlanTiles(576, 320);
         AssertEqual(6, plan.Count, "576x320 plans a 3x2 tile grid");
 
@@ -2741,6 +3029,41 @@ public static class TexturePipelineSelfTests
             && stone == DiffusionPromptComposer.Compose("stonewall2.dds", null)
             && stone.DenoiseScale == 1d,
             "unreviewed zones contribute no zone clause and leave denoise unscaled");
+        var stagedRequest = new NativeTextureProcessRequest(
+            Path.Combine(Path.GetTempPath(), "source.bmp"),
+            Path.Combine(Path.GetTempPath(), "output.bmp"),
+            Path.GetTempPath(),
+            new TextureMetadata(
+                TextureFileFormat.Bmp,
+                "24-bit bitmap",
+                64,
+                64,
+                1,
+                24,
+                TextureAlphaStatus.None,
+                false,
+                false,
+                false,
+                false,
+                1,
+                null),
+            new TextureClassification(
+                TextureKind.Color,
+                ClassificationConfidence.High,
+                true,
+                false,
+                false,
+                []),
+            UpscaleOptions.Recommended,
+            LogicalName: "stonewall2.dds");
+        AssertEqual(
+            stone,
+            NativeTextureProcessor.ComposeArtisticDirective(stagedRequest),
+            "artistic metadata must use the archive texture identity after native staging renames the file to source.bmp");
+        Assert(
+            NativeTextureProcessor.ComposeArtisticDirective(
+                stagedRequest with { LogicalName = null }).IsDefault,
+            "loose callers without a logical identity retain the staged source-name fallback");
         Assert(
             DiffusionPromptComposer.Compose("qrc2n.tga", null).IsDefault,
             "names without material tokens compose no directive at all");
@@ -2903,6 +3226,289 @@ public static class TexturePipelineSelfTests
             {
                 Directory.Delete(setupRoot, recursive: true);
             }
+        }
+    }
+
+    private static async Task TestArtisticWorkerIdentityAsync(
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-worker-identity-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var workerPath = Path.Combine(root, "custom-worker.exe");
+            var configPath = Path.Combine(root, "worker-config.json");
+            var realEsrganPath = Path.Combine(root, "realesrgan-ncnn-vulkan.exe");
+            var modelDirectory = Path.Combine(root, "real-esrgan-models");
+            Directory.CreateDirectory(modelDirectory);
+            await File.WriteAllBytesAsync(
+                    workerPath,
+                    "worker-v1"u8.ToArray(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await File.WriteAllBytesAsync(
+                    realEsrganPath,
+                    "realesrgan-v1"u8.ToArray(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            foreach (var extension in new[] { ".param", ".bin" })
+            {
+                await File.WriteAllBytesAsync(
+                        Path.Combine(
+                            modelDirectory,
+                            RealEsrganCommandBuilder.LegacyDetailModelName + extension),
+                        System.Text.Encoding.UTF8.GetBytes($"model-v1{extension}"),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            await File.WriteAllTextAsync(
+                    configPath,
+                    "{\"preset\":\"comic-ink\",\"strength\":0.62}",
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var tools = new ExternalToolPaths(
+                null,
+                realEsrganPath,
+                modelDirectory,
+                null,
+                null,
+                [],
+                workerPath);
+            var first = await ArtisticWorkerIdentityProvider.ResolveAsync(
+                    tools,
+                    cancellationToken)
+                .ConfigureAwait(false)
+                ?? throw new InvalidOperationException("worker identity fixture was not resolved");
+            var repeat = await ArtisticWorkerIdentityProvider.ResolveAsync(
+                    tools,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            AssertEqual(first, repeat!, "unchanged worker identity is deterministic and cache-safe");
+            AssertEqual("comic-ink", first.Preset!, "worker preset provenance");
+
+            var firstGeneration = "@echo off\r\npowershell -File \"%~dp0.worker-generations\\pending-111\\worker.ps1\" %*\r\n";
+            var secondGeneration = "@echo off\r\npowershell -File \"%~dp0.worker-generations\\pending-222\\worker.ps1\" %*\r\n";
+            AssertEqual(
+                ArtisticWorkerIdentityProvider.CanonicalizePublishedShimForIdentity(firstGeneration),
+                ArtisticWorkerIdentityProvider.CanonicalizePublishedShimForIdentity(secondGeneration),
+                "equivalent verified generations must not change identity merely because setup chose a new random directory");
+            var firstScript = "$config = Get-Content 'C:\\worker\\worker-config.json' | ConvertFrom-Json\r\n$sdCli = 'C:\\worker\\.worker-generations\\pending-111\\sd\\sd-cli.exe'\r\nWrite-Host 'same renderer'\r\n";
+            var secondScript = "$config = Get-Content 'D:\\worker\\worker-config.json' | ConvertFrom-Json\r\n$sdCli = 'D:\\worker\\.worker-generations\\pending-222\\sd\\sd-cli.exe'\r\nWrite-Host 'same renderer'\r\n";
+            AssertEqual(
+                ArtisticWorkerIdentityProvider.CanonicalizePublishedScriptForIdentity(firstScript),
+                ArtisticWorkerIdentityProvider.CanonicalizePublishedScriptForIdentity(secondScript),
+                "published worker identity must canonicalize volatile absolute and generation paths");
+            Assert(
+                ArtisticWorkerIdentityProvider.CanonicalizePublishedScriptForIdentity(
+                    secondScript.Replace("same renderer", "changed renderer", StringComparison.Ordinal))
+                    != ArtisticWorkerIdentityProvider.CanonicalizePublishedScriptForIdentity(firstScript),
+                "canonicalization must retain meaningful worker-script behavior");
+
+            var realEsrganTimestamp = DateTime.UtcNow.AddSeconds(1);
+            await File.WriteAllBytesAsync(
+                    realEsrganPath,
+                    "realesrgan-v2"u8.ToArray(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            File.SetLastWriteTimeUtc(realEsrganPath, realEsrganTimestamp);
+            var changedDependency = await ArtisticWorkerIdentityProvider.ResolveAsync(
+                    tools,
+                    cancellationToken)
+                .ConfigureAwait(false)
+                ?? throw new InvalidOperationException("changed Real-ESRGAN identity was not resolved");
+            Assert(
+                changedDependency.Fingerprint != first.Fingerprint,
+                "replacing Real-ESRGAN in place must fence external painted identity");
+
+            await File.WriteAllTextAsync(
+                    configPath,
+                    "{\"preset\":\"dark-gothic\",\"strength\":0.55}",
+                    cancellationToken)
+                .ConfigureAwait(false);
+            File.SetLastWriteTimeUtc(configPath, DateTime.UtcNow.AddSeconds(2));
+            var changedConfig = await ArtisticWorkerIdentityProvider.ResolveAsync(
+                    tools,
+                    cancellationToken)
+                .ConfigureAwait(false)
+                ?? throw new InvalidOperationException("changed config identity was not resolved");
+            Assert(
+                changedConfig.Fingerprint != changedDependency.Fingerprint
+                && changedConfig.Preset == "dark-gothic",
+                "editing worker-config must fence preview, resume, and repair identity");
+
+            await File.WriteAllBytesAsync(
+                    workerPath,
+                    "worker-v2-different"u8.ToArray(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            File.SetLastWriteTimeUtc(workerPath, DateTime.UtcNow.AddSeconds(3));
+            var changedWorker = await ArtisticWorkerIdentityProvider.ResolveAsync(
+                    tools,
+                    cancellationToken)
+                .ConfigureAwait(false)
+                ?? throw new InvalidOperationException("changed worker identity was not resolved");
+            Assert(
+                changedWorker.Fingerprint != changedConfig.Fingerprint,
+                "replacing the worker executable must fence preview, resume, and repair identity");
+
+            var wrapperDirectory = Path.Combine(root, "custom-wrapper");
+            var wrapperModels = Path.Combine(wrapperDirectory, "models");
+            var wrapperBin = Path.Combine(wrapperDirectory, "bin");
+            Directory.CreateDirectory(wrapperModels);
+            Directory.CreateDirectory(wrapperBin);
+            var wrapperPath = Path.Combine(wrapperDirectory, "worker.bat");
+            var wrapperScript = Path.Combine(wrapperDirectory, "custom.ps1");
+            var wrapperConfig = Path.Combine(wrapperDirectory, "worker-config.json");
+            var customModel = Path.Combine(wrapperModels, "custom-model.safetensors");
+            var customControl = Path.Combine(wrapperModels, "custom-control.safetensors");
+            var customSd = Path.Combine(wrapperBin, "custom-sd-cli.exe");
+            await File.WriteAllTextAsync(
+                    wrapperPath,
+                    "@echo off\r\npowershell -File .\\custom.ps1 %*\r\n",
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await File.WriteAllTextAsync(
+                    wrapperConfig,
+                    "{\"preset\":\"comic-ink\"}",
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await File.WriteAllBytesAsync(customModel, "custom-model"u8.ToArray(), cancellationToken)
+                .ConfigureAwait(false);
+            await File.WriteAllBytesAsync(customControl, "custom-control"u8.ToArray(), cancellationToken)
+                .ConfigureAwait(false);
+            await File.WriteAllBytesAsync(customSd, "custom-sd"u8.ToArray(), cancellationToken)
+                .ConfigureAwait(false);
+            await File.WriteAllTextAsync(
+                    wrapperScript,
+                    $"$config = Get-Content '{wrapperConfig}' | ConvertFrom-Json\r\n"
+                    + $"$sdCli = '{customSd}'\r\n"
+                    + $"$model = '{customModel}'\r\n"
+                    + $"$controlNet = '{customControl}'\r\n"
+                    + $"$realEsrgan = '{realEsrganPath}'\r\n"
+                    + $"$realEsrganModels = '{modelDirectory}'\r\n"
+                    + "Write-Host 'custom renderer'\r\n",
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var wrapperTools = tools with { ArtisticWorkerPath = wrapperPath };
+            var wrapperIdentity = await ArtisticWorkerIdentityProvider.ResolveAsync(
+                    wrapperTools,
+                    cancellationToken)
+                .ConfigureAwait(false)
+                ?? throw new InvalidOperationException("custom wrapper identity was not resolved");
+            await File.WriteAllTextAsync(
+                    wrapperScript,
+                    (await File.ReadAllTextAsync(wrapperScript, cancellationToken)
+                        .ConfigureAwait(false))
+                    .Replace("custom renderer", "changed custom renderer", StringComparison.Ordinal),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            File.SetLastWriteTimeUtc(wrapperScript, DateTime.UtcNow.AddSeconds(4));
+            var changedWrapperIdentity = await ArtisticWorkerIdentityProvider.ResolveAsync(
+                    wrapperTools,
+                    cancellationToken)
+                .ConfigureAwait(false)
+                ?? throw new InvalidOperationException("changed custom wrapper identity was not resolved");
+            Assert(
+                wrapperIdentity.Fingerprint != changedWrapperIdentity.Fingerprint,
+                "opaque custom wrappers must retain raw script/dependency semantics instead of canonicalizing arbitrary paths");
+
+            var previousWorker = Environment.GetEnvironmentVariable(
+                "SPINTEXTURE_ARTISTIC_WORKER");
+            try
+            {
+                Environment.SetEnvironmentVariable(
+                    "SPINTEXTURE_ARTISTIC_WORKER",
+                    workerPath);
+                var workflow = new TexturePackWorkflow();
+                var route = await workflow.ResolveArtisticWorkerRouteAsync(
+                        new ProjectPaths(
+                            Path.Combine(root, "install"),
+                            Path.Combine(root, "workspace")),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                Assert(
+                    route is not null
+                    && Path.GetFullPath(route.WorkerPath) == Path.GetFullPath(workerPath)
+                    && route.HasVerifiedIdentity
+                    && route.Preset == "dark-gothic"
+                    && route.IdentityError is null,
+                    "the public workflow route resolves the same custom worker and semantic identity used by builds");
+
+                var corruptDirectory = Path.Combine(root, "corrupt-managed-worker");
+                var generationDirectory = Path.Combine(corruptDirectory, "generation");
+                Directory.CreateDirectory(generationDirectory);
+                var corruptWrapper = Path.Combine(corruptDirectory, "worker.bat");
+                var corruptScript = Path.Combine(generationDirectory, "worker.ps1");
+                var corruptConfig = Path.Combine(corruptDirectory, "worker-config.json");
+                await File.WriteAllTextAsync(
+                        corruptWrapper,
+                        "@echo off\r\npowershell -File \"%~dp0generation\\worker.ps1\" %*\r\n",
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                await File.WriteAllTextAsync(
+                        corruptConfig,
+                        "{\"preset\":\"comic-ink\"}",
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                await File.WriteAllTextAsync(
+                        corruptScript,
+                        $"$config = Get-Content '{corruptConfig}' | ConvertFrom-Json\r\n"
+                        + $"$sdCli = '{Path.Combine(generationDirectory, "sd", "sd-cli.exe")}'\r\n"
+                        + $"$model = '{Path.Combine(generationDirectory, "models", "DreamShaper_8_pruned.safetensors")}'\r\n"
+                        + $"$controlNet = '{Path.Combine(generationDirectory, "models", "control_v11f1e_sd15_tile_fp16.safetensors")}'\r\n",
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                var dummySha = new string('0', 64);
+                await File.WriteAllTextAsync(
+                        Path.Combine(generationDirectory, "worker-identity.json"),
+                        JsonSerializer.Serialize(new
+                        {
+                            schemaVersion = 1,
+                            runtimeFiles = new[]
+                            {
+                                new { relativePath = "sd/sd-cli.exe", length = 1, sha256 = dummySha },
+                                new { relativePath = "sd/sd-cli.exe", length = 1, sha256 = dummySha }
+                            },
+                            components = new[]
+                            {
+                                new { fileName = "DreamShaper_8_pruned.safetensors", length = 1, sha256 = dummySha },
+                                new { fileName = "control_v11f1e_sd15_tile_fp16.safetensors", length = 1, sha256 = dummySha }
+                            }
+                        }),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                Environment.SetEnvironmentVariable(
+                    "SPINTEXTURE_ARTISTIC_WORKER",
+                    corruptWrapper);
+                var invalidRoute = await workflow.ResolveArtisticWorkerRouteAsync(
+                        new ProjectPaths(
+                            Path.Combine(root, "install"),
+                            Path.Combine(root, "workspace")),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                Assert(
+                    invalidRoute is
+                    {
+                        HasVerifiedIdentity: false,
+                        IdentityError: not null
+                    }
+                    && invalidRoute.IdentityError.Contains(
+                        "duplicate or ambiguous",
+                        StringComparison.OrdinalIgnoreCase),
+                    "a corrupt managed-worker manifest becomes an actionable route error instead of faulting the UI refresh");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(
+                    "SPINTEXTURE_ARTISTIC_WORKER",
+                    previousWorker);
+            }
+        }
+        finally
+        {
+            DeleteTree(root);
         }
     }
 
@@ -4772,9 +5378,9 @@ public static class TexturePipelineSelfTests
     private static void TestPaintedProfileReportCompatibility()
     {
         AssertEqual(
-            7,
+            9,
             TextureBuildReport.CurrentIllustratedProfileRevision,
-            "Graphic Painted profile revision should advance independently to revision seven (quality diffusion recipe)");
+            "Graphic Painted profile revision should advance independently to revision nine (bounded external repaint recipe)");
         AssertEqual(
             1,
             TextureBuildReport.CurrentRusticPaintedProfileRevision,
@@ -4800,9 +5406,49 @@ public static class TexturePipelineSelfTests
             TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.RusticPainted),
             "unchanged Rustic Painted builds should retain the base resume operation key");
         AssertEqual(
-            $"{TexturePackWorkflow.FreshBuildResumeOperationKey}-illustrated-7",
+            $"{TexturePackWorkflow.FreshBuildResumeOperationKey}-illustrated-9",
             TexturePackWorkflow.GetFreshBuildResumeOperationKey(TexturePreset.Illustrated),
-            "Graphic Painted revision seven should use a fenced resume operation key");
+            "Graphic Painted revision nine should use a fenced resume operation key");
+
+        static NativeTextureProcessResult PaintedResult(bool external, bool builtIn) => new(
+            "out.tga",
+            new UpscaleDimensions(32, 32, 128, 128, 4),
+            external ? "external artistic" : "built-in illustrated",
+            TimeSpan.Zero,
+            UsedExternalArtisticWorker: external,
+            UsedBuiltInPaintedRenderer: builtIn);
+        var rendererCounter = new TextureBuildCounter();
+        rendererCounter.Enhanced(10, PaintedResult(external: true, builtIn: false));
+        var externalStatistics = rendererCounter.Snapshot();
+        AssertEqual(1, externalStatistics.ExternalArtisticTextures, "actual external route count");
+        AssertEqual(0, externalStatistics.BuiltInPaintedTextures, "external-only built-in count");
+        AssertEqual(
+            PaintedRendererOutcome.ExternalOnly,
+            TexturePackWorkflow.ResolvePaintedRendererOutcome(
+                TexturePreset.Illustrated,
+                externalStatistics),
+            "an actual external route records ExternalOnly provenance");
+        rendererCounter.Enhanced(10, PaintedResult(external: false, builtIn: true));
+        var mixedStatistics = rendererCounter.Snapshot();
+        AssertEqual(1, mixedStatistics.ExternalArtisticTextures, "mixed external route count");
+        AssertEqual(1, mixedStatistics.BuiltInPaintedTextures, "mixed built-in route count");
+        AssertEqual(
+            PaintedRendererOutcome.Mixed,
+            TexturePackWorkflow.ResolvePaintedRendererOutcome(
+                TexturePreset.Illustrated,
+                mixedStatistics),
+            "external failure followed by a built-in result must be labeled Mixed, not external-only");
+        var builtInStatistics = new TextureBuildStatistics(
+            1, 1, 0, 1, 1, new Dictionary<string, int>(), [])
+        {
+            BuiltInPaintedTextures = 1
+        };
+        AssertEqual(
+            PaintedRendererOutcome.BuiltInOnly,
+            TexturePackWorkflow.ResolvePaintedRendererOutcome(
+                TexturePreset.Illustrated,
+                builtInStatistics),
+            "a build without an external route records BuiltInOnly provenance");
 
         var report = new TextureBuildReport(
             TextureBuildReport.CurrentSchemaVersion,
@@ -4822,6 +5468,108 @@ public static class TexturePipelineSelfTests
         {
             PaintedProfileRevision = TextureBuildReport.CurrentIllustratedProfileRevision
         };
+        const string rendererFingerprint =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        var paintedOptions = new UpscaleOptions(
+            TexturePreset.Illustrated,
+            AssetScope.WorldOnly,
+            2048,
+            GenerateMipMaps: true,
+            InstallAfterBuild: false,
+            ArtisticWorkerFingerprint: rendererFingerprint,
+            ArtisticWorkerPreset: "comic-ink");
+        var externalReport = report with
+        {
+            UsedExternalArtisticWorker = true,
+            ArtisticWorkerFingerprint = rendererFingerprint,
+            ArtisticWorkerPreset = "comic-ink",
+            PaintedRendererOutcome = PaintedRendererOutcome.ExternalOnly
+        };
+        var externalSourceRepair =
+            TexturePackWorkflow.ResolveSourceRepairPaintedRendererProvenance(
+                paintedOptions,
+                externalReport,
+                enforceCurrentRoute: true,
+                currentWorkerAvailable: true,
+                rendererFingerprint);
+        Assert(
+            externalSourceRepair.RendererOutcome == PaintedRendererOutcome.ExternalOnly
+            && externalSourceRepair.UsedExternalArtisticWorker == true
+            && externalSourceRepair.ArtisticWorkerFingerprint == rendererFingerprint,
+            "source repair retains an exact matching external-painted route");
+        AssertSourceRepairRefused(
+            externalReport,
+            currentWorkerAvailable: true,
+            currentFingerprint: new string('f', 64),
+            "source repair must reject a different external renderer identity");
+        AssertSourceRepairRefused(
+            externalReport with
+            {
+                UsedExternalArtisticWorker = false,
+                ArtisticWorkerFingerprint = null,
+                ArtisticWorkerPreset = null,
+                PaintedRendererOutcome = PaintedRendererOutcome.BuiltInOnly
+            },
+            currentWorkerAvailable: true,
+            currentFingerprint: rendererFingerprint,
+            "source repair must reject enabling diffusion for a built-in-only pack");
+        AssertSourceRepairRefused(
+            externalReport with
+            {
+                PaintedRendererOutcome = PaintedRendererOutcome.Mixed
+            },
+            currentWorkerAvailable: true,
+            currentFingerprint: rendererFingerprint,
+            "source repair must reject mixed packs without per-member renderer provenance");
+        AssertSourceRepairRefused(
+            report,
+            currentWorkerAvailable: false,
+            currentFingerprint: null,
+            "source repair must reject legacy Graphic Painted packs with unknown renderer provenance");
+        AssertSourceRepairRefused(
+            externalReport with { SchemaVersion = 3 },
+            currentWorkerAvailable: true,
+            currentFingerprint: rendererFingerprint,
+            "source repair must not treat a pre-v4 worker-availability flag as actual route provenance");
+        AssertSourceRepairRefused(
+            externalReport with
+            {
+                ArtisticWorkerFingerprint = null,
+                ArtisticWorkerPreset = null
+            },
+            currentWorkerAvailable: true,
+            currentFingerprint: rendererFingerprint,
+            "external source repair must require a complete exact renderer identity",
+            paintedOptions with
+            {
+                ArtisticWorkerFingerprint = null,
+                ArtisticWorkerPreset = null
+            });
+
+        void AssertSourceRepairRefused(
+            TextureBuildReport candidate,
+            bool currentWorkerAvailable,
+            string? currentFingerprint,
+            string description,
+            UpscaleOptions? candidateOptions = null)
+        {
+            try
+            {
+                TexturePackWorkflow.ResolveSourceRepairPaintedRendererProvenance(
+                    candidateOptions ?? paintedOptions,
+                    candidate,
+                    enforceCurrentRoute: true,
+                    currentWorkerAvailable,
+                    currentFingerprint);
+            }
+            catch (InvalidOperationException)
+            {
+                return;
+            }
+
+            throw new InvalidOperationException($"Self-test failed: {description}.");
+        }
+
         var json = JsonSerializer.Serialize(report);
         var current = JsonSerializer.Deserialize<TextureBuildReport>(json);
         AssertEqual(

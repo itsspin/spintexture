@@ -64,7 +64,11 @@ public sealed record StagedBuildRequest(
     // A stable workflow-owned discriminator. Automatic crash resume is enabled
     // only when this is non-empty so repair/composition builders never inherit
     // outputs from a semantically different operation by accident.
-    string? ResumeOperationKey = null);
+    string? ResumeOperationKey = null,
+    // Optional workflow-owned trust-boundary check. It runs after all payloads
+    // and checkpoint contributions are complete, but before manifest.json is
+    // committed as the sole completed-pack marker.
+    Func<CancellationToken, Task>? BeforeManifestCommitAsync = null);
 
 public sealed record StagedBuildResult(
     string BuildId,

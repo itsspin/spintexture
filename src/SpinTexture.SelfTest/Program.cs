@@ -85,6 +85,7 @@ internal static class Program
             await ArchiveSelfTests.RunAsync(Console.Out).ConfigureAwait(false);
             WorldExpansionCatalogSelfTests.Run();
             await TexturePipelineSelfTests.RunAsync(Console.Out).ConfigureAwait(false);
+            await ArtisticWorkerSetupSelfTests.RunAsync(Console.Out).ConfigureAwait(false);
             await ApplicationUpdateSelfTests.RunAsync(Console.Out).ConfigureAwait(false);
             Console.WriteLine("All SpinTexture self-tests passed.");
             return 0;

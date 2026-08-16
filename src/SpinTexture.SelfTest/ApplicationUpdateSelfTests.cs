@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text.Json;
+using SpinTexture.Core.Models;
 using SpinTexture.Core.Services;
 
 namespace SpinTexture.SelfTest;
@@ -139,6 +140,45 @@ internal static class ApplicationUpdateSelfTests
             var store = new AppPreferencesStore(Path.Combine(root, "settings", "app-settings.json"));
             await store.WriteLastInstallPathAsync(install).ConfigureAwait(false);
             Assert(Path.GetFullPath(install) == store.Read().LastInstallPath, "EQ directory was not remembered.");
+
+            var paintedStyle = new PaintedStyleSettings(
+                StrokeSize: 0.62,
+                StrokeStrength: 0.73,
+                DetailPreservation: 0.41,
+                ColorSimplification: 0.58,
+                CanvasGrain: 0.29,
+                Strength: 0.84);
+            var styleWrite = store.WritePaintedStyleAsync(paintedStyle);
+            var enhancementWrite = store.WriteEnhancementsAsync(
+                bakedDepth: 0.31,
+                emissiveGlow: 0.22,
+                fullResolutionRepaint: true,
+                mipSharpen: 0.47);
+            await Task.WhenAll(styleWrite, enhancementWrite).ConfigureAwait(false);
+            var combined = store.Read();
+            Assert(combined.PaintedStyle == paintedStyle, "Concurrent enhancement write lost the painted style.");
+            Assert(
+                combined.BakedDepth == 0.31
+                && combined.EmissiveGlow == 0.22
+                && combined.FullResolutionRepaint
+                && combined.MipSharpen == 0.47,
+                "Concurrent painted-style write lost enhancement preferences.");
+            Assert(
+                combined.LastInstallPath == Path.GetFullPath(install),
+                "Concurrent preference writes lost the remembered EQ directory.");
+
+            var orderedWrites = Enumerable.Range(1, 20)
+                .Select(value => store.WriteEnhancementsAsync(
+                    value / 20d,
+                    emissiveGlow: 0,
+                    fullResolutionRepaint: false,
+                    mipSharpen: 0))
+                .ToArray();
+            await Task.WhenAll(orderedWrites).ConfigureAwait(false);
+            Assert(
+                store.Read().BakedDepth == 1d,
+                "Queued slider updates did not preserve the most recently requested value.");
+
             await File.WriteAllTextAsync(Path.Combine(root, "settings", "app-settings.json"), "not-json").ConfigureAwait(false);
             Assert(store.Read() == AppPreferences.Empty, "Corrupt preferences should fail closed to defaults.");
         }

@@ -489,6 +489,12 @@ public sealed class StagedBuildService
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+        if (request.BeforeManifestCommitAsync is not null)
+        {
+            await request.BeforeManifestCommitAsync(cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
         var manifest = new BuildManifest(
             BuildManifest.CurrentSchemaVersion,
             buildId,
@@ -501,10 +507,13 @@ public sealed class StagedBuildService
         // committed only after every artifact and checkpoint passed validation.
         await _manifestStore.WriteBuildManifestAsync(manifestPath, manifest, cancellationToken).ConfigureAwait(false);
         TryDeleteOwnedDirectory(request.Paths.StagingPath, workDirectory);
-        if (resumeOperationKey is null)
+        if (resumeOperationKey is null && finalizeAsync is null)
         {
             // Repair/composition callers intentionally do not participate in
-            // automatic resume. Their manifest is their final commit marker.
+            // automatic resume. When they have no metadata finalizer, their
+            // manifest is their final commit marker. A finalizing repair keeps
+            // the checkpoint until its report/previews are durably written so
+            // the catalog cannot expose a manifest-only pack after a crash.
             DeleteCheckpointOrThrow(checkpointPath);
         }
         progress?.Report(new ProgressUpdate(

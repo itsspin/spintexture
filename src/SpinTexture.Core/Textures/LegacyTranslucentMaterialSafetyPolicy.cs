@@ -19,12 +19,8 @@ public static class LegacyTranslucentMaterialSafetyPolicy
     private const uint BitmapInfoFragment = 0x04;
     private const uint BitmapInfoReferenceFragment = 0x05;
     private const uint MaterialFragment = 0x30;
-    private const uint SemiTransparentMaterialBits = 0x0C;
-
-    // Bit 0x10 in the material parameters selects palette-masked (color-key)
-    // rendering: the client discards pixels whose palette index is the key
-    // (index zero) instead of alpha-blending them.
-    private const uint MaskedMaterialBit = 0x10;
+    private const uint MaterialTypeMask = 0x7FFF_FFFF;
+    private const uint MaskedMaterialType = 0x13;
 
     private static readonly byte[] StringKey =
         [0x95, 0x3A, 0xC5, 0x2A, 0x95, 0x7A, 0x95, 0x6A];
@@ -38,7 +34,7 @@ public static class LegacyTranslucentMaterialSafetyPolicy
         ReadOnlySpan<byte> wldPayload)
         => FindTextureNamesByMaterial(
             wldPayload,
-            static parameters => (parameters & SemiTransparentMaterialBits) != 0);
+            IsBlendedMaterial);
 
     /// <summary>
     /// Returns every bitmap filename referenced by a WLD material rendered
@@ -50,8 +46,43 @@ public static class LegacyTranslucentMaterialSafetyPolicy
         ReadOnlySpan<byte> wldPayload)
         => FindTextureNamesByMaterial(
             wldPayload,
-            static parameters => (parameters & MaskedMaterialBit) != 0
-                && (parameters & SemiTransparentMaterialBits) == 0);
+            static parameters => NormalizeMaterialType(parameters) == MaskedMaterialType);
+
+    /// <summary>
+    /// Finds textures whose treatment changed when the legacy material value
+    /// was corrected from a bit field to its documented enum. Pipeline
+    /// revisions before 10 interpreted values such as 0x14 (diffuse) as
+    /// blended and 0x12/0x31/0x553 (diffuse variants) as palette-masked. A
+    /// targeted repair must retry original members and regenerate any changed
+    /// output that was encoded with the false color-key contract.
+    /// </summary>
+    internal static IReadOnlySet<string> FindLegacyBitRuleMisclassifiedTextureNames(
+        ReadOnlySpan<byte> wldPayload)
+        => FindTextureNamesByMaterial(
+            wldPayload,
+            static parameters =>
+            {
+                var legacyBlended = (parameters & 0x0C) != 0;
+                var legacyMasked = (parameters & 0x10) != 0 && !legacyBlended;
+                return legacyBlended != IsBlendedMaterial(parameters)
+                    || legacyMasked
+                        != (NormalizeMaterialType(parameters) == MaskedMaterialType);
+            });
+
+    private static uint NormalizeMaterialType(uint parameters) =>
+        parameters & MaterialTypeMask;
+
+    private static bool IsBlendedMaterial(uint parameters) =>
+        NormalizeMaterialType(parameters) switch
+        {
+            // Transparent 50%, masked/passable, 25%, 75%, and additive.
+            0x05 or 0x07 or 0x09 or 0x0A or 0x0B or 0x17 => true,
+            // Transparent and additive-unlit skydome variants. sky.s3d is
+            // preserved as a whole, but recognizing the values here keeps the
+            // parser correct for any renderer-owned copy in another WLD.
+            0x0F or 0x10 => true,
+            _ => false
+        };
 
     private static IReadOnlySet<string> FindTextureNamesByMaterial(
         ReadOnlySpan<byte> wldPayload,

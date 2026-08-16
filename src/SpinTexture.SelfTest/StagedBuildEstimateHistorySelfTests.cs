@@ -110,6 +110,26 @@ internal static class StagedBuildEstimateHistorySelfTests
                     paintedOptions with { PaintedTheme = PaintedTheme.DarkGothic },
                     paintedOptions),
                 "different painted themes must not share exact-style timing history");
+            var paintedWorkloadVariants = new UpscaleOptions[]
+            {
+                paintedOptions with
+                {
+                    PaintedStyle = paintedOptions.ResolvedPaintedStyle with
+                    {
+                        DetailPreservation = 0.81
+                    }
+                },
+                paintedOptions with { BakedDepth = 0.4 },
+                paintedOptions with { EmissiveGlow = 0.3 },
+                paintedOptions with { FullResolutionRepaint = true },
+                paintedOptions with { MipSharpen = 0.6 },
+                paintedOptions with { ArtisticWorkerFingerprint = new string('b', 64) },
+                paintedOptions with { ArtisticWorkerPreset = "storybook" }
+            };
+            Assert(
+                paintedWorkloadVariants.All(variant =>
+                    !StagedBuildEstimateHistory.OptionsMatch(variant, paintedOptions)),
+                "render-affecting painted, lighting, mip, repaint, and diffusion identities must not borrow exact-style history");
             Assert(
                 StagedBuildEstimateHistory.OptionsMatch(
                     options with { PaintedTheme = PaintedTheme.ComicInk },

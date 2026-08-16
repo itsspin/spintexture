@@ -183,6 +183,37 @@ internal static class TextureOptionPreviewSelfTests
         Assert(first == repeat, "preview cache keys must be deterministic");
         Assert(first != changed, "a changed cap must invalidate the preview cache key");
 
+        var painted = new UpscaleOptions(
+            TexturePreset.Illustrated,
+            AssetScope.WorldOnly,
+            2048,
+            GenerateMipMaps: true,
+            InstallAfterBuild: false);
+        var paintedIdentity = TextureOptionPreviewService
+            .ComputeRenderOptionsIdentityForTest(painted);
+        var renderVariants = new UpscaleOptions[]
+        {
+            painted with
+            {
+                PaintedStyle = painted.ResolvedPaintedStyle with { StrokeSize = 0.73 }
+            },
+            painted with { BakedDepth = 0.35 },
+            painted with { EmissiveGlow = 0.42 },
+            painted with { FullResolutionRepaint = true },
+            painted with { MipSharpen = 0.55 },
+            painted with { ArtisticWorkerFingerprint = new string('a', 64) },
+            painted with { ArtisticWorkerPreset = "comic-ink" }
+        };
+        Assert(
+            renderVariants.All(variant =>
+                TextureOptionPreviewService.ComputeRenderOptionsIdentityForTest(variant)
+                    != paintedIdentity),
+            "every render-affecting painted/style, lighting, mip, repaint, and worker setting must invalidate a cached preview");
+        Assert(
+            paintedIdentity == TextureOptionPreviewService.ComputeRenderOptionsIdentityForTest(
+                painted with { PaintedStyle = PaintedStyleSettings.Default }),
+            "an implicit painted-style default and its explicit equivalent share one cache identity");
+
         var root = Path.Combine(
             Path.GetTempPath(),
             $"SpinTexture-preview-path-{Guid.NewGuid():N}");

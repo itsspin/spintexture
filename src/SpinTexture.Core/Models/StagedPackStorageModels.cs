@@ -6,11 +6,22 @@ public sealed record StagedPackStorageStatus(
     long StoredBytes,
     int FileCount,
     int PackCount,
-    bool UsesDefaultLocation)
+    bool UsesDefaultLocation,
+    long CompletedPackBytes,
+    int ResumableBuildCount,
+    long ResumableBuildBytes,
+    int LeftoverDirectoryCount,
+    long LeftoverBytes)
 {
     public string Summary => FileCount == 0
         ? "No staged pack files are stored yet."
-        : $"{PackCount:N0} completed pack(s), {FileCount:N0} file(s), {FormatBytes(StoredBytes)}";
+        : $"{FormatBytes(StoredBytes)} logical file size · {PackCount:N0} completed pack(s) ({FormatBytes(CompletedPackBytes)} logical)"
+          + (ResumableBuildCount == 0
+              ? string.Empty
+              : $" · {ResumableBuildCount:N0} resumable build(s) ({FormatBytes(ResumableBuildBytes)})")
+          + (LeftoverDirectoryCount == 0
+              ? string.Empty
+              : $" · {LeftoverDirectoryCount:N0} leftover folder(s) ({FormatBytes(LeftoverBytes)})");
 
     private static string FormatBytes(long bytes)
     {

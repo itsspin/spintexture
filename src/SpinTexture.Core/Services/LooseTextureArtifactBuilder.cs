@@ -93,7 +93,10 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder, ISta
         if (!metadata.IsSimpleTwoDimensionalTexture
             || metadata.Width < 8
             || metadata.Height < 8
-            || Math.Max(metadata.Width, metadata.Height) >= context.Options.MaximumDimension
+            || Math.Max(metadata.Width, metadata.Height) > context.Options.MaximumDimension
+            || (Math.Max(metadata.Width, metadata.Height) == context.Options.MaximumDimension
+                && context.Options.Preset is not (TexturePreset.Illustrated
+                    or TexturePreset.RusticPainted))
             || !HasSafeContainer(metadata)
             || fullyTransparentControl
             || unsafeIndexedBitmap
@@ -138,7 +141,8 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder, ISta
                     textureOptions,
                     // Loose files do not carry enough container context to prove
                     // that opposite-edge sampling is intended.
-                    WrapEdges: false),
+                    WrapEdges: false,
+                    LogicalName: Path.GetFileName(context.RelativeInstallPath)),
                 cancellationToken).ConfigureAwait(false);
             var usedFallback = result.ProcessingRoute.Contains(
                 "fallback",
@@ -168,8 +172,15 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder, ISta
                 metadata,
                 result.Dimensions,
                 cancellationToken).ConfigureAwait(false);
-            counter.Enhanced(new FileInfo(context.DestinationPath).Length);
-            if (usedFallback)
+            counter.Enhanced(new FileInfo(context.DestinationPath).Length, result);
+            if (result.UsedBoundedRepaintMemoryGuard)
+            {
+                counter.Fallback();
+                counter.Warn(result.UsedExternalArtisticWorker
+                    ? $"{context.RelativeInstallPath} kept the diffusion renderer but used its bounded single-pass route because a full-resolution tile blend exceeded the safe working-set limit."
+                    : $"{context.RelativeInstallPath} used the memory-bounded built-in painted renderer because both the full-resolution tile blend and one external output exceeded safe limits; this pack is mixed-renderer and must be fully rebuilt rather than repaired.");
+            }
+            else if (usedFallback)
             {
                 counter.Fallback();
                 counter.Warn(
@@ -234,6 +245,7 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder, ISta
         string path,
         string relativePath,
         int maximumDimension,
+        TexturePreset preset,
         CancellationToken cancellationToken)
     {
         if (CelestialTextureSafetyPolicy.GetPreservedReason(
@@ -248,7 +260,9 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder, ISta
             || !metadata.IsSimpleTwoDimensionalTexture
             || metadata.Width < 8
             || metadata.Height < 8
-            || Math.Max(metadata.Width, metadata.Height) >= maximumDimension
+            || Math.Max(metadata.Width, metadata.Height) > maximumDimension
+            || (Math.Max(metadata.Width, metadata.Height) == maximumDimension
+                && preset is not (TexturePreset.Illustrated or TexturePreset.RusticPainted))
             || !HasSafeContainer(metadata))
         {
             return false;

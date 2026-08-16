@@ -17,7 +17,15 @@ public sealed record NativeTextureProcessRequest(
     // Set when a WLD material renders this texture with palette-masked
     // transparency: the keyed palette index (zero) must survive re-encoding
     // exactly or the client draws transparent regions as opaque color.
-    bool HasMaskedColorKey = false);
+    bool HasMaskedColorKey = false,
+    // Stable texture identity inside its archive. Native processing stages
+    // inputs as generic source.* files, so art direction must not infer the
+    // material from SourcePath after that staging rename.
+    string? LogicalName = null,
+    // A WLD-referenced diffuse bitmap that older pipeline revisions falsely
+    // classified as palette-masked must not fall back to the border heuristic
+    // and resurrect the same keyed/magenta artifacts during re-encoding.
+    bool SuppressIndexedColorKeyHeuristic = false);
 
 public sealed record NativeTextureProcessResult(
     string DestinationPath,
@@ -25,7 +33,10 @@ public sealed record NativeTextureProcessResult(
     string ProcessingRoute,
     TimeSpan Elapsed,
     int ExpectedMipCount = 1,
-    bool UsedCutoutMipFloor = false);
+    bool UsedCutoutMipFloor = false,
+    bool UsedExternalArtisticWorker = false,
+    bool UsedBuiltInPaintedRenderer = false,
+    bool UsedBoundedRepaintMemoryGuard = false);
 
 public sealed record NativeTextureProcessOutcome(
     NativeTextureProcessResult? Result,
@@ -135,7 +146,8 @@ public sealed class NativeTextureProcessor
                             : 1);
                 var started = DateTimeOffset.UtcNow;
 
-                if (!dimensions.RequiresUpscale)
+                if (!dimensions.RequiresUpscale
+                    && !ShouldRepaintAtSelectedCap(request, dimensions))
                 {
                     try
                     {
@@ -565,7 +577,19 @@ public sealed class NativeTextureProcessor
                 NeuralWorkerKind.ExternalArtistic,
                 "external-artistic",
                 TexturePreset.Illustrated,
-                ArtisticWorkerCommandBuilder.WorkerScale,
+                IsSameSizePaintedJob(job)
+                    ? 1
+                    : ArtisticWorkerCommandBuilder.WorkerScale,
+                job.Request.RealEsrganTileSize);
+        }
+
+        if (IsSameSizePaintedJob(job))
+        {
+            return new NeuralBatchKey(
+                NeuralWorkerKind.SameSizePainted,
+                "same-size-painted",
+                job.EffectivePreset,
+                1,
                 job.Request.RealEsrganTileSize);
         }
 
@@ -602,6 +626,81 @@ public sealed class NativeTextureProcessor
 
     private static bool IsPaintedPreset(TexturePreset preset) =>
         preset is TexturePreset.Illustrated or TexturePreset.RusticPainted;
+
+    internal static bool ShouldRepaintAtSelectedCap(
+        NativeTextureProcessRequest request,
+        UpscaleDimensions dimensions)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(dimensions);
+        return IsPaintedPreset(request.Options.Preset)
+            && request.Classification.CanUseColorUpscaler
+            && request.Classification.Kind is TextureKind.Color or TextureKind.Cutout
+            && !dimensions.RequiresUpscale
+            && dimensions.OutputWidth == request.Metadata.Width
+            && dimensions.OutputHeight == request.Metadata.Height
+            && Math.Max(request.Metadata.Width, request.Metadata.Height)
+                == request.Options.MaximumDimension;
+    }
+
+    private static bool IsSameSizePaintedJob(PreparedColorJob job) =>
+        ShouldRepaintAtSelectedCap(job.Request, job.Dimensions);
+
+    internal static bool WouldExceedFullResolutionBlendBudget(
+        NativeTextureProcessRequest request,
+        int neuralScale)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (neuralScale <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(neuralScale));
+        }
+
+        var inputWidth = checked(
+            request.Metadata.Width + (request.WrapPadding * 2));
+        var inputHeight = checked(
+            request.Metadata.Height + (request.WrapPadding * 2));
+        return request.Options.Preset == TexturePreset.Illustrated
+            && request.Options.FullResolutionRepaint
+            && neuralScale > 1
+            && DiffusionTiler.NeedsTiling(inputWidth, inputHeight)
+            && !DiffusionTiler.CanBlendWithinMemoryBudget(
+                inputWidth,
+                inputHeight,
+                neuralScale);
+    }
+
+    private static bool WouldExceedFullResolutionBlendBudget(
+        PreparedColorJob job,
+        NeuralBatchKey key) =>
+        key.WorkerKind == NeuralWorkerKind.ExternalArtistic
+        && WouldExceedFullResolutionBlendBudget(job.Request, key.NeuralScale);
+
+    internal static bool CanUseBoundedExternalRepaintFallback(
+        NativeTextureProcessRequest request,
+        int neuralScale)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (neuralScale <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(neuralScale));
+        }
+
+        var inputWidth = checked(
+            request.Metadata.Width + (request.WrapPadding * 2));
+        var inputHeight = checked(
+            request.Metadata.Height + (request.WrapPadding * 2));
+        return DiffusionTiler.CanUseBoundedExternalPass(
+            inputWidth,
+            inputHeight,
+            neuralScale);
+    }
+
+    private static bool CanUseBoundedExternalRepaintFallback(
+        PreparedColorJob job,
+        NeuralBatchKey key) =>
+        key.WorkerKind == NeuralWorkerKind.ExternalArtistic
+        && CanUseBoundedExternalRepaintFallback(job.Request, key.NeuralScale);
 
     private NeuralBatchKey CreateLegacyPaintedFallbackKey(PreparedColorJob job)
     {
@@ -648,6 +747,158 @@ public sealed class NativeTextureProcessor
         if (jobs.Count == 0)
         {
             return;
+        }
+
+        if (key.WorkerKind == NeuralWorkerKind.SameSizePainted)
+        {
+            var directInvocation = new NeuralBatchInvocation(
+                batchDirectory,
+                jobs.ToDictionary(
+                    job => job.RequestIndex,
+                    job => job.NeuralInputPath));
+            var directCompletions = await CompleteColorJobsInParallelAsync(
+                    jobs,
+                    key,
+                    directInvocation,
+                    nativeProgress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            for (var index = 0; index < jobs.Count; index++)
+            {
+                outcomes[jobs[index].RequestIndex] = new NativeTextureProcessOutcome(
+                    directCompletions[index].Result,
+                    directCompletions[index].Error);
+            }
+
+            return;
+        }
+
+        if (key.WorkerKind == NeuralWorkerKind.ExternalArtistic)
+        {
+            var memoryBoundedJobs = jobs
+                .Where(job => WouldExceedFullResolutionBlendBudget(job, key))
+                .ToArray();
+            if (memoryBoundedJobs.Length > 0)
+            {
+                var boundedExternalJobs = memoryBoundedJobs
+                    .Where(job => CanUseBoundedExternalRepaintFallback(job, key))
+                    .Select(job => job with
+                    {
+                        Request = job.Request with
+                        {
+                            Options = job.Request.Options with
+                            {
+                                FullResolutionRepaint = false
+                            }
+                        }
+                    })
+                    .ToArray();
+                var builtInGuardJobs = memoryBoundedJobs
+                    .Where(job => !CanUseBoundedExternalRepaintFallback(job, key))
+                    .ToArray();
+                foreach (var job in boundedExternalJobs)
+                {
+                    var inputWidth = checked(
+                        job.Request.Metadata.Width + (job.Request.WrapPadding * 2));
+                    var inputHeight = checked(
+                        job.Request.Metadata.Height + (job.Request.WrapPadding * 2));
+                    var estimatedBytes = DiffusionTiler.EstimateBlendWorkingSetBytes(
+                        inputWidth,
+                        inputHeight,
+                        key.NeuralScale);
+                    var outputBytes = DiffusionTiler.EstimateExternalOutputBytes(
+                        inputWidth,
+                        inputHeight,
+                        key.NeuralScale);
+                    nativeProgress?.Report(new NativeOutputLine(
+                        NativeOutputStream.StandardError,
+                        $"{Path.GetFileName(job.Request.LogicalName ?? job.Request.SourcePath)} requested full-resolution diffusion repaint, but retaining and blending its tile grid would need about {estimatedBytes / (1024d * 1024 * 1024):0.0} GiB. SpinTexture is retrying the same diffusion worker in bounded single-pass mode (about {outputBytes / (1024d * 1024):0} MiB decoded output), preserving one external-painted renderer while preventing the multi-gigabyte blend allocation."));
+                }
+
+                if (boundedExternalJobs.Length > 0)
+                {
+                    await ExecuteNeuralGroupAsync(
+                            boundedExternalJobs,
+                            key,
+                            outcomes,
+                            batchDirectory,
+                            executionState,
+                            nativeProgress,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                foreach (var job in builtInGuardJobs)
+                {
+                    var inputWidth = checked(
+                        job.Request.Metadata.Width + (job.Request.WrapPadding * 2));
+                    var inputHeight = checked(
+                        job.Request.Metadata.Height + (job.Request.WrapPadding * 2));
+                    var estimatedBytes = DiffusionTiler.EstimateBlendWorkingSetBytes(
+                        inputWidth,
+                        inputHeight,
+                        key.NeuralScale);
+                    var outputBytes = DiffusionTiler.EstimateExternalOutputBytes(
+                        inputWidth,
+                        inputHeight,
+                        key.NeuralScale);
+                    nativeProgress?.Report(new NativeOutputLine(
+                        NativeOutputStream.StandardError,
+                        $"{Path.GetFileName(job.Request.LogicalName ?? job.Request.SourcePath)} requested full-resolution diffusion repaint, but its tile blend would need about {estimatedBytes / (1024d * 1024 * 1024):0.0} GiB and even one bounded external output would be about {outputBytes / (1024d * 1024):0} MiB. SpinTexture is using the built-in painted renderer to prevent an out-of-memory failure; this makes the pack mixed-renderer and automatic repair will require a full rebuild."));
+                }
+
+                if (builtInGuardJobs.Length > 0)
+                {
+                    await ExecuteStandardPaintedGroupsAsync(
+                            builtInGuardJobs,
+                            outcomes,
+                            batchDirectory,
+                            executionState,
+                            nativeProgress,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                foreach (var job in memoryBoundedJobs)
+                {
+                    var outcome = outcomes[job.RequestIndex];
+                    if (outcome?.Result is { } result)
+                    {
+                        outcomes[job.RequestIndex] = outcome with
+                        {
+                            Result = result with
+                            {
+                                ProcessingRoute = result.ProcessingRoute
+                                    + (result.UsedExternalArtisticWorker
+                                        ? " + bounded single-pass diffusion memory guard"
+                                        : " + memory-bounded built-in repaint fallback"),
+                                UsedBoundedRepaintMemoryGuard = true
+                            }
+                        };
+                    }
+                }
+
+                var guardedRequestIndexes = memoryBoundedJobs
+                    .Select(job => job.RequestIndex)
+                    .ToHashSet();
+                var ordinaryJobs = jobs
+                    .Where(job => !guardedRequestIndexes.Contains(job.RequestIndex))
+                    .ToArray();
+                if (ordinaryJobs.Length > 0)
+                {
+                    await ExecuteNeuralGroupAsync(
+                            ordinaryJobs,
+                            key,
+                            outcomes,
+                            batchDirectory,
+                            executionState,
+                            nativeProgress,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                return;
+            }
         }
 
         if (key.WorkerKind == NeuralWorkerKind.TextureSpecialized
@@ -1123,6 +1374,16 @@ public sealed class NativeTextureProcessor
         PreparedColorJob job,
         TextureUpscaleModelSelection? specializedModel)
     {
+        if (IsSameSizePaintedJob(job))
+        {
+            return new NeuralBatchKey(
+                NeuralWorkerKind.SameSizePainted,
+                "same-size-painted",
+                job.EffectivePreset,
+                1,
+                job.Request.RealEsrganTileSize);
+        }
+
         if (ShouldUseTextureSpecializedReconstruction(job.EffectivePreset)
             && Volatile.Read(ref textureUpscalerUnavailable) == 0
             && specializedModel is not null)
@@ -1196,6 +1457,7 @@ public sealed class NativeTextureProcessor
             foreach (var job in jobs.OrderBy(candidate => candidate.RequestIndex))
             {
                 if (key.WorkerKind == NeuralWorkerKind.ExternalArtistic
+                    && key.NeuralScale > 1
                     && job.Request.Options.FullResolutionRepaint)
                 {
                     var bordered = await TgaPixelBuffer.ReadPngFileAsync(
@@ -1226,10 +1488,26 @@ public sealed class NativeTextureProcessor
 
                 var fileName = $"j{job.RequestIndex:D8}.png";
                 expectedNames.Add(fileName, job);
-                await CopyTemporaryFileAsync(
-                    job.NeuralInputPath,
-                    Path.Combine(inputDirectory, fileName),
-                    cancellationToken).ConfigureAwait(false);
+                var stagedInputPath = Path.Combine(inputDirectory, fileName);
+                if (key.WorkerKind == NeuralWorkerKind.ExternalArtistic
+                    && key.NeuralScale == 1)
+                {
+                    var bordered = await TgaPixelBuffer.ReadPngFileAsync(
+                        job.NeuralInputPath,
+                        cancellationToken).ConfigureAwait(false);
+                    await bordered.ResizeArea(
+                            checked((bordered.Width + 3) / 4),
+                            checked((bordered.Height + 3) / 4))
+                        .WritePngFileAsync(stagedInputPath, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    await CopyTemporaryFileAsync(
+                        job.NeuralInputPath,
+                        stagedInputPath,
+                        cancellationToken).ConfigureAwait(false);
+                }
             }
 
             if (key.WorkerKind == NeuralWorkerKind.ExternalArtistic)
@@ -1431,9 +1709,7 @@ public sealed class NativeTextureProcessor
         var entries = new SortedDictionary<string, object>(StringComparer.Ordinal);
         foreach (var (fileName, job) in stagedFiles)
         {
-            var directive = DiffusionPromptComposer.Compose(
-                Path.GetFileName(job.Request.SourcePath),
-                job.Request.Options.ZoneArchiveStem);
+            var directive = ComposeArtisticDirective(job.Request);
             if (directive.IsDefault)
             {
                 continue;
@@ -1460,6 +1736,18 @@ public sealed class NativeTextureProcessor
             cancellationToken).ConfigureAwait(false);
     }
 
+    internal static DiffusionFileDirective ComposeArtisticDirective(
+        NativeTextureProcessRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var textureName = string.IsNullOrWhiteSpace(request.LogicalName)
+            ? Path.GetFileName(request.SourcePath)
+            : request.LogicalName;
+        return DiffusionPromptComposer.Compose(
+            textureName,
+            request.Options.ZoneArchiveStem);
+    }
+
     private static readonly JsonSerializerOptions ArtisticBatchMetadataJsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true
@@ -1479,6 +1767,19 @@ public sealed class NativeTextureProcessor
             (job.Request.Metadata.Width + (job.Request.WrapPadding * 2)) * key.NeuralScale);
         var expectedBorderedHeight = checked(
             (job.Request.Metadata.Height + (job.Request.WrapPadding * 2)) * key.NeuralScale);
+        if (key.WorkerKind == NeuralWorkerKind.ExternalArtistic
+            && key.NeuralScale == 1
+            && neural.Width >= expectedBorderedWidth
+            && neural.Width <= expectedBorderedWidth + 3
+            && neural.Height >= expectedBorderedHeight
+            && neural.Height <= expectedBorderedHeight + 3)
+        {
+            // Same-size external repaint feeds the fixed 4x worker a rounded-up
+            // quarter-size image. Remove only the at-most-three rounding pixels
+            // before the ordinary border crop and fidelity validation.
+            neural = neural.Crop(0, 0, expectedBorderedWidth, expectedBorderedHeight);
+        }
+
         if (neural.Width != expectedBorderedWidth || neural.Height != expectedBorderedHeight)
         {
             throw new InvalidDataException(
@@ -1641,7 +1942,13 @@ public sealed class NativeTextureProcessor
                 + FormatLightingBakeRoute(job),
             DateTimeOffset.UtcNow - job.Started,
             mipResult.MipCount,
-            mipResult.UsedCutoutFloor);
+            mipResult.UsedCutoutFloor,
+            UsedExternalArtisticWorker:
+                key.WorkerKind == NeuralWorkerKind.ExternalArtistic,
+            UsedBuiltInPaintedRenderer:
+                job.EffectivePreset == TexturePreset.Illustrated
+                && !job.HasSoftTranslucentAlpha
+                && key.WorkerKind != NeuralWorkerKind.ExternalArtistic);
 
         async Task<GeneratedMipResult> EncodeCurrentImageAsync(
             TgaPixelBuffer image,
@@ -1757,6 +2064,13 @@ public sealed class NativeTextureProcessor
             return $"Batched external artistic illustrated reconstruction with {FormatPaintedTheme(job.Request.Options.PaintedTheme)} finishing{FormatGraphicPaintedScale(graphicPaintedScale)}{FormatPaintedThemeScale(paintedThemeScale)}";
         }
 
+        if (key.WorkerKind == NeuralWorkerKind.SameSizePainted)
+        {
+            return job.EffectivePreset == TexturePreset.RusticPainted
+                ? "Same-size built-in graphic painted repaint with bounded rustic grading"
+                : $"Same-size built-in illustrated repaint with {FormatPaintedTheme(job.Request.Options.PaintedTheme)} finishing{FormatGraphicPaintedScale(graphicPaintedScale)}{FormatPaintedThemeScale(paintedThemeScale)}";
+        }
+
         return key.WorkerPreset switch
         {
             TexturePreset.MaximumDetail => "Batched Real-ESRGAN maximum-detail reconstruction with TTA",
@@ -1814,6 +2128,13 @@ public sealed class NativeTextureProcessor
         UpscaleDimensions dimensions,
         TexturePreset? effectivePreset = null)
     {
+        if (ShouldRepaintAtSelectedCap(request, dimensions))
+        {
+            return checked(
+                (long)(request.Metadata.Width + (request.WrapPadding * 2))
+                * (request.Metadata.Height + (request.WrapPadding * 2)));
+        }
+
         // A soft-alpha texture is silently downgraded to the Faithful worker,
         // which may run at a smaller legacy scale; sizing batches by the
         // requested preset would overstate its output.
@@ -2585,7 +2906,8 @@ public sealed class NativeTextureProcessor
                 enhanced.Width,
                 enhanced.Height,
                 enhanced.RgbaPixels.Span,
-                request.HasMaskedColorKey ? (byte?)0 : null);
+                request.HasMaskedColorKey ? (byte?)0 : null,
+                allowHeuristicKey: !request.SuppressIndexedColorKeyHeuristic);
             await File.WriteAllBytesAsync(
                 request.DestinationPath,
                 indexedBytes,
@@ -2998,7 +3320,8 @@ public sealed class NativeTextureProcessor
     {
         TextureSpecialized,
         LegacyRealEsrgan,
-        ExternalArtistic
+        ExternalArtistic,
+        SameSizePainted
     }
 
     private sealed record NeuralBatchKey(

@@ -118,7 +118,7 @@ public sealed class ToolchainDiscovery
                 "Texture HD custom worker is incomplete; the bundled faithful Real-ESRNet fallback will be used.");
         }
 
-        var artisticWorker = FindFile(
+        var artisticWorker = FindArtisticWorker(
             ArtisticWorkerEnvironmentVariable,
             diagnostics,
             Path.Combine(paths.ToolsPath, "artistic-worker", "worker.exe"),
@@ -157,6 +157,41 @@ public sealed class ToolchainDiscovery
             .Select(Path.GetFullPath)
             .FirstOrDefault(File.Exists);
     }
+
+    private static string? FindArtisticWorker(
+        string environmentVariable,
+        ICollection<string> diagnostics,
+        params string[] candidates)
+    {
+        var allCandidates = new List<string>();
+        AddEnvironmentCandidate(environmentVariable, allCandidates, diagnostics);
+        allCandidates.AddRange(candidates);
+
+        foreach (var candidate in allCandidates.Select(Path.GetFullPath))
+        {
+            if (!File.Exists(candidate))
+            {
+                continue;
+            }
+
+            var directory = Path.GetDirectoryName(candidate)!;
+            var candidateMarker = candidate + ".disabled";
+            var setupMarker = Path.Combine(directory, "worker.bat.disabled");
+            if (MarkerExists(candidateMarker) || MarkerExists(setupMarker))
+            {
+                diagnostics.Add(
+                    $"Experimental artistic worker remains disabled by its safety marker: {candidate}.");
+                continue;
+            }
+
+            return candidate;
+        }
+
+        return null;
+    }
+
+    private static bool MarkerExists(string path) =>
+        File.Exists(path) || Directory.Exists(path);
 
     private static void AddEnvironmentCandidate(
         string environmentVariable,

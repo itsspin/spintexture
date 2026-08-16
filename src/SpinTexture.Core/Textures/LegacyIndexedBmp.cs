@@ -29,7 +29,8 @@ internal static class LegacyIndexedBmp
         int width,
         int height,
         ReadOnlySpan<byte> rgba,
-        byte? forcedKeyIndex = null)
+        byte? forcedKeyIndex = null,
+        bool allowHeuristicKey = true)
     {
         if (!CanEncode(source) || !TryReadLayout(source, out var layout))
         {
@@ -69,7 +70,9 @@ internal static class LegacyIndexedBmp
         // can fail on layouts whose art touches the border.
         var keyedIndex = forcedKeyIndex is { } forced && forced < layout.ColorCount
             ? forced
-            : FindLikelyKeyedIndex(source, layout);
+            : allowHeuristicKey
+                ? FindLikelyKeyedIndex(source, layout)
+                : null;
         var paletteLookup = BuildPaletteLookup(source, layout, keyedIndex);
         for (var y = 0; y < height; y++)
         {

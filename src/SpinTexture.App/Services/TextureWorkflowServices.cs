@@ -31,6 +31,10 @@ public interface ITextureWorkflowService
         string installPath,
         CancellationToken cancellationToken);
 
+    Task<ArtisticWorkerRoute?> ResolveArtisticWorkerRouteAsync(
+        string installPath,
+        CancellationToken cancellationToken);
+
     Task<InstallHealthReport> AuditInstallHealthAsync(
         string installPath,
         CancellationToken cancellationToken);
@@ -111,6 +115,13 @@ public sealed class TextureWorkflowService : ITextureWorkflowService
             WorkspaceLocator.ForInstall(installPath, workspaceRoot),
             (UpscaleOptions options) =>
                 TexturePackWorkflow.GetFreshBuildResumeOperationKey(options.Preset),
+            cancellationToken);
+
+    public Task<ArtisticWorkerRoute?> ResolveArtisticWorkerRouteAsync(
+        string installPath,
+        CancellationToken cancellationToken) =>
+        workflow.ResolveArtisticWorkerRouteAsync(
+            WorkspaceLocator.ForInstall(installPath, workspaceRoot),
             cancellationToken);
 
     public async Task RestoreAsync(

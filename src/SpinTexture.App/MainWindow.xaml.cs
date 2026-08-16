@@ -281,6 +281,11 @@ public partial class MainWindow : Window
     private async void OnPackStorageRequested(string installPath)
     {
         await _viewModel.SuspendOptionPreviewForExternalWorkflowAsync().ConfigureAwait(true);
+        if (IsClosingOrClosed)
+        {
+            return;
+        }
+
         EnsureViewsMatchInstall(installPath);
         if (_packStorageView is null)
         {
@@ -301,6 +306,11 @@ public partial class MainWindow : Window
     private async void OnNativeGraphicsRequested(string installPath)
     {
         await _viewModel.SuspendOptionPreviewForExternalWorkflowAsync().ConfigureAwait(true);
+        if (IsClosingOrClosed)
+        {
+            return;
+        }
+
         EnsureViewsMatchInstall(installPath);
         if (_nativeGraphicsView is null)
         {
@@ -316,6 +326,11 @@ public partial class MainWindow : Window
     private async void OnPackLibraryRequested(string installPath)
     {
         await _viewModel.SuspendOptionPreviewForExternalWorkflowAsync().ConfigureAwait(true);
+        if (IsClosingOrClosed)
+        {
+            return;
+        }
+
         EnsureViewsMatchInstall(installPath);
         if (_packLibraryView is null)
         {
@@ -337,8 +352,16 @@ public partial class MainWindow : Window
     private async void OnPreviewGalleryRequested(string manifestPath)
     {
         await _viewModel.SuspendOptionPreviewForExternalWorkflowAsync().ConfigureAwait(true);
+        if (IsClosingOrClosed)
+        {
+            return;
+        }
+
         ShowPreview(manifestPath, applyChoices: null, returnsToPacks: false);
     }
+
+    private bool IsClosingOrClosed =>
+        _shutdownDrainRunning || _shutdownDrainComplete || _closedCleanupComplete;
 
     /// <summary>
     /// Builds the gallery's fallback renderer for textures without a captured
@@ -459,13 +482,10 @@ public partial class MainWindow : Window
         _viewModel.ResumeOptionPreviewForBuildSection();
     }
 
-    private bool CanLeaveCurrentSection() => SectionContent.Content switch
-    {
-        StagedPackLibraryWindow packs => packs.CanNavigateAway,
-        PackStorageSettingsWindow storage => storage.CanNavigateAway,
-        NativeGraphicsWindow graphics => graphics.CanNavigateAway,
-        _ => true
-    };
+    private bool CanLeaveCurrentSection() =>
+        (_packLibraryView?.CanNavigateAway ?? true)
+        && (_packStorageView?.CanNavigateAway ?? true)
+        && (_nativeGraphicsView?.CanNavigateAway ?? true);
 
     private void EnsureViewsMatchInstall(string installPath)
     {
@@ -573,15 +593,27 @@ public partial class MainWindow : Window
         }
 
         e.Cancel = true;
+        if (!CanLeaveCurrentSection())
+        {
+            MessageBox.Show(
+                this,
+                "The current Packs, Storage, or Graphics operation must finish safely before SpinTexture can close. Use its Cancel button if available, wait for the operation to stop, then close again.",
+                "Operation still running",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
         if (_shutdownDrainRunning)
         {
             return;
         }
 
         _shutdownDrainRunning = true;
+        IsEnabled = false;
         try
         {
-            await _viewModel.DrainOptionPreviewForShutdownAsync().ConfigureAwait(true);
+            await _viewModel.DrainForShutdownAsync().ConfigureAwait(true);
             await Dispatcher.InvokeAsync(
                 () =>
                 {
@@ -593,10 +625,11 @@ public partial class MainWindow : Window
         catch (Exception exception)
         {
             _shutdownDrainRunning = false;
+            IsEnabled = true;
             MessageBox.Show(
                 this,
-                $"SpinTexture is still stopping preview work safely. Try closing again after it finishes.\n\n{exception.Message}",
-                "Preview is still stopping",
+                $"SpinTexture is still stopping active work safely. Try closing again after it finishes.\n\n{exception.Message}",
+                "Work is still stopping",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);
         }

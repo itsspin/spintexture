@@ -193,8 +193,38 @@ public sealed class ArtisticWorkerSetupService
     ];
 
     private static readonly HttpClient Http = CreateHttpClient();
+    private const string GenerationsDirectoryName = ".worker-generations";
+    private const string ComponentCacheDirectoryName = ".component-cache";
+    private static readonly TimeSpan SynchronousMutationLockTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan StyleMutationLockTimeout = TimeSpan.FromMilliseconds(500);
 
     private readonly string toolsDirectory;
+    private readonly object setupStateGate = new();
+    private readonly SemaphoreSlim setupOperationGate = new(1, 1);
+    private PendingWorkerSetup? pendingSetup;
+
+    private sealed record PendingWorkerSetup(
+        string GenerationDirectory,
+        string VerificationScriptPath,
+        string PendingConfigPath,
+        string PendingLiveShimPath,
+        ArtisticWorkerDirectoryLease MutationLease);
+
+    private sealed record WorkerIdentityManifest(
+        int SchemaVersion,
+        IReadOnlyList<WorkerIdentityRuntimeFile> RuntimeFiles,
+        IReadOnlyList<WorkerIdentityComponent> Components);
+
+    private sealed record WorkerIdentityRuntimeFile(
+        string RelativePath,
+        long Length,
+        string Sha256);
+
+    private sealed record WorkerIdentityComponent(
+        string FileName,
+        long Length,
+        string Sha256,
+        long LastWriteUtcTicks);
 
     public ArtisticWorkerSetupService(string? toolsDirectory = null)
     {
@@ -208,12 +238,7 @@ public sealed class ArtisticWorkerSetupService
     {
         var workerScript = Path.Combine(WorkerDirectory, "worker.bat");
         var disabledScript = workerScript + ".disabled";
-        if (File.Exists(workerScript))
-        {
-            return new ArtisticWorkerSetupStatus(true, true, WorkerDirectory, null);
-        }
-
-        if (File.Exists(disabledScript))
+        if (File.Exists(disabledScript) || Directory.Exists(disabledScript))
         {
             return new ArtisticWorkerSetupStatus(
                 true,
@@ -222,13 +247,21 @@ public sealed class ArtisticWorkerSetupService
                 "The install-time verification did not pass on this PC; the worker is present but disabled.");
         }
 
+        if (File.Exists(workerScript))
+        {
+            return new ArtisticWorkerSetupStatus(true, true, WorkerDirectory, null);
+        }
+
         return new ArtisticWorkerSetupStatus(false, false, WorkerDirectory, null);
     }
 
     /// <summary>
-    /// Downloads (or resumes) all pinned components, verifies them, and
-    /// generates the worker scripts. Safe to re-run: components that already
-    /// match their pinned hash are skipped.
+    /// Downloads all pinned components and stages a worker generation for
+    /// <see cref="VerifyAsync"/>. A re-run reuses fully downloaded components
+    /// that still match their pins; incomplete files restart. The discoverable
+    /// worker is never changed here: a first install remains disabled, while
+    /// an update keeps the previously verified generation live until the
+    /// replacement passes its smoke test.
     /// </summary>
     public async Task SetupAsync(
         string realEsrganPath,
@@ -238,51 +271,134 @@ public sealed class ArtisticWorkerSetupService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(realEsrganPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(realEsrganModelsPath);
-        Directory.CreateDirectory(WorkerDirectory);
-        var driveRoot = Path.GetPathRoot(WorkerDirectory);
-        if (driveRoot is not null)
+        await setupOperationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        ArtisticWorkerDirectoryLease? mutationLease = null;
+        PendingWorkerSetup? stagedSetup = null;
+        string? generationDirectory = null;
+        try
         {
-            var free = new DriveInfo(driveRoot).AvailableFreeSpace;
-            if (free < RequiredFreeBytes)
+            var replacedSetup = TakePendingSetup();
+            if (replacedSetup is not null)
             {
-                throw new IOException(
-                    $"Setting up the artistic worker needs about {RequiredFreeBytes / (1024 * 1024 * 1024):N0} GB free "
-                    + $"(downloads plus working room); this drive has {free / (1024.0 * 1024 * 1024):N1} GB.");
+                mutationLease = replacedSetup.MutationLease;
+                TryDeleteDirectory(replacedSetup.GenerationDirectory, mutationLease);
             }
-        }
+            else
+            {
+                mutationLease = await ArtisticWorkerDirectoryLock.AcquireExclusiveAsync(
+                        WorkerDirectory,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
 
-        var modelsDirectory = Path.Combine(WorkerDirectory, "models");
-        Directory.CreateDirectory(modelsDirectory);
-        var components = Components;
-        for (var index = 0; index < components.Count; index++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var component = components[index];
-            var destination = component.IsZipArchive
-                ? Path.Combine(WorkerDirectory, component.FileName)
-                : Path.Combine(modelsDirectory, component.FileName);
-            await DownloadComponentAsync(component, destination, index, components.Count, progress, cancellationToken)
+            Directory.CreateDirectory(WorkerDirectory);
+            var driveRoot = Path.GetPathRoot(WorkerDirectory);
+            if (driveRoot is not null)
+            {
+                var free = new DriveInfo(driveRoot).AvailableFreeSpace;
+                if (free < RequiredFreeBytes)
+                {
+                    throw new IOException(
+                        $"Setting up the artistic worker needs about {RequiredFreeBytes / (1024 * 1024 * 1024):N0} GB free "
+                        + $"(downloads plus working room); this drive has {free / (1024.0 * 1024 * 1024):N1} GB.");
+                }
+            }
+
+            generationDirectory = Path.Combine(
+                WorkerDirectory,
+                GenerationsDirectoryName,
+                $"pending-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(generationDirectory);
+            string? runtimeArchivePath = null;
+            string? modelPath = null;
+            string? controlNetPath = null;
+            var components = Components;
+            for (var index = 0; index < components.Count; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var component = components[index];
+                var componentPath = await ResolveVerifiedComponentAsync(
+                        component,
+                        index,
+                        components.Count,
+                        progress,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (component.IsZipArchive)
+                {
+                    runtimeArchivePath = componentPath;
+                }
+                else if (component.FileName.StartsWith("DreamShaper", StringComparison.OrdinalIgnoreCase))
+                {
+                    modelPath = componentPath;
+                }
+                else
+                {
+                    controlNetPath = componentPath;
+                }
+            }
+
+            if (runtimeArchivePath is null || modelPath is null || controlNetPath is null)
+            {
+                throw new InvalidDataException("The artistic worker component set is incomplete.");
+            }
+
+            var runtimeDirectory = Path.Combine(generationDirectory, "sd");
+            ExtractRuntime(runtimeArchivePath, runtimeDirectory);
+            await WriteWorkerIdentityManifestAsync(
+                    generationDirectory,
+                    runtimeDirectory,
+                    [modelPath, controlNetPath],
+                    cancellationToken)
                 .ConfigureAwait(false);
-            if (component.IsZipArchive)
-            {
-                ExtractRuntime(destination);
-            }
+            cancellationToken.ThrowIfCancellationRequested();
+            stagedSetup = WritePendingWorkerGeneration(
+                generationDirectory,
+                realEsrganPath,
+                realEsrganModelsPath,
+                Path.Combine(runtimeDirectory, "sd-cli.exe"),
+                modelPath,
+                controlNetPath,
+                mutationLease);
+            SetPendingSetup(stagedSetup);
+            progress?.Report(new ProgressUpdate(
+                "Artistic worker",
+                "All components verified; the replacement is staged and awaiting its smoke test.",
+                components.Count,
+                components.Count,
+                "setup"));
+            // Ownership intentionally crosses the public method boundary. The
+            // same exclusive lease stays open until VerifyAsync publishes or
+            // rejects this exact staged generation.
+            mutationLease = null;
         }
+        catch
+        {
+            if (stagedSetup is not null)
+            {
+                ClearPendingSetup(stagedSetup);
+            }
 
-        WriteWorkerScripts(realEsrganPath, realEsrganModelsPath);
-        progress?.Report(new ProgressUpdate(
-            "Artistic worker",
-            "All components verified; worker scripts generated.",
-            components.Count,
-            components.Count,
-            "setup"));
+            if (generationDirectory is not null && mutationLease is not null)
+            {
+                TryDeleteDirectory(generationDirectory, mutationLease);
+            }
+
+            throw;
+        }
+        finally
+        {
+            mutationLease?.Dispose();
+            setupOperationGate.Release();
+        }
     }
 
     /// <summary>
-    /// Runs the freshly installed worker on a generated test image, twice,
-    /// and checks the contract: outputs exist, are exactly 4x, and the two
-    /// runs are byte-identical (determinism). On failure the worker script is
-    /// disabled so it can never affect a build.
+    /// Runs the staged worker on a generated test image, twice, and checks the
+    /// contract: outputs exist, are exactly 4x, and the two runs are
+    /// byte-identical (determinism). A staged generation becomes discoverable
+    /// only after every check passes. Cancellation and exceptions discard the
+    /// pending generation without disturbing a previously verified worker.
     /// </summary>
     public async Task<string?> VerifyAsync(
         Tooling.INativeProcessRunner runner,
@@ -290,16 +406,72 @@ public sealed class ArtisticWorkerSetupService
         Func<string, Task<(int Width, int Height)>> readImageSizeAsync,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(runner);
-        ArgumentNullException.ThrowIfNull(writeTestImageAsync);
-        ArgumentNullException.ThrowIfNull(readImageSizeAsync);
-        var workerScript = Path.Combine(WorkerDirectory, "worker.bat");
+        // Do not let an already-canceled verification strand the exclusive
+        // lease retained by SetupAsync. Once through the per-instance gate,
+        // cancellation is handled by the normal reject path below.
+        await setupOperationGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        var setupBeingVerified = GetPendingSetup();
+        ArtisticWorkerDirectoryLease? standaloneMutationLease = null;
+        try
+        {
+            ArgumentNullException.ThrowIfNull(runner);
+            ArgumentNullException.ThrowIfNull(writeTestImageAsync);
+            ArgumentNullException.ThrowIfNull(readImageSizeAsync);
+            if (setupBeingVerified is null)
+            {
+                standaloneMutationLease = await ArtisticWorkerDirectoryLock.AcquireExclusiveAsync(
+                        WorkerDirectory,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            return await VerifyUnderMutationLeaseAsync(
+                    setupBeingVerified,
+                    setupBeingVerified?.MutationLease ?? standaloneMutationLease!,
+                    runner,
+                    writeTestImageAsync,
+                    readImageSizeAsync,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            if (setupBeingVerified is not null)
+            {
+                DiscardPendingSetup(setupBeingVerified, createDisabledMarker: true);
+            }
+
+            throw;
+        }
+        finally
+        {
+            setupBeingVerified?.MutationLease.Dispose();
+            standaloneMutationLease?.Dispose();
+            setupOperationGate.Release();
+        }
+    }
+
+    private async Task<string?> VerifyUnderMutationLeaseAsync(
+        PendingWorkerSetup? setupBeingVerified,
+        ArtisticWorkerDirectoryLease mutationLease,
+        Tooling.INativeProcessRunner runner,
+        Func<string, int, Task> writeTestImageAsync,
+        Func<string, Task<(int Width, int Height)>> readImageSizeAsync,
+        CancellationToken cancellationToken)
+    {
+        mutationLease.EnsureExclusiveFor(WorkerDirectory);
+        var workerScript = setupBeingVerified?.VerificationScriptPath
+            ?? Path.Combine(WorkerDirectory, "worker.bat");
         if (!File.Exists(workerScript))
         {
-            return "The worker script is missing.";
+            return setupBeingVerified is null
+                ? "The worker script is missing."
+                : RejectPending("The staged worker script is missing.");
         }
 
-        var verifyRoot = Path.Combine(WorkerDirectory, ".verify");
+        var verifyRoot = setupBeingVerified is null
+            ? Path.Combine(WorkerDirectory, ".verify")
+            : Path.Combine(setupBeingVerified.GenerationDirectory, ".verify");
         try
         {
             if (Directory.Exists(verifyRoot))
@@ -327,19 +499,19 @@ public sealed class ArtisticWorkerSetupService
                     .ConfigureAwait(false);
                 if (!result.Succeeded)
                 {
-                    return Disable($"The worker exited with code {result.ExitCode}. {Truncate(result.StandardError)}");
+                    return Reject($"The worker exited with code {result.ExitCode}. {Truncate(result.StandardError)}");
                 }
 
                 var outputPath = Path.Combine(outputDirectory, "verify.png");
                 if (!File.Exists(outputPath))
                 {
-                    return Disable("The worker did not produce an output image with the input's file name.");
+                    return Reject("The worker did not produce an output image with the input's file name.");
                 }
 
                 var (width, height) = await readImageSizeAsync(outputPath).ConfigureAwait(false);
                 if (width != testSize * 4 || height != testSize * 4)
                 {
-                    return Disable(
+                    return Reject(
                         $"The worker produced {width}x{height} instead of the required exact 4x ({testSize * 4}x{testSize * 4}).");
                 }
 
@@ -348,12 +520,27 @@ public sealed class ArtisticWorkerSetupService
 
             if (!outputs[0].AsSpan().SequenceEqual(outputs[1]))
             {
-                return Disable(
+                return Reject(
                     "The worker is not deterministic: two runs on the same input produced different bytes. "
                     + "Repairs and resumed builds must reproduce identical packs.");
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
+            if (setupBeingVerified is not null)
+            {
+                PublishPendingSetup(setupBeingVerified);
+            }
+
             return null;
+        }
+        catch
+        {
+            if (setupBeingVerified is not null)
+            {
+                DiscardPendingSetup(setupBeingVerified, createDisabledMarker: true);
+            }
+
+            throw;
         }
         finally
         {
@@ -367,24 +554,124 @@ public sealed class ArtisticWorkerSetupService
             catch (IOException)
             {
             }
+            catch (UnauthorizedAccessException)
+            {
+            }
         }
 
-        string Disable(string reason)
+        string Reject(string reason) => setupBeingVerified is null
+            ? DisableLiveWorker(reason)
+            : RejectPending(reason);
+
+        string RejectPending(string reason)
+        {
+            DiscardPendingSetup(setupBeingVerified!, createDisabledMarker: true);
+            return reason;
+        }
+
+        string DisableLiveWorker(string reason)
         {
             var disabled = workerScript + ".disabled";
             AtomicFile.TryDelete(disabled);
             File.Move(workerScript, disabled);
             return reason;
         }
+
     }
 
     public void Remove()
     {
-        if (Directory.Exists(WorkerDirectory))
+        setupOperationGate.Wait();
+        ArtisticWorkerDirectoryLease? mutationLease = null;
+        try
         {
-            Directory.Delete(WorkerDirectory, recursive: true);
+            var stagedSetup = TakePendingSetup();
+            mutationLease = stagedSetup?.MutationLease
+                ?? ArtisticWorkerDirectoryLock.AcquireExclusive(
+                    WorkerDirectory,
+                    SynchronousMutationLockTimeout);
+            mutationLease.EnsureExclusiveFor(WorkerDirectory);
+            if (Directory.Exists(WorkerDirectory))
+            {
+                Directory.Delete(WorkerDirectory, recursive: true);
+            }
+        }
+        finally
+        {
+            mutationLease?.Dispose();
+            setupOperationGate.Release();
         }
     }
+
+    private async Task<string> ResolveVerifiedComponentAsync(
+        ArtisticWorkerComponent component,
+        int componentIndex,
+        int componentCount,
+        IProgress<ProgressUpdate>? progress,
+        CancellationToken cancellationToken)
+    {
+        var cacheDirectory = Path.Combine(
+            WorkerDirectory,
+            ComponentCacheDirectoryName,
+            component.Sha256.ToLowerInvariant());
+        var cachePath = Path.Combine(cacheDirectory, component.FileName);
+        if (await IsVerifiedComponentAsync(component, cachePath, cancellationToken).ConfigureAwait(false))
+        {
+            ReportVerifiedComponent(component, componentIndex, componentCount, progress);
+            return cachePath;
+        }
+
+        // Reuse installations created before the content-addressed cache was
+        // introduced. These files are immutable inputs to both the live and
+        // staged generations, so verification never has to overwrite them.
+        var legacyPath = component.IsZipArchive
+            ? Path.Combine(WorkerDirectory, component.FileName)
+            : Path.Combine(WorkerDirectory, "models", component.FileName);
+        if (await IsVerifiedComponentAsync(component, legacyPath, cancellationToken).ConfigureAwait(false))
+        {
+            ReportVerifiedComponent(component, componentIndex, componentCount, progress);
+            return legacyPath;
+        }
+
+        Directory.CreateDirectory(cacheDirectory);
+        await DownloadComponentAsync(
+                component,
+                cachePath,
+                componentIndex,
+                componentCount,
+                progress,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return cachePath;
+    }
+
+    private static async Task<bool> IsVerifiedComponentAsync(
+        ArtisticWorkerComponent component,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        if (!File.Exists(path) || new FileInfo(path).Length != component.SizeBytes)
+        {
+            return false;
+        }
+
+        return string.Equals(
+            await ComputeSha256Async(path, cancellationToken).ConfigureAwait(false),
+            component.Sha256,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void ReportVerifiedComponent(
+        ArtisticWorkerComponent component,
+        int componentIndex,
+        int componentCount,
+        IProgress<ProgressUpdate>? progress) =>
+        progress?.Report(new ProgressUpdate(
+            "Artistic worker",
+            $"{component.Name} is already downloaded and verified.",
+            componentIndex + 1,
+            componentCount,
+            component.FileName));
 
     private async Task DownloadComponentAsync(
         ArtisticWorkerComponent component,
@@ -478,9 +765,8 @@ public sealed class ArtisticWorkerSetupService
         File.Move(partialPath, destination);
     }
 
-    private void ExtractRuntime(string zipPath)
+    private static void ExtractRuntime(string zipPath, string runtimeDirectory)
     {
-        var runtimeDirectory = Path.Combine(WorkerDirectory, "sd");
         if (Directory.Exists(runtimeDirectory))
         {
             Directory.Delete(runtimeDirectory, recursive: true);
@@ -492,6 +778,48 @@ public sealed class ArtisticWorkerSetupService
             throw new InvalidDataException(
                 "The stable-diffusion.cpp archive did not contain sd-cli.exe as expected.");
         }
+    }
+
+    private static async Task WriteWorkerIdentityManifestAsync(
+        string generationDirectory,
+        string runtimeDirectory,
+        IReadOnlyList<string> modelPaths,
+        CancellationToken cancellationToken)
+    {
+        var runtimeFiles = new List<WorkerIdentityRuntimeFile>();
+        foreach (var path in Directory.EnumerateFiles(runtimeDirectory, "*", SearchOption.AllDirectories)
+                     .OrderBy(path => Path.GetRelativePath(generationDirectory, path), StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var info = new FileInfo(path);
+            runtimeFiles.Add(new WorkerIdentityRuntimeFile(
+                Path.GetRelativePath(generationDirectory, path).Replace('\\', '/'),
+                info.Length,
+                (await ComputeSha256Async(path, cancellationToken).ConfigureAwait(false)).ToLowerInvariant()));
+        }
+
+        var components = Components
+            .Where(component => !component.IsZipArchive)
+            .OrderBy(component => component.FileName, StringComparer.Ordinal)
+            .Select(component =>
+            {
+                var path = modelPaths.Single(candidate =>
+                    Path.GetFileName(candidate).Equals(
+                        component.FileName,
+                        StringComparison.Ordinal));
+                return new WorkerIdentityComponent(
+                    component.FileName,
+                    component.SizeBytes,
+                    component.Sha256.ToLowerInvariant(),
+                    new FileInfo(path).LastWriteTimeUtc.Ticks);
+            })
+            .ToArray();
+        var manifest = new WorkerIdentityManifest(1, runtimeFiles, components);
+        await File.WriteAllTextAsync(
+                Path.Combine(generationDirectory, "worker-identity.json"),
+                JsonSerializer.Serialize(manifest, ConfigJsonOptions),
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private static readonly JsonSerializerOptions ConfigJsonOptions = new(JsonSerializerDefaults.Web)
@@ -556,24 +884,56 @@ public sealed class ArtisticWorkerSetupService
         var preset = StylePresets.FirstOrDefault(candidate =>
                 string.Equals(candidate.Key, presetKey, StringComparison.OrdinalIgnoreCase))
             ?? throw new ArgumentOutOfRangeException(nameof(presetKey));
-        Directory.CreateDirectory(WorkerDirectory);
-        // Preserve the user's performance/determinism knobs when they exist.
-        var current = TryReadConfig();
-        var config = preset.ToConfig();
-        if (current is not null)
+        setupOperationGate.Wait();
+        ArtisticWorkerDirectoryLease? mutationLease = null;
+        try
         {
-            // Seed and resolution bound are always the user's; a hand-tuned
-            // step count survives only if it was set under the current
-            // recipe schema — older recipes' defaults should not pin quality.
-            config = config with
+            if (GetPendingSetup() is not null)
             {
-                Seed = current.Seed,
-                Steps = current.SchemaVersion >= 2 ? current.Steps : config.Steps,
-                MaximumDiffusionEdge = current.MaximumDiffusionEdge
-            };
-        }
+                throw new IOException(
+                    "The artistic worker setup is awaiting verification. Finish or cancel setup before changing its style.");
+            }
 
-        File.WriteAllText(ConfigPath, JsonSerializer.Serialize(config, ConfigJsonOptions));
+            mutationLease = ArtisticWorkerDirectoryLock.AcquireExclusive(
+                WorkerDirectory,
+                StyleMutationLockTimeout);
+            mutationLease.EnsureExclusiveFor(WorkerDirectory);
+            Directory.CreateDirectory(WorkerDirectory);
+            // Preserve the user's performance/determinism knobs when they exist.
+            var current = TryReadConfig();
+            var config = preset.ToConfig();
+            if (current is not null)
+            {
+                // Seed and resolution bound are always the user's; a hand-tuned
+                // step count survives only if it was set under the current
+                // recipe schema — older recipes' defaults should not pin quality.
+                config = config with
+                {
+                    Seed = current.Seed,
+                    Steps = current.SchemaVersion >= 2 ? current.Steps : config.Steps,
+                    MaximumDiffusionEdge = current.MaximumDiffusionEdge
+                };
+            }
+
+            var temporaryPath = AtomicFile.CreateTemporarySiblingPath(ConfigPath);
+            try
+            {
+                File.WriteAllText(
+                    temporaryPath,
+                    JsonSerializer.Serialize(config, ConfigJsonOptions));
+                AtomicFile.CommitTemporaryFile(temporaryPath, ConfigPath);
+            }
+            catch
+            {
+                AtomicFile.TryDelete(temporaryPath);
+                throw;
+            }
+        }
+        finally
+        {
+            mutationLease?.Dispose();
+            setupOperationGate.Release();
+        }
     }
 
     internal void WriteWorkerScripts(string realEsrganPath, string realEsrganModelsPath)
@@ -586,33 +946,193 @@ public sealed class ArtisticWorkerSetupService
         // written by an older recipe schema (or by the retired SDXL tier)
         // are re-mapped onto the active style's current recipe, keeping the
         // user's seed and resolution bound.
+        setupOperationGate.Wait();
+        ArtisticWorkerDirectoryLease? mutationLease = null;
+        try
+        {
+            var stagedSetup = TakePendingSetup();
+            if (stagedSetup is not null)
+            {
+                mutationLease = stagedSetup.MutationLease;
+                TryDeleteDirectory(stagedSetup.GenerationDirectory, mutationLease);
+            }
+            else
+            {
+                mutationLease = ArtisticWorkerDirectoryLock.AcquireExclusive(
+                    WorkerDirectory,
+                    SynchronousMutationLockTimeout);
+            }
+
+            mutationLease.EnsureExclusiveFor(WorkerDirectory);
+            Directory.CreateDirectory(WorkerDirectory);
+            File.WriteAllText(
+                ConfigPath,
+                JsonSerializer.Serialize(CreateSetupConfig(), ConfigJsonOptions));
+            WriteWorkerPowerShellScript(
+                Path.Combine(WorkerDirectory, "worker.ps1"),
+                ConfigPath,
+                Path.Combine(WorkerDirectory, "sd", "sd-cli.exe"),
+                Path.Combine(WorkerDirectory, "models", "DreamShaper_8_pruned.safetensors"),
+                Path.Combine(WorkerDirectory, "models", "control_v11f1e_sd15_tile_fp16.safetensors"),
+                realEsrganPath,
+                realEsrganModelsPath);
+            var shimPath = Path.Combine(WorkerDirectory, "worker.bat");
+            AtomicFile.TryDelete(shimPath + ".disabled");
+            WriteBatchShim(shimPath, "%~dp0worker.ps1");
+        }
+        finally
+        {
+            mutationLease?.Dispose();
+            setupOperationGate.Release();
+        }
+    }
+
+    internal void StageWorkerScriptsForVerification(string realEsrganPath, string realEsrganModelsPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(realEsrganPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(realEsrganModelsPath);
+        setupOperationGate.Wait();
+        ArtisticWorkerDirectoryLease? mutationLease = null;
+        PendingWorkerSetup? stagedSetup = null;
+        string? generationDirectory = null;
+        try
+        {
+            var replacedSetup = TakePendingSetup();
+            if (replacedSetup is not null)
+            {
+                mutationLease = replacedSetup.MutationLease;
+                TryDeleteDirectory(replacedSetup.GenerationDirectory, mutationLease);
+            }
+            else
+            {
+                mutationLease = ArtisticWorkerDirectoryLock.AcquireExclusive(
+                    WorkerDirectory,
+                    SynchronousMutationLockTimeout);
+            }
+
+            mutationLease.EnsureExclusiveFor(WorkerDirectory);
+            Directory.CreateDirectory(WorkerDirectory);
+            generationDirectory = Path.Combine(
+                WorkerDirectory,
+                GenerationsDirectoryName,
+                $"pending-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(generationDirectory);
+            stagedSetup = WritePendingWorkerGeneration(
+                generationDirectory,
+                realEsrganPath,
+                realEsrganModelsPath,
+                Path.Combine(generationDirectory, "sd", "sd-cli.exe"),
+                Path.Combine(generationDirectory, "models", "DreamShaper_8_pruned.safetensors"),
+                Path.Combine(generationDirectory, "models", "control_v11f1e_sd15_tile_fp16.safetensors"),
+                mutationLease);
+            SetPendingSetup(stagedSetup);
+            mutationLease = null;
+        }
+        catch
+        {
+            if (stagedSetup is not null)
+            {
+                ClearPendingSetup(stagedSetup);
+            }
+
+            if (generationDirectory is not null && mutationLease is not null)
+            {
+                TryDeleteDirectory(generationDirectory, mutationLease);
+            }
+
+            throw;
+        }
+        finally
+        {
+            mutationLease?.Dispose();
+            setupOperationGate.Release();
+        }
+    }
+
+    private PendingWorkerSetup WritePendingWorkerGeneration(
+        string generationDirectory,
+        string realEsrganPath,
+        string realEsrganModelsPath,
+        string sdCliPath,
+        string modelPath,
+        string controlNetPath,
+        ArtisticWorkerDirectoryLease mutationLease)
+    {
+        mutationLease.EnsureExclusiveFor(WorkerDirectory);
+        var pendingConfigPath = Path.Combine(generationDirectory, "worker-config.pending.json");
+        File.WriteAllText(
+            pendingConfigPath,
+            JsonSerializer.Serialize(CreateSetupConfig(), ConfigJsonOptions));
+
+        var verificationPowerShellPath = Path.Combine(generationDirectory, "worker.verify.ps1");
+        WriteWorkerPowerShellScript(
+            verificationPowerShellPath,
+            pendingConfigPath,
+            sdCliPath,
+            modelPath,
+            controlNetPath,
+            realEsrganPath,
+            realEsrganModelsPath);
+        var livePowerShellPath = Path.Combine(generationDirectory, "worker.ps1");
+        WriteWorkerPowerShellScript(
+            livePowerShellPath,
+            ConfigPath,
+            sdCliPath,
+            modelPath,
+            controlNetPath,
+            realEsrganPath,
+            realEsrganModelsPath);
+
+        var verificationScriptPath = Path.Combine(generationDirectory, "worker.verify.bat");
+        WriteBatchShim(verificationScriptPath, "%~dp0worker.verify.ps1");
+        var relativeLivePowerShellPath = Path.GetRelativePath(WorkerDirectory, livePowerShellPath)
+            .Replace('/', '\\');
+        var pendingLiveShimPath = Path.Combine(generationDirectory, "worker.publish.bat");
+        WriteBatchShim(pendingLiveShimPath, $"%~dp0{relativeLivePowerShellPath}");
+        return new PendingWorkerSetup(
+            generationDirectory,
+            verificationScriptPath,
+            pendingConfigPath,
+            pendingLiveShimPath,
+            mutationLease);
+    }
+
+    private ArtisticWorkerConfig CreateSetupConfig()
+    {
         var currentConfig = TryReadConfig();
         if (currentConfig is null)
         {
-            File.WriteAllText(
-                ConfigPath,
-                JsonSerializer.Serialize(StylePresets[0].ToConfig(), ConfigJsonOptions));
-        }
-        else if (currentConfig.SchemaVersion < 2
-            || !string.Equals(currentConfig.ModelTier, ModelTierStandard, StringComparison.OrdinalIgnoreCase))
-        {
-            // The declared preset key is the user's style choice; the old
-            // recipe's values (including any hand tuning made against it) are
-            // superseded by the new recipe they were an approximation of.
-            var activePreset = StylePresets.FirstOrDefault(preset =>
-                    string.Equals(preset.Key, currentConfig.Preset, StringComparison.OrdinalIgnoreCase))
-                ?? StylePresets[0];
-            File.WriteAllText(
-                ConfigPath,
-                JsonSerializer.Serialize(
-                    activePreset.ToConfig() with
-                    {
-                        Seed = currentConfig.Seed,
-                        MaximumDiffusionEdge = currentConfig.MaximumDiffusionEdge
-                    },
-                    ConfigJsonOptions));
+            return StylePresets[0].ToConfig();
         }
 
+        if (currentConfig.SchemaVersion >= 2
+            && string.Equals(currentConfig.ModelTier, ModelTierStandard, StringComparison.OrdinalIgnoreCase))
+        {
+            return currentConfig;
+        }
+
+        // The declared preset key is the user's style choice; the old
+        // recipe's values (including any hand tuning made against it) are
+        // superseded by the new recipe they were an approximation of.
+        var activePreset = StylePresets.FirstOrDefault(preset =>
+                string.Equals(preset.Key, currentConfig.Preset, StringComparison.OrdinalIgnoreCase))
+            ?? StylePresets[0];
+        return activePreset.ToConfig() with
+        {
+            Seed = currentConfig.Seed,
+            MaximumDiffusionEdge = currentConfig.MaximumDiffusionEdge
+        };
+    }
+
+    private static void WriteWorkerPowerShellScript(
+        string outputPath,
+        string configPath,
+        string sdCliPath,
+        string modelPath,
+        string controlNetPath,
+        string realEsrganPath,
+        string realEsrganModelsPath)
+    {
         var script = new StringBuilder();
         script.AppendLine("# Generated by SpinTexture \u2014 experimental artistic painted worker.");
         script.AppendLine("# Contract: worker -i <inDir> -o <outDir> -s 4 -f png; exact 4x PNGs, same names, deterministic.");
@@ -621,12 +1141,12 @@ public sealed class ArtisticWorkerSetupService
         script.AppendLine("Add-Type -AssemblyName System.Drawing");
         script.AppendLine("$culture = [System.Globalization.CultureInfo]::InvariantCulture");
         script.AppendLine("$root = Split-Path -Parent $MyInvocation.MyCommand.Path");
-        script.AppendLine("$config = Get-Content (Join-Path $root 'worker-config.json') | ConvertFrom-Json");
-        script.AppendLine("$sdCli = Join-Path $root 'sd\\sd-cli.exe'");
-        script.AppendLine("$model = Join-Path $root 'models\\DreamShaper_8_pruned.safetensors'");
-        script.AppendLine("$controlNet = Join-Path $root 'models\\control_v11f1e_sd15_tile_fp16.safetensors'");
-        script.AppendLine($"$realEsrgan = '{realEsrganPath.Replace("'", "''")}'");
-        script.AppendLine($"$realEsrganModels = '{realEsrganModelsPath.Replace("'", "''")}'");
+        script.AppendLine($"$config = Get-Content {PowerShellLiteral(configPath)} | ConvertFrom-Json");
+        script.AppendLine($"$sdCli = {PowerShellLiteral(sdCliPath)}");
+        script.AppendLine($"$model = {PowerShellLiteral(modelPath)}");
+        script.AppendLine($"$controlNet = {PowerShellLiteral(controlNetPath)}");
+        script.AppendLine($"$realEsrgan = {PowerShellLiteral(realEsrganPath)}");
+        script.AppendLine($"$realEsrganModels = {PowerShellLiteral(realEsrganModelsPath)}");
         script.AppendLine();
         script.AppendLine("# Native tools (Real-ESRGAN, sd-cli) report progress and GPU info on");
         script.AppendLine("# stderr even when they succeed. Under -ErrorActionPreference Stop that");
@@ -723,14 +1243,306 @@ public sealed class ArtisticWorkerSetupService
         script.AppendLine("} finally {");
         script.AppendLine("  Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue");
         script.AppendLine("}");
-        File.WriteAllText(Path.Combine(WorkerDirectory, "worker.ps1"), script.ToString());
+        File.WriteAllText(outputPath, script.ToString());
+    }
 
+    private static void WriteBatchShim(string path, string powerShellScriptReference)
+    {
         var shim = "@echo off\r\n"
-            + "powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0worker.ps1\" %*\r\n"
+            + $"powershell -NoProfile -ExecutionPolicy Bypass -File \"{powerShellScriptReference}\" %*\r\n"
             + "exit /b %ERRORLEVEL%\r\n";
-        var shimPath = Path.Combine(WorkerDirectory, "worker.bat");
-        AtomicFile.TryDelete(shimPath + ".disabled");
-        File.WriteAllText(shimPath, shim);
+        File.WriteAllText(path, shim);
+    }
+
+    private static string PowerShellLiteral(string value) =>
+        $"'{Path.GetFullPath(value).Replace("'", "''")}'";
+
+    private void PublishPendingSetup(PendingWorkerSetup setup)
+    {
+        lock (setupStateGate)
+        {
+            PublishPendingSetupCore(setup);
+        }
+    }
+
+    private void PublishPendingSetupCore(PendingWorkerSetup setup)
+    {
+        setup.MutationLease.EnsureExclusiveFor(WorkerDirectory);
+        if (!ReferenceEquals(pendingSetup, setup))
+        {
+            throw new InvalidOperationException("The artistic worker setup is no longer the active pending generation.");
+        }
+
+        var workerScriptPath = Path.Combine(WorkerDirectory, "worker.bat");
+        var configBackupPath = AtomicFile.CreateTemporarySiblingPath(ConfigPath);
+        var workerBackupPath = AtomicFile.CreateTemporarySiblingPath(workerScriptPath);
+        var configWasPresent = File.Exists(ConfigPath);
+        var workerWasPresent = File.Exists(workerScriptPath);
+        var configPublished = false;
+        var workerPublished = false;
+        try
+        {
+            if (configWasPresent)
+            {
+                File.Replace(
+                    setup.PendingConfigPath,
+                    ConfigPath,
+                    configBackupPath,
+                    ignoreMetadataErrors: true);
+            }
+            else
+            {
+                File.Move(setup.PendingConfigPath, ConfigPath);
+            }
+
+            configPublished = true;
+            if (workerWasPresent)
+            {
+                File.Replace(
+                    setup.PendingLiveShimPath,
+                    workerScriptPath,
+                    workerBackupPath,
+                    ignoreMetadataErrors: true);
+            }
+            else
+            {
+                File.Move(setup.PendingLiveShimPath, workerScriptPath);
+            }
+
+            workerPublished = true;
+            var disabledMarkerPath = workerScriptPath + ".disabled";
+            if (File.Exists(disabledMarkerPath) || Directory.Exists(disabledMarkerPath))
+            {
+                // Marker removal is part of the commit, not optional cleanup:
+                // status and discovery deliberately let the marker override a
+                // live shim. If it cannot be removed, roll the publish back
+                // instead of reporting a worker that remains disabled.
+                File.Delete(disabledMarkerPath);
+            }
+
+            pendingSetup = null;
+            AtomicFile.TryDelete(configBackupPath);
+            AtomicFile.TryDelete(workerBackupPath);
+            DeleteSupersededGenerations(setup.GenerationDirectory, setup.MutationLease);
+        }
+        catch
+        {
+            try
+            {
+                if (workerPublished)
+                {
+                    if (workerWasPresent && File.Exists(workerBackupPath))
+                    {
+                        File.Replace(
+                            workerBackupPath,
+                            workerScriptPath,
+                            destinationBackupFileName: null,
+                            ignoreMetadataErrors: true);
+                    }
+                    else if (!workerWasPresent)
+                    {
+                        if (File.Exists(workerScriptPath))
+                        {
+                            File.Delete(workerScriptPath);
+                        }
+                    }
+                }
+
+                if (configPublished)
+                {
+                    if (configWasPresent && File.Exists(configBackupPath))
+                    {
+                        File.Replace(
+                            configBackupPath,
+                            ConfigPath,
+                            destinationBackupFileName: null,
+                            ignoreMetadataErrors: true);
+                    }
+                    else if (!configWasPresent)
+                    {
+                        if (File.Exists(ConfigPath))
+                        {
+                            File.Delete(ConfigPath);
+                        }
+                    }
+                }
+            }
+            catch (Exception rollbackException) when (rollbackException is IOException or UnauthorizedAccessException)
+            {
+                // If rollback itself cannot restore a coherent live pair,
+                // fail closed. The disabled marker is never discoverable as a
+                // worker and keeps the status actionable for the user.
+                DisableLiveWorkerAfterUnsafeRollback();
+                throw new IOException(
+                    "The verified artistic worker could not be published and the previous worker could not be restored safely. It has been disabled.",
+                    rollbackException);
+            }
+            finally
+            {
+                AtomicFile.TryDelete(configBackupPath);
+                AtomicFile.TryDelete(workerBackupPath);
+            }
+
+            throw;
+        }
+    }
+
+    private PendingWorkerSetup? GetPendingSetup()
+    {
+        lock (setupStateGate)
+        {
+            return pendingSetup;
+        }
+    }
+
+    private void SetPendingSetup(PendingWorkerSetup setup)
+    {
+        lock (setupStateGate)
+        {
+            if (pendingSetup is not null)
+            {
+                throw new InvalidOperationException(
+                    "An artistic-worker generation is already awaiting verification.");
+            }
+
+            pendingSetup = setup;
+        }
+    }
+
+    private PendingWorkerSetup? TakePendingSetup()
+    {
+        lock (setupStateGate)
+        {
+            var setup = pendingSetup;
+            pendingSetup = null;
+            return setup;
+        }
+    }
+
+    private bool ClearPendingSetup(PendingWorkerSetup setup)
+    {
+        lock (setupStateGate)
+        {
+            if (!ReferenceEquals(pendingSetup, setup))
+            {
+                return false;
+            }
+
+            pendingSetup = null;
+            return true;
+        }
+    }
+
+    private void DiscardPendingSetup(PendingWorkerSetup setup, bool createDisabledMarker)
+    {
+        setup.MutationLease.EnsureExclusiveFor(WorkerDirectory);
+        if (!ClearPendingSetup(setup))
+        {
+            return;
+        }
+
+        if (createDisabledMarker && !File.Exists(Path.Combine(WorkerDirectory, "worker.bat")))
+        {
+            WriteDisabledMarker();
+        }
+
+        TryDeleteDirectory(setup.GenerationDirectory, setup.MutationLease);
+    }
+
+    private void WriteDisabledMarker()
+    {
+        try
+        {
+            Directory.CreateDirectory(WorkerDirectory);
+            var disabledPath = Path.Combine(WorkerDirectory, "worker.bat.disabled");
+            File.WriteAllText(
+                disabledPath,
+                "@echo off\r\necho Artistic worker disabled: setup verification did not complete successfully. 1>&2\r\nexit /b 1\r\n");
+        }
+        catch (IOException)
+        {
+            // With no live worker.bat the setup is already fail-closed; the
+            // marker only improves the status shown to the user.
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private void DisableLiveWorkerAfterUnsafeRollback()
+    {
+        var workerScriptPath = Path.Combine(WorkerDirectory, "worker.bat");
+        var disabledPath = workerScriptPath + ".disabled";
+        AtomicFile.TryDelete(disabledPath);
+        if (File.Exists(workerScriptPath))
+        {
+            try
+            {
+                File.Move(workerScriptPath, disabledPath);
+                return;
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
+
+        WriteDisabledMarker();
+    }
+
+    private void DeleteSupersededGenerations(
+        string activeGenerationDirectory,
+        ArtisticWorkerDirectoryLease mutationLease)
+    {
+        mutationLease.EnsureExclusiveFor(WorkerDirectory);
+        try
+        {
+            var generationsDirectory = Path.Combine(WorkerDirectory, GenerationsDirectoryName);
+            if (!Directory.Exists(generationsDirectory))
+            {
+                return;
+            }
+
+            foreach (var directory in Directory.EnumerateDirectories(generationsDirectory))
+            {
+                if (!string.Equals(
+                    Path.GetFullPath(directory),
+                    Path.GetFullPath(activeGenerationDirectory),
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    TryDeleteDirectory(directory, mutationLease);
+                }
+            }
+        }
+        catch (IOException)
+        {
+            // Old generations are inert after the live shim is committed;
+            // leaving one behind is preferable to reporting a false setup
+            // failure after the verified worker is already active.
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private void TryDeleteDirectory(string path, ArtisticWorkerDirectoryLease mutationLease)
+    {
+        mutationLease.EnsureExclusiveFor(WorkerDirectory);
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
     }
 
     private static async Task<string> ComputeSha256Async(string path, CancellationToken cancellationToken)

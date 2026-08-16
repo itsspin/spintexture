@@ -16,12 +16,27 @@ namespace SpinTexture.App.ViewModels;
 
 public sealed class MainWindowViewModel : ObservableObject, IDisposable
 {
+    private const string PendingExternalEtaIdentity =
+        "external-worker-enabled-identity-resolved-at-build";
+    private const string ExternalWorkerStyleKey = "external-worker-read-only";
     private readonly IFolderPickerService _folderPicker;
     private readonly ITextureWorkflowService _workflow;
     private readonly IUserDialogService _dialogs;
     private readonly ArtisticWorkerSetupService _artisticWorkerSetup = new();
     private string _artisticWorkerStatusText = string.Empty;
     private bool _isArtisticWorkerInstalled;
+    private bool _isArtisticWorkerEnabled;
+    private bool _isManagedArtisticWorkerActive;
+    private bool _isArtisticWorkerRouteResolved;
+    private string? _artisticWorkerFingerprint;
+    private string? _artisticWorkerPreset;
+    private int _artisticWorkerRefreshVersion;
+    private readonly object _artisticWorkerRouteTasksGate = new();
+    private readonly HashSet<Task> _artisticWorkerRouteTasks = [];
+    private CancellationTokenSource? _artisticWorkerRouteCancellation;
+    private Task? _artisticWorkerRouteRefreshTask;
+    private bool _isShutdownRequested;
+    private bool _isDisposed;
     private ArtisticStyleOptionViewModel? _selectedArtisticStyleOption;
     private bool _suppressArtisticStyleApply;
     private readonly IEnhancedLauncherService _enhancedLauncher;
@@ -209,6 +224,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         WorldExpansionOptions.Single(option => option.Value == WorldExpansion.CurrentEql)
             .SetSelectedSilently(true);
         OptionPreview = new TextureOptionPreviewViewModel(_workflow);
+        OptionPreview.PropertyChanged += OnOptionPreviewPropertyChanged;
         var rememberedPreferences = _preferences.Read();
         var rememberedStyle = (rememberedPreferences.PaintedStyle
             ?? PaintedStyleSettings.Default).Clamped();
@@ -350,6 +366,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             {
                 _ = RememberInstallPathAsync(normalized);
             }
+
+            RefreshArtisticWorkerStatus();
         }
     }
 
@@ -425,6 +443,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _isBusy, value))
             {
+                NotifyArtisticWorkerEditabilityChanged();
                 UpdateOptionPreviewSuspension();
                 RefreshCommands();
             }
@@ -528,7 +547,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         field = clamped;
         OnPropertyChanged(propertyName);
         PersistPaintedStyle();
-        UpdateOptionPreviewSelection();
+        UpdateEstimate();
     }
 
     private void ResetPaintedStyle()
@@ -547,27 +566,29 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(PaintedColorSimplification));
         OnPropertyChanged(nameof(PaintedCanvasGrain));
         PersistPaintedStyle();
-        UpdateOptionPreviewSelection();
+        UpdateEstimate();
     }
 
     private void PersistPaintedStyle()
     {
         var style = EffectivePaintedStyleOrDefault;
-        _ = Task.Run(async () =>
+        _ = PersistPaintedStyleAsync(style);
+    }
+
+    private async Task PersistPaintedStyleAsync(PaintedStyleSettings style)
+    {
+        try
         {
-            try
-            {
-                await _preferences
-                    .WritePaintedStyleAsync(style == PaintedStyleSettings.Default ? null : style)
-                    .ConfigureAwait(false);
-            }
-            catch (Exception exception) when (exception is
-                IOException or UnauthorizedAccessException or InvalidOperationException)
-            {
-                // Remembering slider positions is best-effort; the build itself
-                // always uses the live in-memory values.
-            }
-        });
+            await _preferences
+                .WritePaintedStyleAsync(style == PaintedStyleSettings.Default ? null : style)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            // Remembering slider positions is best-effort; the build itself
+            // always uses the live in-memory values.
+        }
     }
 
     private PaintedStyleSettings EffectivePaintedStyleOrDefault => new PaintedStyleSettings(
@@ -601,7 +622,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             if (SetProperty(ref _bakedDepth, clamped))
             {
                 PersistLighting();
-                UpdateOptionPreviewSelection();
+                UpdateEstimate();
             }
         }
     }
@@ -615,7 +636,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             if (SetProperty(ref _emissiveGlow, clamped))
             {
                 PersistLighting();
-                UpdateOptionPreviewSelection();
+                UpdateEstimate();
             }
         }
     }
@@ -629,7 +650,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             if (SetProperty(ref _mipSharpen, clamped))
             {
                 PersistLighting();
-                UpdateOptionPreviewSelection();
+                UpdateEstimate();
             }
         }
     }
@@ -639,10 +660,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         get => _fullResolutionRepaint;
         set
         {
+            if (!CanEditFullResolutionRepaint)
+            {
+                return;
+            }
+
             if (SetProperty(ref _fullResolutionRepaint, value))
             {
                 PersistLighting();
-                UpdateOptionPreviewSelection();
+                UpdateEstimate();
             }
         }
     }
@@ -653,19 +679,27 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         var glow = _emissiveGlow;
         var fullResolution = _fullResolutionRepaint;
         var mipSharpen = _mipSharpen;
-        _ = Task.Run(async () =>
+        _ = PersistLightingAsync(depth, glow, fullResolution, mipSharpen);
+    }
+
+    private async Task PersistLightingAsync(
+        double depth,
+        double glow,
+        bool fullResolution,
+        double mipSharpen)
+    {
+        try
         {
-            try
-            {
-                await _preferences.WriteEnhancementsAsync(depth, glow, fullResolution, mipSharpen).ConfigureAwait(false);
-            }
-            catch (Exception exception) when (exception is
-                IOException or UnauthorizedAccessException or InvalidOperationException)
-            {
-                // Remembering slider positions is best-effort; the build itself
-                // always uses the live in-memory values.
-            }
-        });
+            await _preferences
+                .WriteEnhancementsAsync(depth, glow, fullResolution, mipSharpen)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            // Remembering slider positions is best-effort; the build itself
+            // always uses the live in-memory values.
+        }
     }
 
     public ScopeOptionViewModel SelectedScopeOption
@@ -1344,13 +1378,32 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         await OptionPreview.WaitForIdleAsync().ConfigureAwait(true);
     }
 
-    public async Task DrainOptionPreviewForShutdownAsync()
+    public async Task DrainForShutdownAsync()
     {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        _isShutdownRequested = true;
         _isOptionPreviewSectionSuspended = true;
         OptionPreview.SetSuspended(
             true,
-            "Live preview is stopping before SpinTexture closes.");
-        await OptionPreview.WaitForIdleAsync().ConfigureAwait(true);
+            "Active work is stopping safely before SpinTexture closes.");
+        Cancel();
+
+        var routeDrain = CancelAndDrainArtisticWorkerRouteRefreshAsync();
+        await Task.WhenAll(
+                AnalyzeCommand.WaitForCompletionAsync(),
+                BuildStagedPackCommand.WaitForCompletionAsync(),
+                InstallLatestPackCommand.WaitForCompletionAsync(),
+                PlayEnhancedCommand.WaitForCompletionAsync(),
+                RestoreCommand.WaitForCompletionAsync(),
+                SetupArtisticWorkerCommand.WaitForCompletionAsync(),
+                RemoveArtisticWorkerCommand.WaitForCompletionAsync(),
+                OptionPreview.WaitForIdleAsync(),
+                routeDrain)
+            .ConfigureAwait(true);
     }
 
     public void ResumeOptionPreviewForBuildSection()
@@ -1366,6 +1419,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private void UpdateOptionPreviewSuspension()
     {
+        if (_isDisposed)
+        {
+            return;
+        }
+
         string? reason = IsBusy
             ? "Live preview is paused while the active workflow finishes."
             : _isOptionPreviewSectionSuspended
@@ -1693,6 +1751,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         InstallLatestPackCommand.Cancel();
         PlayEnhancedCommand.Cancel();
         RestoreCommand.Cancel();
+        SetupArtisticWorkerCommand.Cancel();
+        RemoveArtisticWorkerCommand.Cancel();
         StatusText = "Canceling safely…";
     }
 
@@ -1997,7 +2057,20 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             InstallAfterBuild: false,
             IsSelectedZoneScope ? SelectedZone : null,
             PaintedTheme: EffectivePaintedTheme,
-            WorldExpansions: EffectiveWorldExpansionSelection);
+            WorldExpansions: EffectiveWorldExpansionSelection,
+            PaintedStyle: EffectivePaintedStyle,
+            BakedDepth: _bakedDepth,
+            EmissiveGlow: _emissiveGlow,
+            FullResolutionRepaint: _fullResolutionRepaint,
+            MipSharpen: _mipSharpen,
+            ArtisticWorkerFingerprint: IsArtisticWorkerEnabled
+                ? _artisticWorkerFingerprint ?? PendingExternalEtaIdentity
+                : null,
+            ArtisticWorkerPreset: IsArtisticWorkerEnabled
+                ? _artisticWorkerFingerprint is null
+                    ? SelectedArtisticStyleOption?.Key
+                    : _artisticWorkerPreset
+                : null);
         if (TryUpdateEstimateFromHistory(estimateOptions))
         {
             return;
@@ -2076,13 +2149,21 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             _ => 0.18
         };
         double minutes = Math.Max(1, archiveCount * minutesPerArchive);
+        if (SelectedPresetOption.Value == TexturePreset.Illustrated
+            && IsArtisticWorkerEnabled)
+        {
+            minutes *= FullResolutionRepaint ? 6.0 : 3.5;
+        }
 
         EstimatedOutputText = $"≈ {FormatBytes(estimatedBytes)}";
         EstimatedArchivesText = $"≈ {archiveCount:N0} archives";
         EstimatedTimeText = minutes < 60
             ? $"~{Math.Ceiling(minutes):N0}–{Math.Ceiling(minutes * 1.8):N0} min"
             : $"~{minutes / 60:0.0}–{minutes * 1.8 / 60:0.0} hr";
-        EstimateBasisText = "First-run planning range from the selected archive count and preset cost; actual GPU speed and texture dimensions can move it.";
+        EstimateBasisText = SelectedPresetOption.Value == TexturePreset.Illustrated
+                            && IsArtisticWorkerEnabled
+            ? "First-run diffusion planning range; tiled full-resolution repaint, GPU speed, and texture dimensions can move it substantially. A completed build with this exact worker and style will replace this fallback."
+            : "First-run planning range from the selected archive count and preset cost; actual GPU speed and texture dimensions can move it.";
     }
 
     private bool TryUpdateEstimateFromHistory(UpscaleOptions options)
@@ -2150,6 +2231,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private void UpdateOptionPreviewSelection()
     {
+        if (_isDisposed)
+        {
+            return;
+        }
+
         var previewOptions = new UpscaleOptions(
             SelectedPresetOption.Value,
             SelectedScopeOption.Value,
@@ -2163,7 +2249,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             BakedDepth: _bakedDepth,
             EmissiveGlow: _emissiveGlow,
             FullResolutionRepaint: _fullResolutionRepaint,
-            MipSharpen: _mipSharpen);
+            MipSharpen: _mipSharpen,
+            ArtisticWorkerFingerprint: IsArtisticWorkerEnabled
+                ? _artisticWorkerFingerprint ?? PendingExternalEtaIdentity
+                : null,
+            ArtisticWorkerPreset: IsArtisticWorkerEnabled
+                ? _artisticWorkerFingerprint is null
+                    ? SelectedArtisticStyleOption?.Key
+                    : _artisticWorkerPreset
+                : null);
         OptionPreview.UpdateSelection(
             InstallPath,
             previewOptions,
@@ -2200,12 +2294,65 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _isArtisticWorkerInstalled, value);
     }
 
+    public bool IsArtisticWorkerEnabled
+    {
+        get => _isArtisticWorkerEnabled;
+        private set
+        {
+            if (!SetProperty(ref _isArtisticWorkerEnabled, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(AreBuiltInPaintedStyleControlsEnabled));
+            NotifyArtisticWorkerEditabilityChanged();
+            OnPropertyChanged(nameof(PaintedStyleControlsHelpText));
+        }
+    }
+
+    public bool AreBuiltInPaintedStyleControlsEnabled => !IsArtisticWorkerEnabled;
+
+    public bool CanEditArtisticWorkerSettings =>
+        IsArtisticWorkerEnabled
+        && _isManagedArtisticWorkerActive
+        && _isArtisticWorkerRouteResolved
+        && !IsBusy
+        && !OptionPreview.IsLoading;
+
+    public bool CanEditFullResolutionRepaint =>
+        IsArtisticWorkerEnabled
+        && _isArtisticWorkerRouteResolved
+        && !IsBusy
+        && !OptionPreview.IsLoading;
+
+    private void NotifyArtisticWorkerEditabilityChanged()
+    {
+        OnPropertyChanged(nameof(CanEditArtisticWorkerSettings));
+        OnPropertyChanged(nameof(CanEditFullResolutionRepaint));
+    }
+
+    private void OnOptionPreviewPropertyChanged(
+        object? sender,
+        System.ComponentModel.PropertyChangedEventArgs eventArgs)
+    {
+        if (eventArgs.PropertyName == nameof(TextureOptionPreviewViewModel.IsLoading))
+        {
+            NotifyArtisticWorkerEditabilityChanged();
+        }
+    }
+
+    public string PaintedStyleControlsHelpText => IsArtisticWorkerEnabled
+        ? "Stylization strength still controls the painted-theme finish. Stroke size, stroke strength, detail preservation, color simplification, and canvas grain belong to the built-in painter and are disabled while verified diffusion repaint is active. Diffusion style, theme, and lighting choices are recorded so repairs reproduce the same look."
+        : "Style sliders shape the painterly finish for new Graphic Painted builds and are recorded in the pack so repairs reproduce the same look. Use Live Settings Preview to judge them on your own textures.";
+
     public ArtisticStyleOptionViewModel? SelectedArtisticStyleOption
     {
         get => _selectedArtisticStyleOption;
         set
         {
-            if (value is null || !SetProperty(ref _selectedArtisticStyleOption, value))
+            if (value is null
+                || (!_suppressArtisticStyleApply && !CanEditArtisticWorkerSettings)
+                || !SetProperty(ref _selectedArtisticStyleOption, value))
             {
                 return;
             }
@@ -2228,15 +2375,27 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     isError: true);
             }
 
-            RefreshArtisticStyleOptions();
+            RefreshArtisticWorkerStatus();
         }
     }
 
     private void RefreshArtisticWorkerStatus()
     {
-        var status = _artisticWorkerSetup.GetStatus();
-        IsArtisticWorkerInstalled = status.IsInstalled;
-        ArtisticWorkerStatusText = status switch
+        if (_isDisposed || _isShutdownRequested)
+        {
+            return;
+        }
+
+        CancelArtisticWorkerRouteRefresh();
+        var managedStatus = _artisticWorkerSetup.GetStatus();
+        IsArtisticWorkerInstalled = managedStatus.IsInstalled;
+        _isManagedArtisticWorkerActive = managedStatus.IsEnabled;
+        _isArtisticWorkerRouteResolved = false;
+        IsArtisticWorkerEnabled = managedStatus.IsEnabled;
+        _artisticWorkerFingerprint = null;
+        _artisticWorkerPreset = null;
+        NotifyArtisticWorkerEditabilityChanged();
+        ArtisticWorkerStatusText = managedStatus switch
         {
             { IsInstalled: false } =>
                 "Not installed. One click downloads a pinned, SHA-256-verified toolchain (~2.9 GB): the "
@@ -2245,7 +2404,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 + "repainted. The worker is verified on this PC before it is enabled.",
             { IsEnabled: true } =>
                 "Installed and verified. Graphic Painted builds repaint each texture with the diffusion worker using the "
-                + "art style below; the style sliders do not apply. The painted theme still runs on top \u2014 choose "
+                + "art style below. Stylization strength controls the theme finish; the five built-in brush controls are disabled. The painted theme still runs on top \u2014 choose "
                 + "Classic painted to see the art style with no extra color treatment. Builds take several times longer \u2014 try one zone first. "
                 + "After updating SpinTexture, run setup again once to refresh the worker recipe.",
             var disabled =>
@@ -2253,6 +2412,188 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         };
         RefreshArtisticStyleOptions();
         RemoveArtisticWorkerCommand?.RaiseCanExecuteChanged();
+
+        var refreshVersion = Interlocked.Increment(ref _artisticWorkerRefreshVersion);
+        if (!IsClientSignaturePresent)
+        {
+            _isArtisticWorkerRouteResolved = true;
+            NotifyArtisticWorkerEditabilityChanged();
+            UpdateEstimate();
+            return;
+        }
+
+        var refreshCancellation = new CancellationTokenSource();
+        _artisticWorkerRouteCancellation = refreshCancellation;
+        var refreshTask = RefreshEffectiveArtisticWorkerRouteAsync(
+            refreshVersion,
+            managedStatus,
+            refreshCancellation);
+        _artisticWorkerRouteRefreshTask = refreshTask;
+        lock (_artisticWorkerRouteTasksGate)
+        {
+            _artisticWorkerRouteTasks.Add(refreshTask);
+        }
+
+        _ = TrackArtisticWorkerRouteRefreshAsync(refreshTask);
+    }
+
+    private async Task RefreshEffectiveArtisticWorkerRouteAsync(
+        int refreshVersion,
+        ArtisticWorkerSetupStatus managedStatus,
+        CancellationTokenSource refreshCancellation)
+    {
+        try
+        {
+            var cancellationToken = refreshCancellation.Token;
+            var route = await _workflow
+                .ResolveArtisticWorkerRouteAsync(InstallPath, cancellationToken)
+                .ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!CanApplyArtisticWorkerRouteRefresh(refreshVersion, cancellationToken))
+            {
+                return;
+            }
+
+            if (route is null)
+            {
+                _isManagedArtisticWorkerActive = false;
+                IsArtisticWorkerEnabled = false;
+                _artisticWorkerFingerprint = null;
+                _artisticWorkerPreset = null;
+                ArtisticWorkerStatusText = managedStatus switch
+                {
+                    { IsInstalled: false } => ArtisticWorkerStatusText,
+                    { IsEnabled: false } =>
+                        $"Installed but disabled: {managedStatus.DisabledReason} Run setup again to retry verification.",
+                    _ => "The managed diffusion worker is installed, but the active build tool route could not discover it. Run setup again before starting a painted build."
+                };
+            }
+            else if (!route.HasVerifiedIdentity)
+            {
+                _isManagedArtisticWorkerActive = false;
+                IsArtisticWorkerEnabled = false;
+                _artisticWorkerFingerprint = null;
+                _artisticWorkerPreset = null;
+                ArtisticWorkerStatusText =
+                    $"A diffusion worker was found at {route.WorkerPath}, but its renderer identity is unsafe: {route.IdentityError} Painted builds will not publish until it is repaired or removed.";
+            }
+            else
+            {
+                var managedWorkerPath = Path.Combine(
+                    _artisticWorkerSetup.WorkerDirectory,
+                    "worker.bat");
+                _isManagedArtisticWorkerActive = string.Equals(
+                    Path.TrimEndingDirectorySeparator(Path.GetFullPath(route.WorkerPath)),
+                    Path.TrimEndingDirectorySeparator(Path.GetFullPath(managedWorkerPath)),
+                    StringComparison.OrdinalIgnoreCase);
+                IsArtisticWorkerEnabled = true;
+                _artisticWorkerFingerprint = route.Fingerprint;
+                _artisticWorkerPreset = route.Preset;
+                ArtisticWorkerStatusText = _isManagedArtisticWorkerActive
+                    ? "Installed and verified. Graphic Painted builds use the managed diffusion worker and the editable art style below. Stylization strength still controls the theme finish; the five built-in brush controls are disabled. Builds take several times longer — try one zone first."
+                    : $"Verified external diffusion worker active: {route.WorkerPath}. The build will use this override exactly; its style is managed outside SpinTexture, so local art-style controls are read-only. Exact worker identity is recorded for previews, timing, resume, and repair.";
+            }
+
+            _isArtisticWorkerRouteResolved = true;
+            NotifyArtisticWorkerEditabilityChanged();
+            RefreshArtisticStyleOptions();
+            UpdateEstimate();
+        }
+        catch (OperationCanceledException) when (refreshCancellation.IsCancellationRequested)
+        {
+            // A newer install/worker selection or view-model disposal owns the UI now.
+        }
+        catch (Exception exception)
+        {
+            if (!CanApplyArtisticWorkerRouteRefresh(
+                    refreshVersion,
+                    refreshCancellation.Token))
+            {
+                return;
+            }
+
+            _isManagedArtisticWorkerActive = false;
+            _isArtisticWorkerRouteResolved = true;
+            IsArtisticWorkerEnabled = false;
+            _artisticWorkerFingerprint = null;
+            _artisticWorkerPreset = null;
+            ArtisticWorkerStatusText =
+                $"The effective diffusion worker route could not be checked: {exception.Message}";
+            NotifyArtisticWorkerEditabilityChanged();
+            UpdateEstimate();
+        }
+        finally
+        {
+            Interlocked.CompareExchange(
+                ref _artisticWorkerRouteCancellation,
+                null,
+                refreshCancellation);
+            refreshCancellation.Dispose();
+        }
+    }
+
+    private bool CanApplyArtisticWorkerRouteRefresh(
+        int refreshVersion,
+        CancellationToken cancellationToken) =>
+        !_isDisposed
+        && !cancellationToken.IsCancellationRequested
+        && refreshVersion == Volatile.Read(ref _artisticWorkerRefreshVersion);
+
+    private void CancelArtisticWorkerRouteRefresh()
+    {
+        var cancellation = Interlocked.Exchange(
+            ref _artisticWorkerRouteCancellation,
+            null);
+        cancellation?.Cancel();
+    }
+
+    private async Task CancelAndDrainArtisticWorkerRouteRefreshAsync()
+    {
+        CancelArtisticWorkerRouteRefresh();
+        Task[] refreshTasks;
+        lock (_artisticWorkerRouteTasksGate)
+        {
+            refreshTasks = _artisticWorkerRouteTasks.ToArray();
+        }
+
+        await Task.WhenAll(refreshTasks).ConfigureAwait(true);
+        lock (_artisticWorkerRouteTasksGate)
+        {
+            foreach (var refreshTask in refreshTasks)
+            {
+                _artisticWorkerRouteTasks.Remove(refreshTask);
+            }
+
+            if (_artisticWorkerRouteRefreshTask?.IsCompleted == true)
+            {
+                _artisticWorkerRouteRefreshTask = null;
+            }
+        }
+    }
+
+    private async Task TrackArtisticWorkerRouteRefreshAsync(Task refreshTask)
+    {
+        try
+        {
+            await refreshTask.ConfigureAwait(true);
+        }
+        catch
+        {
+            // RefreshEffectiveArtisticWorkerRouteAsync reports every expected
+            // route failure. This observer exists only to keep lifetime
+            // tracking correct if a truly unexpected fault escapes it.
+        }
+        finally
+        {
+            lock (_artisticWorkerRouteTasksGate)
+            {
+                _artisticWorkerRouteTasks.Remove(refreshTask);
+                if (ReferenceEquals(_artisticWorkerRouteRefreshTask, refreshTask))
+                {
+                    _artisticWorkerRouteRefreshTask = null;
+                }
+            }
+        }
     }
 
     private void RefreshArtisticStyleOptions()
@@ -2260,6 +2601,28 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _suppressArtisticStyleApply = true;
         try
         {
+            if (IsArtisticWorkerEnabled && !_isManagedArtisticWorkerActive)
+            {
+                ArtisticStyleOptions.Clear();
+                var external = new ArtisticStyleOptionViewModel(
+                    ExternalWorkerStyleKey,
+                    string.IsNullOrWhiteSpace(_artisticWorkerPreset)
+                        ? "External worker style"
+                        : $"External: {_artisticWorkerPreset}",
+                    "The effective worker comes from a workspace or environment override. Its configuration is included in the renderer identity but is intentionally read-only in this setup panel.");
+                ArtisticStyleOptions.Add(external);
+                _selectedArtisticStyleOption = external;
+                OnPropertyChanged(nameof(SelectedArtisticStyleOption));
+                return;
+            }
+
+            if (ArtisticStyleOptions.Any(option =>
+                    option.Key == ExternalWorkerStyleKey))
+            {
+                ArtisticStyleOptions.Clear();
+                _selectedArtisticStyleOption = null;
+            }
+
             if (ArtisticStyleOptions.Count == 0)
             {
                 foreach (var preset in ArtisticWorkerSetupService.StylePresets)
@@ -2326,6 +2689,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         IsBusy = true;
         try
         {
+            await CancelAndDrainArtisticWorkerRouteRefreshAsync().ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+
             // The bundled Real-ESRGAN provides the sharp 4x base the diffusion
             // repaint works from; resolve it from the portable layout even
             // before a client is analyzed.
@@ -2343,7 +2709,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 return;
             }
 
-            AddLog("INFO", "Artistic worker setup started. Downloads are pinned and SHA-256 verified; re-running setup resumes safely.");
+            AddLog("INFO", "Artistic worker setup started. Downloads are pinned and SHA-256 verified; completed components are reused, while an interrupted component restarts safely.");
             var progress = new Progress<ProgressUpdate>(update =>
             {
                 StatusText = update.Message;
@@ -2366,8 +2732,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             if (failure is not null)
             {
                 AddLog("WARN", $"Artistic worker verification failed: {failure}");
+                var previousWorkerRemainsEnabled = _artisticWorkerSetup.GetStatus().IsEnabled;
                 _dialogs.ShowArtisticWorkerNotice(
-                    $"The worker was installed but did not pass verification, so it stays disabled and builds are unaffected.\n\n{failure}",
+                    previousWorkerRemainsEnabled
+                        ? $"The replacement did not pass verification, so it was rejected. Your previous verified worker remains enabled and unchanged.\n\n{failure}"
+                        : $"The worker was installed but did not pass verification, so it stays disabled and builds are unaffected.\n\n{failure}",
                     isError: true);
             }
             else
@@ -2380,7 +2749,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
         catch (OperationCanceledException)
         {
-            AddLog("WARN", "Artistic worker setup was cancelled; run setup again to resume the remaining downloads.");
+            AddLog("WARN", "Artistic worker setup was cancelled; completed verified components were kept, and the interrupted component will restart when setup runs again.");
         }
         catch (Exception exception) when (exception is IOException
             or UnauthorizedAccessException
@@ -2389,8 +2758,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             or InvalidOperationException)
         {
             AddLog("WARN", $"Artistic worker setup failed: {exception.Message}");
+            var previousWorkerRemainsEnabled = _artisticWorkerSetup.GetStatus().IsEnabled;
             _dialogs.ShowArtisticWorkerNotice(
-                $"Setup did not complete: {exception.Message}\n\nNothing was enabled. Run setup again to resume; verified components are kept.",
+                previousWorkerRemainsEnabled
+                    ? $"The replacement setup did not complete: {exception.Message}\n\nYour previous verified worker remains enabled and unchanged. Completed verified components were kept; run setup again to retry."
+                    : $"Setup did not complete: {exception.Message}\n\nNothing was enabled. Completed verified components were kept; run setup again to retry. An interrupted component download restarts from the beginning.",
                 isError: true);
         }
         finally
@@ -2407,8 +2779,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
 
+        IsBusy = true;
         try
         {
+            await CancelAndDrainArtisticWorkerRouteRefreshAsync().ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
             await Task.Run(_artisticWorkerSetup.Remove, cancellationToken).ConfigureAwait(true);
             AddLog("INFO", "Artistic worker removed. Graphic Painted Fantasy uses the built-in painterly stylization again.");
         }
@@ -2418,8 +2793,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 $"The worker could not be fully removed: {exception.Message}",
                 isError: true);
         }
-
-        RefreshArtisticWorkerStatus();
+        finally
+        {
+            IsBusy = false;
+            RefreshArtisticWorkerStatus();
+        }
     }
 
     private static async Task WriteVerificationImageAsync(string path, int size)
@@ -2452,6 +2830,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private void RefreshCommands()
     {
+        if (_isDisposed)
+        {
+            return;
+        }
+
         BrowseCommand.RaiseCanExecuteChanged();
         AnalyzeCommand.RaiseCanExecuteChanged();
         BuildStagedPackCommand.RaiseCanExecuteChanged();
@@ -2500,6 +2883,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public void Dispose()
     {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        _isDisposed = true;
+        Interlocked.Increment(ref _artisticWorkerRefreshVersion);
+        CancelArtisticWorkerRouteRefresh();
         _buildProgressTimer.Stop();
         _buildProgressTimer.Tick -= OnBuildProgressTimerTick;
         AnalyzeCommand.Dispose();
@@ -2507,6 +2898,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         InstallLatestPackCommand.Dispose();
         PlayEnhancedCommand.Dispose();
         RestoreCommand.Dispose();
+        SetupArtisticWorkerCommand.Dispose();
+        RemoveArtisticWorkerCommand.Dispose();
+        OptionPreview.PropertyChanged -= OnOptionPreviewPropertyChanged;
         OptionPreview.Dispose();
+        _artisticWorkerRouteRefreshTask = null;
     }
 }
