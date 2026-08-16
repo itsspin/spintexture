@@ -223,6 +223,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                 var entryAllowed = IsEntryAllowed(
                     context.RelativeInstallPath,
                     entry.Name);
+                var retriedPreservedOriginal = false;
                 if (entryAllowed)
                 {
                     counter.Discover(entry.UncompressedSize);
@@ -588,6 +589,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                             TryDeleteTemporaryFile(sourceTexturePath);
                             continue;
                         }
+
+                        retriedPreservedOriginal = true;
                     }
                 }
 
@@ -647,7 +650,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                                 Path.GetFileName(context.RelativeInstallPath))),
                         HasMaskedColorKey: maskedColorKeyTextures.Contains(entry.Name)
                             && metadata.FileFormat == TextureFileFormat.Bmp
-                            && metadata.BitsPerPixel == 8)));
+                            && metadata.BitsPerPixel == 8),
+                    RetriedPreservedOriginal: retriedPreservedOriginal));
             }
 
             await ProcessPendingTexturesAsync(
@@ -813,14 +817,16 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                     ExceptionDispatchInfo.Capture(outcome.Error).Throw();
                 }
 
-                if (requireRequestedVisualProfile)
+                if (requireRequestedVisualProfile && !item.RetriedPreservedOriginal)
                 {
                     throw new InvalidDataException(
                         $"Repair stopped because {item.Entry.Name} could not be regenerated with the pack's requested painted profile. The completed baseline remains unchanged.",
                         outcome.Error);
                 }
 
-                counter.Preserve("Texture processing failed safely");
+                counter.Preserve(item.RetriedPreservedOriginal
+                    ? "Previously preserved texture stayed original after retry"
+                    : "Texture processing failed safely");
                 counter.Warn(
                     $"{item.Entry.Name} was kept original because its enhanced output failed validation: "
                     + outcome.Error.Message);
@@ -901,14 +907,16 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                                                    or InvalidDataException
                                                    or NotSupportedException)
             {
-                if (requireRequestedVisualProfile)
+                if (requireRequestedVisualProfile && !item.RetriedPreservedOriginal)
                 {
                     throw new InvalidDataException(
                         $"Repair stopped because {item.Entry.Name} could not be validated with the pack's requested painted profile. The completed baseline remains unchanged.",
                         exception);
                 }
 
-                counter.Preserve("Texture processing failed safely");
+                counter.Preserve(item.RetriedPreservedOriginal
+                    ? "Previously preserved texture stayed original after retry"
+                    : "Texture processing failed safely");
                 counter.Warn(
                     $"{item.Entry.Name} was kept original because its enhanced output failed validation: "
                     + exception.Message);
@@ -1790,5 +1798,11 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         string SourceTexturePath,
         string EnhancedTexturePath,
         TextureMetadata Metadata,
-        NativeTextureProcessRequest Request);
+        NativeTextureProcessRequest Request,
+        // True when the completed pack already ships this entry as its
+        // byte-identical original and this pass is merely re-attempting it
+        // under widened eligibility. Keeping it original on failure is the
+        // status quo, not a style mix, so such entries never abort a
+        // strict painted repair.
+        bool RetriedPreservedOriginal = false);
 }

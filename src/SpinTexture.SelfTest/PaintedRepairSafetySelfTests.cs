@@ -29,6 +29,8 @@ internal static class PaintedRepairSafetySelfTests
             .ConfigureAwait(false);
         await TestFailureCannotPublishMixedReplacementAsync(cancellationToken)
             .ConfigureAwait(false);
+        await TestRetriedPreservedFailureKeepsOriginalAsync(cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private static async Task TestLegacyPaintedManualReprocessFailsClosedAsync(
@@ -568,6 +570,79 @@ internal static class PaintedRepairSafetySelfTests
                     await repairedArchive.ReadEntryAsync("surface.tga", cancellationToken).ConfigureAwait(false),
                     $"valid painted texture bytes for {archiveName}");
             }
+        }
+        finally
+        {
+            DeleteTree(root);
+        }
+    }
+
+    /// <summary>
+    /// A member the completed pack already ships as its byte-identical
+    /// original (previously preserved) is merely re-attempted by the
+    /// expanded-coverage retry. If that attempt fails, keeping the original
+    /// is the status quo — the strict painted repair must continue instead
+    /// of aborting the whole pack over a texture that was never painted.
+    /// </summary>
+    private static async Task TestRetriedPreservedFailureKeepsOriginalAsync(
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-painted-retry-preserved-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var sourcePath = Path.Combine(root, "source.s3d");
+            var baselinePath = Path.Combine(root, "baseline.s3d");
+            var destinationPath = Path.Combine(root, "repaired.s3d");
+            var originalTexture = CreateTarga(32, 32, seed: 11);
+            await WriteArchiveAsync(sourcePath, [new("retry.tga", originalTexture)], cancellationToken)
+                .ConfigureAwait(false);
+            await WriteArchiveAsync(baselinePath, [new("retry.tga", originalTexture)], cancellationToken)
+                .ConfigureAwait(false);
+            var fingerprint = await FileIntegrity.FingerprintAsync(baselinePath, cancellationToken)
+                .ConfigureAwait(false);
+            var builder = new PfsTextureArchiveBuilder(
+                UnavailableProcessor(),
+                new TextureBuildCounter(),
+                retryUnchangedEntries: true,
+                rebuildFromReuseArchive: true,
+                requireRequestedVisualProfile: true,
+                allowRequestedVisualProfileRegeneration: true,
+                reuseArchivePaths: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["painted.s3d"] = baselinePath
+                },
+                reuseArchiveFingerprints: new Dictionary<string, StagedPackFileFingerprint>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["painted.s3d"] = new(fingerprint.Length, fingerprint.Sha256)
+                },
+                processBatch: (requests, _) =>
+                {
+                    AssertEqual(1, requests.Count, "retried preserved request count");
+                    return Task.FromResult<IReadOnlyList<NativeTextureProcessOutcome>>(
+                    [
+                        new NativeTextureProcessOutcome(
+                            null,
+                            new NotSupportedException("synthetic painted failure"))
+                    ]);
+                });
+
+            await builder.BuildAsync(
+                    CreateContext(root, sourcePath, destinationPath),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            Assert(
+                File.Exists(destinationPath),
+                "retried preserved failure still publishes the repaired archive");
+            await using var repairedArchive = await PfsArchive.OpenAsync(
+                destinationPath,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            AssertSequenceEqual(
+                originalTexture,
+                await repairedArchive.ReadEntryAsync("retry.tga", cancellationToken).ConfigureAwait(false),
+                "retried preserved member keeps its original bytes");
         }
         finally
         {
