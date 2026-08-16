@@ -31,6 +31,8 @@ internal static class PaintedRepairSafetySelfTests
             .ConfigureAwait(false);
         await TestRetriedPreservedFailureKeepsOriginalAsync(cancellationToken)
             .ConfigureAwait(false);
+        await TestRetriedPreservedFailureSurvivesForeignCompressionAsync(cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private static async Task TestLegacyPaintedManualReprocessFailsClosedAsync(
@@ -650,6 +652,116 @@ internal static class PaintedRepairSafetySelfTests
         }
     }
 
+    /// <summary>
+    /// Real client archives were compressed by the game's own packer, so a
+    /// preserved member's stored deflate stream rarely matches this writer's.
+    /// A repair that keeps such a member original must still validate and
+    /// publish: the decoded member bytes are the safety invariant, not the
+    /// compressed stream that carries them.
+    /// </summary>
+    private static async Task TestRetriedPreservedFailureSurvivesForeignCompressionAsync(
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-painted-foreign-stored-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var sourcePath = Path.Combine(root, "source.s3d");
+            var baselinePath = Path.Combine(root, "baseline.s3d");
+            var destinationPath = Path.Combine(root, "repaired.s3d");
+            var preservedTexture = CreateTarga(32, 32, seed: 11);
+            var paintableTexture = CreateTarga(48, 48, seed: 23);
+            // A smaller chunk size stands in for the game packer's different
+            // deflate output: identical member bytes, different stored bytes.
+            await WriteArchiveAsync(
+                    sourcePath,
+                    [new("retry.tga", preservedTexture), new("wall.tga", paintableTexture)],
+                    cancellationToken,
+                    new PfsArchiveWriteOptions { ChunkSize = 1024 })
+                .ConfigureAwait(false);
+            await WriteArchiveAsync(
+                    baselinePath,
+                    [new("retry.tga", preservedTexture), new("wall.tga", paintableTexture)],
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var fingerprint = await FileIntegrity.FingerprintAsync(baselinePath, cancellationToken)
+                .ConfigureAwait(false);
+            var paintedDimensions = UpscaleDimensions.Calculate(48, 48, 128);
+            var paintedTexture = CreateTarga(
+                paintedDimensions.OutputWidth,
+                paintedDimensions.OutputHeight,
+                seed: 41);
+            var builder = new PfsTextureArchiveBuilder(
+                UnavailableProcessor(),
+                new TextureBuildCounter(),
+                retryUnchangedEntries: true,
+                rebuildFromReuseArchive: true,
+                requireRequestedVisualProfile: true,
+                allowRequestedVisualProfileRegeneration: true,
+                reuseArchivePaths: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["painted.s3d"] = baselinePath
+                },
+                reuseArchiveFingerprints: new Dictionary<string, StagedPackFileFingerprint>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["painted.s3d"] = new(fingerprint.Length, fingerprint.Sha256)
+                },
+                processBatch: async (requests, token) =>
+                {
+                    AssertEqual(2, requests.Count, "foreign-compression retry request count");
+                    var outcomes = new NativeTextureProcessOutcome[requests.Count];
+                    for (var index = 0; index < requests.Count; index++)
+                    {
+                        var request = requests[index];
+                        if (request.Metadata.Width == 32)
+                        {
+                            outcomes[index] = new NativeTextureProcessOutcome(
+                                null,
+                                new NotSupportedException("synthetic painted failure"));
+                            continue;
+                        }
+
+                        await File.WriteAllBytesAsync(request.DestinationPath, paintedTexture, token)
+                            .ConfigureAwait(false);
+                        outcomes[index] = new NativeTextureProcessOutcome(
+                            new NativeTextureProcessResult(
+                                request.DestinationPath,
+                                paintedDimensions,
+                                "Synthetic illustrated dark gothic finishing",
+                                TimeSpan.Zero),
+                            null);
+                    }
+
+                    return outcomes;
+                });
+
+            await builder.BuildAsync(
+                    CreateContext(root, sourcePath, destinationPath),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            Assert(
+                File.Exists(destinationPath),
+                "foreign-compression repair publishes the repaired archive");
+            await using var repairedArchive = await PfsArchive.OpenAsync(
+                destinationPath,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            AssertSequenceEqual(
+                preservedTexture,
+                await repairedArchive.ReadEntryAsync("retry.tga", cancellationToken).ConfigureAwait(false),
+                "foreign-compression preserved member keeps its original bytes");
+            AssertSequenceEqual(
+                paintedTexture,
+                await repairedArchive.ReadEntryAsync("wall.tga", cancellationToken).ConfigureAwait(false),
+                "foreign-compression painted member ships the regenerated bytes");
+        }
+        finally
+        {
+            DeleteTree(root);
+        }
+    }
+
     private static PfsTextureArchiveBuilder CreateStrictBuilder(
         string baselinePath,
         Func<IReadOnlyList<NativeTextureProcessRequest>, CancellationToken,
@@ -701,10 +813,11 @@ internal static class PaintedRepairSafetySelfTests
     private static async Task WriteArchiveAsync(
         string path,
         IReadOnlyList<PfsArchiveItem> entries,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        PfsArchiveWriteOptions? options = null)
     {
         await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-        await PfsArchiveWriter.WriteAsync(stream, entries, cancellationToken: cancellationToken)
+        await PfsArchiveWriter.WriteAsync(stream, entries, options, cancellationToken)
             .ConfigureAwait(false);
     }
 

@@ -831,7 +831,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                     $"{item.Entry.Name} was kept original because its enhanced output failed validation: "
                     + outcome.Error.Message);
                 TryDeleteTemporaryFile(item.EnhancedTexturePath);
-                if (rebuildFromReuseArchive)
+                if (rebuildFromReuseArchive && !item.RetriedPreservedOriginal)
                 {
                     replacements.Add(PfsArchiveReplacement.FromFile(
                         item.Entry.Name,
@@ -839,6 +839,9 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                 }
                 else
                 {
+                    // A retried previously-preserved member already ships its
+                    // byte-identical original in the repair baseline, so the raw
+                    // stored range is carried forward without recompression.
                     TryDeleteTemporaryFile(item.SourceTexturePath);
                 }
 
@@ -921,7 +924,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                     $"{item.Entry.Name} was kept original because its enhanced output failed validation: "
                     + exception.Message);
                 TryDeleteTemporaryFile(item.EnhancedTexturePath);
-                if (rebuildFromReuseArchive)
+                if (rebuildFromReuseArchive && !item.RetriedPreservedOriginal)
                 {
                     replacements.Add(PfsArchiveReplacement.FromFile(
                         item.Entry.Name,
@@ -1385,7 +1388,18 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                     .ConfigureAwait(false);
                 if (!CryptographicOperations.FixedTimeEquals(sourceHash, rebuiltHash))
                 {
-                    throw new InvalidDataException($"Preserved archive member changed bytes: {sourceEntry.Name}.");
+                    // Restored members and repair baselines are recompressed by
+                    // this writer, whose deflate stream can legitimately differ
+                    // from the original packer's for identical content. Only the
+                    // decoded bytes decide whether the member actually changed.
+                    var sourcePayload = await source.ReadEntryAsync(sourceEntry.Name, cancellationToken)
+                        .ConfigureAwait(false);
+                    var rebuiltPayload = await rebuilt.ReadEntryAsync(rebuiltEntry.Name, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (!sourcePayload.AsSpan().SequenceEqual(rebuiltPayload))
+                    {
+                        throw new InvalidDataException($"Preserved archive member changed bytes: {sourceEntry.Name}.");
+                    }
                 }
             }
         }
