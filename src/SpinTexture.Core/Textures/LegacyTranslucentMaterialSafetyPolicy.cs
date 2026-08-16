@@ -3,6 +3,71 @@ using System.Buffers.Binary;
 namespace SpinTexture.Core.Textures;
 
 /// <summary>
+/// Describes every classic WLD material route that references one logical
+/// texture. Keeping this context intact lets the archive builder distinguish
+/// true water/glass animation contracts from a static opaque wall atlas that
+/// is deliberately shared with a passable material variant.
+/// </summary>
+public sealed record LegacyMaterialTextureUsage(
+    string LogicalName,
+    IReadOnlyList<uint> MaterialTypes,
+    bool HasAnimatedReference)
+{
+    public bool HasBlendedReference => MaterialTypes.Any(
+        LegacyTranslucentMaterialSafetyPolicy.IsBlendedMaterialType);
+
+    public bool HasMaskedReference => MaterialTypes.Contains(
+        LegacyTranslucentMaterialSafetyPolicy.MaskedMaterialTypeValue);
+
+    public bool HasClassicDiffuseReference => MaterialTypes.Any(
+        LegacyTranslucentMaterialSafetyPolicy.IsClassicDiffuseMaterialType);
+
+    public bool IsStaticDiffusePassableDualUseCandidate =>
+        !HasAnimatedReference
+        && MaterialTypes.Contains(
+            LegacyTranslucentMaterialSafetyPolicy.TransparentMaskedPassableMaterialType)
+        && HasClassicDiffuseReference
+        && MaterialTypes.All(type =>
+            type == LegacyTranslucentMaterialSafetyPolicy
+                .TransparentMaskedPassableMaterialType
+            || LegacyTranslucentMaterialSafetyPolicy
+                .IsClassicDiffuseMaterialType(type));
+
+    internal bool WasLegacyBitRuleMisclassified => MaterialTypes.Any(
+        LegacyTranslucentMaterialSafetyPolicy.WasLegacyBitRuleMisclassified);
+}
+
+/// <summary>
+/// Immutable per-texture material-reference analysis for one or more WLDs.
+/// </summary>
+public sealed class LegacyMaterialReferenceContext
+{
+    private readonly IReadOnlyDictionary<string, LegacyMaterialTextureUsage> usages;
+
+    internal LegacyMaterialReferenceContext(
+        IReadOnlyDictionary<string, LegacyMaterialTextureUsage> usages,
+        bool isComplete)
+    {
+        this.usages = usages;
+        IsComplete = isComplete;
+    }
+
+    public IReadOnlyDictionary<string, LegacyMaterialTextureUsage> Usages => usages;
+
+    /// <summary>
+    /// True only when every material/bitmap reference in every contributing
+    /// WLD was structurally resolved. Coverage exceptions must fail closed
+    /// when a graph is truncated or otherwise ambiguous.
+    /// </summary>
+    public bool IsComplete { get; }
+
+    public bool TryGetUsage(
+        string logicalName,
+        out LegacyMaterialTextureUsage? usage) =>
+        usages.TryGetValue(logicalName, out usage);
+}
+
+/// <summary>
 /// Finds bitmap payloads owned by semi-transparent legacy WLD materials.
 /// Their animation frames, dimensions, and material flags form one renderer
 /// contract; enhancing individual bitmaps can make water, glass, or similar
@@ -20,7 +85,8 @@ public static class LegacyTranslucentMaterialSafetyPolicy
     private const uint BitmapInfoReferenceFragment = 0x05;
     private const uint MaterialFragment = 0x30;
     private const uint MaterialTypeMask = 0x7FFF_FFFF;
-    private const uint MaskedMaterialType = 0x13;
+    internal const uint MaskedMaterialTypeValue = 0x13;
+    internal const uint TransparentMaskedPassableMaterialType = 0x07;
 
     private static readonly byte[] StringKey =
         [0x95, 0x3A, 0xC5, 0x2A, 0x95, 0x7A, 0x95, 0x6A];
@@ -32,9 +98,10 @@ public static class LegacyTranslucentMaterialSafetyPolicy
     /// </summary>
     public static IReadOnlySet<string> FindProtectedTextureNames(
         ReadOnlySpan<byte> wldPayload)
-        => FindTextureNamesByMaterial(
-            wldPayload,
-            IsBlendedMaterial);
+        => Analyze(wldPayload).Usages.Values
+            .Where(usage => usage.HasBlendedReference)
+            .Select(usage => usage.LogicalName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Returns every bitmap filename referenced by a WLD material rendered
@@ -44,9 +111,10 @@ public static class LegacyTranslucentMaterialSafetyPolicy
     /// </summary>
     public static IReadOnlySet<string> FindMaskedTextureNames(
         ReadOnlySpan<byte> wldPayload)
-        => FindTextureNamesByMaterial(
-            wldPayload,
-            static parameters => NormalizeMaterialType(parameters) == MaskedMaterialType);
+        => Analyze(wldPayload).Usages.Values
+            .Where(usage => usage.HasMaskedReference)
+            .Select(usage => usage.LogicalName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Finds textures whose treatment changed when the legacy material value
@@ -58,22 +126,192 @@ public static class LegacyTranslucentMaterialSafetyPolicy
     /// </summary>
     internal static IReadOnlySet<string> FindLegacyBitRuleMisclassifiedTextureNames(
         ReadOnlySpan<byte> wldPayload)
-        => FindTextureNamesByMaterial(
+        => Analyze(wldPayload).Usages.Values
+            .Where(usage => usage.WasLegacyBitRuleMisclassified)
+            .Select(usage => usage.LogicalName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Parses the complete material graph once and retains usage type and
+    /// animation context per logical texture name.
+    /// </summary>
+    public static LegacyMaterialReferenceContext Analyze(
+        ReadOnlySpan<byte> wldPayload)
+    {
+        var empty = new LegacyMaterialReferenceContext(
+            new Dictionary<string, LegacyMaterialTextureUsage>(
+                StringComparer.OrdinalIgnoreCase),
+            isComplete: false);
+        if (wldPayload.Length < 28
+            || BinaryPrimitives.ReadUInt32LittleEndian(wldPayload) != WldMagic
+            || BinaryPrimitives.ReadUInt32LittleEndian(wldPayload.Slice(4, 4))
+                != OldWldVersion)
+        {
+            return empty;
+        }
+
+        var stringTableLength = BinaryPrimitives.ReadUInt32LittleEndian(
+            wldPayload.Slice(20, sizeof(uint)));
+        if (stringTableLength > int.MaxValue
+            || 28L + stringTableLength > wldPayload.Length)
+        {
+            return empty;
+        }
+
+        var expectedFragmentCount = BinaryPrimitives.ReadUInt32LittleEndian(
+            wldPayload.Slice(8, sizeof(uint)));
+        if (expectedFragmentCount > int.MaxValue)
+        {
+            return empty;
+        }
+
+        var fragments = ParseFragments(
             wldPayload,
-            static parameters =>
+            checked(28 + (int)stringTableLength));
+        if (fragments is null
+            || fragments.Count != (int)expectedFragmentCount)
+        {
+            return empty;
+        }
+
+        var isComplete = true;
+        var mutable = new Dictionary<string, MutableTextureUsage>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var material in fragments.Where(fragment =>
+                     fragment.Type == MaterialFragment))
+        {
+            if (material.Data.Length < 24)
             {
-                var legacyBlended = (parameters & 0x0C) != 0;
-                var legacyMasked = (parameters & 0x10) != 0 && !legacyBlended;
-                return legacyBlended != IsBlendedMaterial(parameters)
-                    || legacyMasked
-                        != (NormalizeMaterialType(parameters) == MaskedMaterialType);
-            });
+                isComplete = false;
+                continue;
+            }
+
+            var materialType = NormalizeMaterialType(
+                BinaryPrimitives.ReadUInt32LittleEndian(
+                    material.Data.Span.Slice(4, sizeof(uint))));
+            if (!TryResolve(
+                    fragments,
+                    BinaryPrimitives.ReadUInt32LittleEndian(
+                        material.Data.Span.Slice(20, sizeof(uint))),
+                    BitmapInfoReferenceFragment,
+                    out var infoReference)
+                || infoReference.Data.Length < sizeof(uint)
+                || !TryResolve(
+                    fragments,
+                    BinaryPrimitives.ReadUInt32LittleEndian(
+                        infoReference.Data.Span),
+                    BitmapInfoFragment,
+                    out var bitmapInfo)
+                || bitmapInfo.Data.Length < 8)
+            {
+                isComplete = false;
+                continue;
+            }
+
+            var bitmapCount = BinaryPrimitives.ReadUInt32LittleEndian(
+                bitmapInfo.Data.Span.Slice(4, sizeof(uint)));
+            if (bitmapCount == 0
+                || bitmapCount > int.MaxValue
+                || bitmapCount * sizeof(uint) > bitmapInfo.Data.Length - 8)
+            {
+                isComplete = false;
+                continue;
+            }
+
+            var referencesOffset = checked(
+                bitmapInfo.Data.Length - (int)bitmapCount * sizeof(uint));
+            for (var bitmapIndex = 0; bitmapIndex < (int)bitmapCount; bitmapIndex++)
+            {
+                var bitmapReference = BinaryPrimitives.ReadUInt32LittleEndian(
+                    bitmapInfo.Data.Span.Slice(
+                        referencesOffset + bitmapIndex * sizeof(uint),
+                        sizeof(uint)));
+                if (!TryResolve(
+                        fragments,
+                        bitmapReference,
+                        BitmapNameFragment,
+                        out var bitmapName))
+                {
+                    isComplete = false;
+                    continue;
+                }
+
+                if (!TryReadBitmapNames(bitmapName.Data.Span, out var names)
+                    || names.Count == 0)
+                {
+                    isComplete = false;
+                    continue;
+                }
+                var animatedReference = bitmapCount > 1 || names.Count > 1;
+                foreach (var name in names)
+                {
+                    if (!mutable.TryGetValue(name, out var usage))
+                    {
+                        usage = new MutableTextureUsage(name);
+                        mutable.Add(name, usage);
+                    }
+
+                    usage.MaterialTypes.Add(materialType);
+                    usage.HasAnimatedReference |= animatedReference;
+                }
+            }
+        }
+
+        return new LegacyMaterialReferenceContext(
+            mutable.ToDictionary(
+                pair => pair.Key,
+                pair => new LegacyMaterialTextureUsage(
+                    pair.Value.LogicalName,
+                    pair.Value.MaterialTypes.Order().ToArray(),
+                    pair.Value.HasAnimatedReference),
+                StringComparer.OrdinalIgnoreCase),
+            isComplete);
+    }
+
+    /// <summary>
+    /// Combines contexts from every WLD member in one archive without losing
+    /// a stricter material type or animation reference from another graph.
+    /// </summary>
+    public static LegacyMaterialReferenceContext Combine(
+        IEnumerable<LegacyMaterialReferenceContext> contexts)
+    {
+        ArgumentNullException.ThrowIfNull(contexts);
+        var mutable = new Dictionary<string, MutableTextureUsage>(
+            StringComparer.OrdinalIgnoreCase);
+        var isComplete = true;
+        foreach (var context in contexts)
+        {
+            ArgumentNullException.ThrowIfNull(context);
+            isComplete &= context.IsComplete;
+            foreach (var item in context.Usages.Values)
+            {
+                if (!mutable.TryGetValue(item.LogicalName, out var usage))
+                {
+                    usage = new MutableTextureUsage(item.LogicalName);
+                    mutable.Add(item.LogicalName, usage);
+                }
+
+                usage.MaterialTypes.UnionWith(item.MaterialTypes);
+                usage.HasAnimatedReference |= item.HasAnimatedReference;
+            }
+        }
+
+        return new LegacyMaterialReferenceContext(
+            mutable.ToDictionary(
+                pair => pair.Key,
+                pair => new LegacyMaterialTextureUsage(
+                    pair.Value.LogicalName,
+                    pair.Value.MaterialTypes.Order().ToArray(),
+                    pair.Value.HasAnimatedReference),
+                StringComparer.OrdinalIgnoreCase),
+            isComplete);
+    }
 
     private static uint NormalizeMaterialType(uint parameters) =>
         parameters & MaterialTypeMask;
 
-    private static bool IsBlendedMaterial(uint parameters) =>
-        NormalizeMaterialType(parameters) switch
+    internal static bool IsBlendedMaterialType(uint materialType) =>
+        materialType switch
         {
             // Transparent 50%, masked/passable, 25%, 75%, and additive.
             0x05 or 0x07 or 0x09 or 0x0A or 0x0B or 0x17 => true,
@@ -84,104 +322,19 @@ public static class LegacyTranslucentMaterialSafetyPolicy
             _ => false
         };
 
-    private static IReadOnlySet<string> FindTextureNamesByMaterial(
-        ReadOnlySpan<byte> wldPayload,
-        Func<uint, bool> materialMatches)
+    internal static bool IsClassicDiffuseMaterialType(uint materialType) =>
+        materialType is 0x01 or 0x02 or 0x0D or 0x12 or 0x14 or 0x15
+            or 0x19 or 0x31 or 0x553;
+
+    internal static bool WasLegacyBitRuleMisclassified(uint materialType)
     {
-        var protectedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (wldPayload.Length < 28
-            || BinaryPrimitives.ReadUInt32LittleEndian(wldPayload) != WldMagic
-            || BinaryPrimitives.ReadUInt32LittleEndian(wldPayload.Slice(4, 4))
-                != OldWldVersion)
-        {
-            return protectedNames;
-        }
-
-        var stringTableLength = BinaryPrimitives.ReadUInt32LittleEndian(
-            wldPayload.Slice(20, sizeof(uint)));
-        if (stringTableLength > int.MaxValue
-            || 28L + stringTableLength > wldPayload.Length)
-        {
-            return protectedNames;
-        }
-
-        var fragments = ParseFragments(
-            wldPayload,
-            checked(28 + (int)stringTableLength));
-        if (fragments.Count == 0)
-        {
-            return protectedNames;
-        }
-
-        foreach (var material in fragments.Where(fragment =>
-                     fragment.Type == MaterialFragment
-                     && fragment.Data.Length >= 8))
-        {
-            var parameters = BinaryPrimitives.ReadUInt32LittleEndian(
-                material.Data.Span.Slice(4, sizeof(uint)));
-            if (!materialMatches(parameters))
-            {
-                continue;
-            }
-
-            // The material's texture-info reference is the sixth DWORD after
-            // the fragment header in every supported old-format zone WLD.
-            // Do not scan arbitrary material fields as references: colors and
-            // floats can coincidentally equal valid fragment indices.
-            if (material.Data.Length < 24
-                || !TryResolve(
-                    fragments,
-                    BinaryPrimitives.ReadUInt32LittleEndian(material.Data.Span.Slice(20, 4)),
-                    BitmapInfoReferenceFragment,
-                    out var infoReference)
-                || infoReference.Data.Length < 4
-                || !TryResolve(
-                    fragments,
-                    BinaryPrimitives.ReadUInt32LittleEndian(infoReference.Data.Span),
-                    BitmapInfoFragment,
-                    out var bitmapInfo)
-                || bitmapInfo.Data.Length < 8)
-            {
-                continue;
-            }
-
-            var bitmapCount = BinaryPrimitives.ReadUInt32LittleEndian(
-                bitmapInfo.Data.Span.Slice(4, 4));
-            if (bitmapCount == 0
-                || bitmapCount > int.MaxValue
-                || bitmapCount * sizeof(uint) > bitmapInfo.Data.Length - 8)
-            {
-                continue;
-            }
-
-            // Optional animation timing fields precede the reference list.
-            // Taking the final Count DWORDs is format-stable for static and
-            // animated 0x04 fragments and avoids interpreting the timer as a
-            // fragment reference.
-            var referencesOffset = checked(
-                bitmapInfo.Data.Length - (int)bitmapCount * sizeof(uint));
-            for (var bitmapIndex = 0; bitmapIndex < (int)bitmapCount; bitmapIndex++)
-            {
-                var bitmapReference = BinaryPrimitives.ReadUInt32LittleEndian(
-                    bitmapInfo.Data.Span.Slice(
-                        referencesOffset + bitmapIndex * sizeof(uint),
-                        sizeof(uint)));
-                if (!TryResolve(fragments, bitmapReference, BitmapNameFragment, out var bitmapName))
-                {
-                    continue;
-                }
-
-                foreach (var name in ReadBitmapNames(bitmapName.Data.Span))
-                {
-                    protectedNames.Add(name);
-                }
-            }
-        }
-
-        return protectedNames;
+        var legacyBlended = (materialType & 0x0C) != 0;
+        var legacyMasked = (materialType & 0x10) != 0 && !legacyBlended;
+        return legacyBlended != IsBlendedMaterialType(materialType)
+            || legacyMasked != (materialType == MaskedMaterialTypeValue);
     }
 
-    private static List<WldFragment> ParseFragments(
+    private static List<WldFragment>? ParseFragments(
         ReadOnlySpan<byte> payload,
         int offset)
     {
@@ -192,7 +345,7 @@ public static class LegacyTranslucentMaterialSafetyPolicy
                 payload.Slice(offset, sizeof(uint)));
             if (size < 4 || size > int.MaxValue || offset + 8L + size > payload.Length)
             {
-                return [];
+                return null;
             }
 
             var type = BinaryPrimitives.ReadUInt32LittleEndian(
@@ -213,7 +366,7 @@ public static class LegacyTranslucentMaterialSafetyPolicy
                 && (suffix.IndexOfAnyExcept((byte)0) < 0
                     || suffix.IndexOfAnyExcept((byte)0xFF) < 0))
             ? fragments
-            : [];
+            : null;
     }
 
     private static bool TryResolve(
@@ -232,12 +385,15 @@ public static class LegacyTranslucentMaterialSafetyPolicy
         return fragment.Type == expectedType;
     }
 
-    private static IReadOnlyList<string> ReadBitmapNames(ReadOnlySpan<byte> data)
+    private static bool TryReadBitmapNames(
+        ReadOnlySpan<byte> data,
+        out IReadOnlyList<string> names)
     {
-        var names = new List<string>();
+        var parsed = new List<string>();
+        names = parsed;
         if (data.Length < 6)
         {
-            return names;
+            return false;
         }
 
         // Old client WLD 0x03 data starts with a reserved DWORD, followed by
@@ -247,15 +403,24 @@ public static class LegacyTranslucentMaterialSafetyPolicy
         {
             if (offset > data.Length - sizeof(ushort))
             {
-                return names;
+                return data.Slice(offset).IndexOfAnyExcept((byte)0) < 0;
             }
 
             var length = BinaryPrimitives.ReadUInt16LittleEndian(
                 data.Slice(offset, sizeof(ushort)));
             offset += sizeof(ushort);
-            if (length == 0 || offset > data.Length - length)
+            if (length == 0)
             {
-                return names;
+                // Real 0x03 fragments are DWORD-aligned and use a zero length
+                // followed only by zero bytes as padding/termination. A zero
+                // record before any nonzero tail is ambiguous and therefore
+                // cannot contribute static-reference proof.
+                return data.Slice(offset).IndexOfAnyExcept((byte)0) < 0;
+            }
+
+            if (offset > data.Length - length)
+            {
+                return false;
             }
 
             var encoded = data.Slice(offset, length);
@@ -268,22 +433,34 @@ public static class LegacyTranslucentMaterialSafetyPolicy
 
             var terminator = Array.IndexOf(decoded, (byte)0);
             var nameLength = terminator >= 0 ? terminator : decoded.Length;
-            if (nameLength > 0)
+            if (nameLength == 0)
             {
-                var name = System.Text.Encoding.ASCII.GetString(decoded, 0, nameLength);
-                if (!Path.IsPathRooted(name)
-                    && !name.Contains(Path.DirectorySeparatorChar)
-                    && !name.Contains(Path.AltDirectorySeparatorChar)
-                    && name is not "." and not "..")
-                {
-                    names.Add(name);
-                }
+                return false;
             }
 
+            var name = System.Text.Encoding.ASCII.GetString(decoded, 0, nameLength);
+            if (Path.IsPathRooted(name)
+                || name.Contains(Path.DirectorySeparatorChar)
+                || name.Contains(Path.AltDirectorySeparatorChar)
+                || name is "." or "..")
+            {
+                return false;
+            }
+
+            parsed.Add(name);
             offset += length;
         }
 
-        return names;
+        return true;
+    }
+
+    private sealed class MutableTextureUsage(string logicalName)
+    {
+        public string LogicalName { get; } = logicalName;
+
+        public HashSet<uint> MaterialTypes { get; } = [];
+
+        public bool HasAnimatedReference { get; set; }
     }
 
     private readonly record struct WldFragment(uint Type, ReadOnlyMemory<byte> Data);

@@ -2396,6 +2396,38 @@ public static class TexturePipelineSelfTests
             TextureKind.Mask,
             classifier.Classify("armor_metallic.dds", modernDds).Kind,
             "modern DDS material maps keep the mask protection");
+        AssertEqual(
+            TextureKind.UserInterface,
+            classifier.Classify("bricktrim&window.bmp", modernDds).Kind,
+            "a DDS payload with ambiguous window vocabulary remains UI without classic WLD proof");
+        AssertEqual(
+            TextureKind.Color,
+            classifier.Classify(
+                "bricktrim&window.bmp",
+                modernDds,
+                isClassicWldDiffuse: true).Kind,
+            "a classic WLD diffuse wall remains color even when its logical BMP contains BC1 DDS bytes");
+        AssertEqual(
+            TextureKind.Color,
+            classifier.Classify(
+                "castle_wall_n.bmp",
+                modernDds,
+                isClassicWldDiffuse: true).Kind,
+            "classic WLD diffuse proof overrides misleading modern normal-map vocabulary");
+        AssertEqual(
+            TextureKind.Color,
+            classifier.Classify(
+                "metal1.bmp",
+                modernDds,
+                isClassicWldDiffuse: true).Kind,
+            "classic WLD diffuse proof overrides misleading modern mask vocabulary");
+        AssertEqual(
+            TextureKind.UserInterface,
+            classifier.Classify(
+                "spell_window.bmp",
+                modernDds,
+                isClassicWldDiffuse: true).Kind,
+            "classic WLD diffuse proof does not exempt genuine UI vocabulary");
 
         // Tall classic trim (up to 16:1) is world art, not a sprite strip.
         var trimBitmap = classicBitmap with { Width = 16, Height = 256 };

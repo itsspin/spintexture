@@ -795,6 +795,9 @@ public sealed class TexturePackWorkflow
                     StringComparison.Ordinal)
                 || ruleId.Equals(
                     TextureProcessingPipeline.PaintedAtCapRepaintRuleId,
+                    StringComparison.Ordinal)
+                || ruleId.Equals(
+                    TextureProcessingPipeline.ClassicWldVisibleSurfaceCoverageRuleId,
                     StringComparison.Ordinal));
 
         if (baseline.Options.Scope == AssetScope.AllSafeTextures
@@ -1073,6 +1076,9 @@ public sealed class TexturePackWorkflow
         var requiresPaintedAtCapRepair = missingRepairRules.Contains(
             TextureProcessingPipeline.PaintedAtCapRepaintRuleId,
             StringComparer.Ordinal);
+        var requiresClassicWldVisibleSurfaceRepair = missingRepairRules.Contains(
+            TextureProcessingPipeline.ClassicWldVisibleSurfaceCoverageRuleId,
+            StringComparer.Ordinal);
         var requiresExternalArtisticWorker =
             recordedRendererOutcome == PaintedRendererOutcome.ExternalOnly;
         var archiveBuilder = new PfsTextureArchiveBuilder(
@@ -1113,6 +1119,8 @@ public sealed class TexturePackWorkflow
             allowRequestedVisualProfileRegeneration: hasReproduciblePaintedProfile,
             repairLegacyMaterialClassification: requiresLegacyMaterialRepair,
             repairPaintedAtCap: requiresPaintedAtCapRepair,
+            repairClassicWldVisibleSurfaceCoverage:
+                requiresClassicWldVisibleSurfaceRepair,
             requireExternalArtisticWorker: requiresExternalArtisticWorker);
         // An archive absent from the baseline has no reusable staged payload.
         // Build it independently from an exact original source; never put it
@@ -1131,6 +1139,8 @@ public sealed class TexturePackWorkflow
             allowRequestedVisualProfileRegeneration: hasReproduciblePaintedProfile,
             repairLegacyMaterialClassification: requiresLegacyMaterialRepair,
             repairPaintedAtCap: requiresPaintedAtCapRepair,
+            repairClassicWldVisibleSurfaceCoverage:
+                requiresClassicWldVisibleSurfaceRepair,
             requireExternalArtisticWorker: requiresExternalArtisticWorker,
             // This builder starts from a verified original rather than from a
             // prior painted archive. A rejected member can therefore remain
@@ -1271,6 +1281,9 @@ public sealed class TexturePackWorkflow
                         StringComparer.Ordinal)
                     || missingRepairRules.Contains(
                         TextureProcessingPipeline.PaintedAtCapRepaintRuleId,
+                        StringComparer.Ordinal)
+                    || missingRepairRules.Contains(
+                        TextureProcessingPipeline.ClassicWldVisibleSurfaceCoverageRuleId,
                         StringComparer.Ordinal);
                 counter.Warn(isManualTextureRevision
                     ? $"Texture revision reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and changed only explicitly reviewed entries."
@@ -1852,6 +1865,32 @@ public sealed class TexturePackWorkflow
                     baselineInfo.Artifacts.Select(artifact =>
                         artifact.CanonicalRelativeInstallPath),
                     baseline.Options.Preset));
+        var sourceRepairMissingRules = TextureProcessingPipeline.GetMissingRepairRuleIds(
+            baselineReport,
+            baseline.Options.Scope,
+            baselineInfo.Artifacts.Select(artifact =>
+                artifact.CanonicalRelativeInstallPath),
+            baseline.Options.Preset);
+        var sourceRepairNeedsClassicWldVisibleSurfaceCoverage =
+            applyTargetedSafetyRepair
+            && sourceRepairMissingRules.Contains(
+                TextureProcessingPipeline.ClassicWldVisibleSurfaceCoverageRuleId,
+                StringComparer.Ordinal);
+        var sourceRepairNeedsLegacyMaterialClassification =
+            applyTargetedSafetyRepair
+            && sourceRepairMissingRules.Contains(
+                TextureProcessingPipeline.LegacyMaterialClassificationRuleId,
+                StringComparer.Ordinal);
+        var sourceRepairNeedsPaintedAtCap = applyTargetedSafetyRepair
+            && sourceRepairMissingRules.Contains(
+                TextureProcessingPipeline.PaintedAtCapRepaintRuleId,
+                StringComparer.Ordinal);
+        var sourceRepairRetriesPreviouslyPreserved = applyTargetedSafetyRepair
+            && (sourceRepairMissingRules.Contains(
+                    TextureProcessingPipeline.ExpandedClassicCoverageRuleId,
+                    StringComparer.Ordinal)
+                || sourceRepairNeedsLegacyMaterialClassification
+                || sourceRepairNeedsPaintedAtCap);
         var originalSources = await PrepareBuildOriginalSourcesAsync(paths, cancellationToken)
             .ConfigureAwait(false);
         var provenance = await LoadManagedInstallProvenanceAsync(paths, cancellationToken)
@@ -1897,12 +1936,17 @@ public sealed class TexturePackWorkflow
                 filterCharacterEquipmentEntries:
                     baseline.Options.Scope is AssetScope.CharactersAndEquipmentOnly
                         or AssetScope.WorldCharactersAndEquipment,
-                retryUnchangedEntries: false,
+                retryUnchangedEntries: sourceRepairRetriesPreviouslyPreserved,
                 rebuildFromReuseArchive: true,
                 reuseArchivePaths: reuseArchivePaths,
                 reuseArchiveFingerprints: reuseArchiveFingerprints,
                 requireRequestedVisualProfile: isPaintedBaseline,
                 allowRequestedVisualProfileRegeneration: hasReproduciblePaintedProfile,
+                repairLegacyMaterialClassification:
+                    sourceRepairNeedsLegacyMaterialClassification,
+                repairPaintedAtCap: sourceRepairNeedsPaintedAtCap,
+                repairClassicWldVisibleSurfaceCoverage:
+                    sourceRepairNeedsClassicWldVisibleSurfaceCoverage,
                 requireExternalArtisticWorker:
                     rendererProvenance.RendererOutcome == PaintedRendererOutcome.ExternalOnly)
             : null;
