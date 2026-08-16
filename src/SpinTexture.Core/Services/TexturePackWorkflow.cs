@@ -238,6 +238,9 @@ public sealed class TexturePackWorkflow
                     ResumedArtifacts = finalizing.ResumedArtifactCount,
                     TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
                     PaintedProfileRevision = GetFreshPaintedProfileRevision(options.Preset),
+                    UsedExternalArtisticWorker = options.Preset == TexturePreset.Illustrated
+                        ? tools.HasArtisticWorker
+                        : null,
                     AppliedRepairRuleIds = TextureProcessingPipeline
                         .GetCurrentRepairRuleIds(
                             options.Scope,
@@ -630,6 +633,32 @@ public sealed class TexturePackWorkflow
         var hasReproduciblePaintedProfile = !requireRequestedVisualProfile
             || (baselineReport?.PaintedProfileRevision ?? 0)
                 == currentPaintedProfileRevision;
+        var counter = new TextureBuildCounter();
+        // Graphic Painted Fantasy has two renderers: the external diffusion
+        // worker and the built-in painterly stylization. A repair regenerates
+        // retried textures with whichever renderer is configured today, so a
+        // mismatch with the pack's recorded renderer would quietly mix two
+        // different art styles into one pack.
+        var recordedArtisticWorker = baselineReport?.UsedExternalArtisticWorker;
+        if (baseline.Options.Preset == TexturePreset.Illustrated
+            && hasReproduciblePaintedProfile
+            && !isManualTextureRevision)
+        {
+            if (recordedArtisticWorker is { } recordedWorker)
+            {
+                if (recordedWorker != tools.HasArtisticWorker)
+                {
+                    throw new InvalidOperationException(recordedWorker
+                        ? "This Graphic Painted Fantasy pack was created with the diffusion repaint worker, but that worker is not currently set up. Run Set Up Diffusion Repaint again (or rebuild the pack) before repairing, so the repair keeps one consistent art style."
+                        : "This Graphic Painted Fantasy pack was created with the built-in painterly stylization, but the diffusion repaint worker is currently enabled. Disable the worker (or rebuild the pack with it) before repairing, so the repair keeps one consistent art style.");
+                }
+            }
+            else
+            {
+                counter.Warn(
+                    "This pack predates painted-renderer provenance; retried textures use the currently configured Graphic Painted Fantasy renderer.");
+            }
+        }
         var archiveScopes = DiscoverArchiveScopes(paths.InstallPath);
         var selectedArchives = SelectArchives(archiveScopes, repairOptions);
         var selectedRelativePaths = selectedArchives
@@ -655,7 +684,6 @@ public sealed class TexturePackWorkflow
                 .ToArray()
             : selectedArchives;
 
-        var counter = new TextureBuildCounter();
         var processor = new NativeTextureProcessor(tools);
         var previewCollector = new TexturePreviewCollector(maximumEntries: 24);
         var archiveBuilder = new PfsTextureArchiveBuilder(
@@ -789,6 +817,13 @@ public sealed class TexturePackWorkflow
             : isTargetedSafetyRepair
                 ? $"Safety repair reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and changed only outputs affected by newer safety rules; source-identical entries were not retried."
                 : $"Repair reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and retried only unchanged eligible entries.");
+        var retriedKeptOriginal = preliminaryStatistics.PreservedReasons.GetValueOrDefault(
+            PfsTextureArchiveBuilder.RetriedPreservedOriginalReason);
+        counter.Warn(
+            $"Repair outcome: {preliminaryStatistics.EnhancedTextures:N0} texture(s) were newly enhanced by this repair"
+            + (retriedKeptOriginal > 0
+                ? $"; {retriedKeptOriginal:N0} retried texture(s) could not be regenerated and kept their verified originals."
+                : "."));
         var statistics = counter.Snapshot();
         if (statistics.EnhancedTextures == 0 && statistics.ReusedTextures == 0)
         {
@@ -819,6 +854,12 @@ public sealed class TexturePackWorkflow
             BaselineTexturePipelineRevision = baselineReport?.TexturePipelineRevision ?? 0,
             TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
             PaintedProfileRevision = baselineReport?.PaintedProfileRevision ?? 0,
+            // A pack that predates renderer provenance regenerated its retried
+            // textures with the currently configured renderer just now, so the
+            // replacement records today's renderer as its identity.
+            UsedExternalArtisticWorker = baseline.Options.Preset == TexturePreset.Illustrated
+                ? recordedArtisticWorker ?? tools.HasArtisticWorker
+                : recordedArtisticWorker,
             AppliedRepairRuleIds = TextureProcessingPipeline
                 .GetCurrentRepairRuleIds(
                     baseline.Options.Scope,
@@ -1116,6 +1157,7 @@ public sealed class TexturePackWorkflow
             SafetyUpgradedArtifacts = safetyUpgradedArtifacts,
             TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
             PaintedProfileRevision = baselineReport?.PaintedProfileRevision ?? 0,
+            UsedExternalArtisticWorker = baselineReport?.UsedExternalArtisticWorker,
             // Record only what this exact-original pass actually applied on
             // top of the pack's prior provenance. Claiming every current rule
             // here would silently mark repairs (such as the masked color-key
@@ -1534,6 +1576,7 @@ public sealed class TexturePackWorkflow
                 ? TextureProcessingPipeline.CurrentRevision
                 : baselineReport?.TexturePipelineRevision ?? 0,
             PaintedProfileRevision = baselineReport?.PaintedProfileRevision ?? 0,
+            UsedExternalArtisticWorker = baselineReport?.UsedExternalArtisticWorker,
             AppliedRepairRuleIds = applyTargetedSafetyRepair
                 ? TextureProcessingPipeline.GetCurrentRepairRuleIds(
                     baseline.Options.Scope,
@@ -1923,6 +1966,178 @@ public sealed class TexturePackWorkflow
         return exactCandidates
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .First();
+    }
+
+    /// <summary>
+    /// Decodes the staged (enhanced or preserved) bytes of one texture inside
+    /// a completed staged pack for on-demand review display. Returns null when
+    /// the member is missing or uses a container the managed decoder does not
+    /// handle (block-compressed DDS).
+    /// </summary>
+    public async Task<DecodedTexturePreview?> LoadStagedTexturePreviewAsync(
+        ProjectPaths paths,
+        string previewManifestPath,
+        string archiveRelativePath,
+        string logicalName,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        var buildDirectory = ResolveBuildDirectoryFromPreviewManifest(paths, previewManifestPath);
+        if (buildDirectory is null)
+        {
+            return null;
+        }
+
+        var payloadRoot = Path.Combine(buildDirectory, "payload");
+        string payloadPath;
+        try
+        {
+            payloadPath = PathGuard.EnsurePathUnderRoot(
+                payloadRoot,
+                Path.Combine(payloadRoot, archiveRelativePath));
+        }
+        catch (InvalidDataException)
+        {
+            return null;
+        }
+
+        return await DecodeArchiveTextureAsync(payloadPath, logicalName, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Decodes the verified original bytes of one texture belonging to a
+    /// completed staged pack, resolving them from the live client when it is
+    /// untouched or from exact managed install backups when the pack (or any
+    /// other) is currently installed. Returns null when no exact original can
+    /// be located or the container is not managed-decodable.
+    /// </summary>
+    public async Task<DecodedTexturePreview?> LoadOriginalTexturePreviewAsync(
+        ProjectPaths paths,
+        string previewManifestPath,
+        string archiveRelativePath,
+        string logicalName,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        var buildDirectory = ResolveBuildDirectoryFromPreviewManifest(paths, previewManifestPath);
+        if (buildDirectory is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var manifest = await manifestStore
+                .ReadBuildManifestAsync(
+                    Path.Combine(buildDirectory, "manifest.json"),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var entry = manifest.Entries.FirstOrDefault(candidate =>
+                candidate.RelativeInstallPath.Equals(
+                    archiveRelativePath,
+                    StringComparison.OrdinalIgnoreCase));
+            if (entry is null)
+            {
+                return null;
+            }
+
+            var livePath = PathGuard.EnsurePathUnderRoot(
+                paths.InstallPath,
+                Path.Combine(paths.InstallPath, entry.RelativeInstallPath));
+            InstallManifest? activeInstall = null;
+            string? activeInstallDirectory = null;
+            var activeInstallPath = FindLatestInstallManifest(paths);
+            if (activeInstallPath is not null)
+            {
+                activeInstall = await manifestStore
+                    .ReadInstallManifestAsync(activeInstallPath, cancellationToken)
+                    .ConfigureAwait(false);
+                activeInstallDirectory = Path.GetDirectoryName(activeInstallPath)!;
+            }
+
+            var sourcePath = await ResolveRepairSourceAsync(
+                    paths,
+                    livePath,
+                    entry,
+                    activeInstall,
+                    activeInstallDirectory,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return await DecodeArchiveTextureAsync(sourcePath, logicalName, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException
+                                               or UnauthorizedAccessException
+                                               or JsonException
+                                               or InvalidDataException
+                                               or InvalidOperationException
+                                               or NotSupportedException)
+        {
+            // On-demand review rendering is best-effort; the gallery shows its
+            // established "unavailable" state instead of failing the window.
+            return null;
+        }
+    }
+
+    private static string? ResolveBuildDirectoryFromPreviewManifest(
+        ProjectPaths paths,
+        string previewManifestPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(previewManifestPath);
+        try
+        {
+            var safeManifestPath = PathGuard.EnsurePathUnderRoot(
+                paths.StagingPath,
+                previewManifestPath);
+            // The preview manifest lives at <build>/previews/preview-manifest.json.
+            var previewsDirectory = Path.GetDirectoryName(safeManifestPath);
+            var buildDirectory = Path.GetDirectoryName(previewsDirectory);
+            return buildDirectory is not null && Directory.Exists(buildDirectory)
+                ? buildDirectory
+                : null;
+        }
+        catch (InvalidDataException)
+        {
+            return null;
+        }
+    }
+
+    private static async Task<DecodedTexturePreview?> DecodeArchiveTextureAsync(
+        string archivePath,
+        string logicalName,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(logicalName);
+        if (!File.Exists(archivePath))
+        {
+            return null;
+        }
+
+        try
+        {
+            await using var archive = await PfsArchive.OpenAsync(
+                archivePath,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (!archive.TryGetEntry(logicalName, out var entry)
+                || entry is null
+                || !entry.IsTexture)
+            {
+                return null;
+            }
+
+            var payload = await archive.ReadEntryAsync(logicalName, cancellationToken)
+                .ConfigureAwait(false);
+            return ClassicTextureDecoder.TryDecode(payload);
+        }
+        catch (Exception exception) when (exception is IOException
+                                               or UnauthorizedAccessException
+                                               or InvalidDataException
+                                               or PfsArchiveException
+                                               or NotSupportedException)
+        {
+            return null;
+        }
     }
 
     public Task<InstallHealthReport> AuditInstallHealthAsync(

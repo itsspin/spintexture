@@ -28,6 +28,11 @@ namespace SpinTexture.Core.Services;
 public static class TextureProcessingPipeline
 {
     public const int CurrentRevision = 9;
+    // Preservation reason recorded when a repair retried a previously
+    // preserved member and safely kept its original bytes; shared so repair
+    // summaries in the workflow and app can count these outcomes.
+    public const string RetriedPreservedOriginalReason =
+        "Previously preserved texture stayed original after retry";
     public const string CharacterEquipmentCoverageRuleId =
         "character-equipment-coverage-v1";
     public const string CutoutMipSafetyRuleId =
@@ -328,6 +333,10 @@ public sealed record TextureBuildReport(
     // Zero is the backward-compatible value for reports written before the
     // Graphic Painted/Rustic profile provenance marker existed.
     public int PaintedProfileRevision { get; init; }
+    // Graphic Painted Fantasy renders through the external diffusion worker
+    // when it is set up and through the built-in painterly stylization when it
+    // is not. Null means the report predates this provenance marker.
+    public bool? UsedExternalArtisticWorker { get; init; }
     public IReadOnlyList<string> AppliedRepairRuleIds { get; init; } = [];
 }
 

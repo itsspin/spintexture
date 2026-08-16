@@ -50,6 +50,9 @@ public static class TexturePipelineSelfTests
         await PaintedRepairSafetySelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Painted repair identity and fail-closed tests passed.")
             .ConfigureAwait(false);
+        await PreviewOnDemandSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
+        await output.WriteLineAsync("On-demand preview decoding tests passed.")
+            .ConfigureAwait(false);
         await StagedPackSourceRepairSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Managed-original build-source and World source-repair tests passed.")
             .ConfigureAwait(false);

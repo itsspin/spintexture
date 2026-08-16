@@ -787,6 +787,20 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             return;
         }
 
+        await InstallCheckedPacksCoreAsync().ConfigureAwait(true);
+    }
+
+    private async Task InstallCheckedPacksCoreAsync()
+    {
+        var selected = Packs
+            .Where(pack => pack.IsSelected && pack.CanSelect)
+            .Select(pack => pack.ManifestPath)
+            .ToArray();
+        if (selected.Length == 0)
+        {
+            return;
+        }
+
         await RunOperationAsync(
             "Verifying and installing the checked pack selection...",
             async (progress, token) =>
@@ -800,6 +814,41 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             },
             successMessage: "The checked packs are installed and active. Existing staged builds remain reusable.")
             .ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// A repair only creates a staged replacement; the game keeps showing the
+    /// previously installed files until the checked selection is installed.
+    /// Summarize what the repair changed and walk the user straight into that
+    /// install so "repaired" reliably means "visible in game".
+    /// </summary>
+    private async Task OfferInstallAfterRepairAsync(IReadOnlyList<TexturePackBuildResult> repairs)
+    {
+        if (repairs.Count == 0 || IsBusy)
+        {
+            return;
+        }
+
+        var newlyEnhanced = repairs.Sum(result => result.Report.Statistics.EnhancedTextures);
+        var retriedKeptOriginal = repairs.Sum(result =>
+            result.Report.Statistics.PreservedReasons.GetValueOrDefault(
+                TextureProcessingPipeline.RetriedPreservedOriginalReason));
+        var summary = $"Repair changed {newlyEnhanced:N0} texture(s)"
+            + (retriedKeptOriginal > 0
+                ? $" and kept {retriedKeptOriginal:N0} retried texture(s) on their verified originals."
+                : ".");
+        StatusText = $"{summary} Install the checked packs to update the game files.";
+
+        var answer = MessageBox.Show(
+            Window.GetWindow(this),
+            $"{summary}\n\nThe corrected replacement is staged and checked, but the game still uses the previously installed files until it is installed. Install the checked packs now?",
+            "Install repaired packs",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+        if (answer == MessageBoxResult.Yes)
+        {
+            await InstallCheckedPacksCoreAsync().ConfigureAwait(true);
+        }
     }
 
     private async void Repair_Click(object sender, RoutedEventArgs e)
@@ -821,18 +870,23 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             return;
         }
 
+        TexturePackBuildResult? repairResult = null;
         await RunOperationAsync(
             pack.CanRepairSourceMismatch
                 ? "Verifying original-source provenance, then applying current texture safety fixes..."
                 : "Hash-verifying prior work and applying only the missing texture safety fixes...",
             async (progress, token) =>
             {
-                var result = await RepairPackAsync(pack, progress, token).ConfigureAwait(false);
-                return result.StagedBuild.ManifestPath;
+                repairResult = await RepairPackAsync(pack, progress, token).ConfigureAwait(false);
+                return repairResult.StagedBuild.ManifestPath;
             },
-            successMessage: "Repair complete. The corrected immutable replacement is checked with your other selected packs; the completed original was not modified.",
+            successMessage: "Repair complete. The corrected immutable replacement is checked; install the checked packs to update the game files.",
             replaceSelectedManifestPath: pack.ManifestPath)
             .ConfigureAwait(true);
+        if (repairResult is not null)
+        {
+            await OfferInstallAfterRepairAsync([repairResult]).ConfigureAwait(true);
+        }
     }
 
     private async void RepairCheckedPacks_Click(object sender, RoutedEventArgs e)
@@ -869,6 +923,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var completed = 0;
         string? lastReplacementManifestPath = null;
+        var completedRepairs = new List<TexturePackBuildResult>();
         var progress = new Progress<ProgressUpdate>(update =>
         {
             var detail = string.IsNullOrWhiteSpace(update.CurrentItem)
@@ -888,6 +943,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                         operationCancellation.Token)
                     .ConfigureAwait(true);
                 lastReplacementManifestPath = result.StagedBuild.ManifestPath;
+                completedRepairs.Add(result);
                 checkedManifestPaths.Remove(Path.GetFullPath(pack.ManifestPath));
                 checkedManifestPaths.Add(Path.GetFullPath(lastReplacementManifestPath));
                 completed++;
@@ -895,7 +951,8 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
 
             IsBusy = false;
             await RefreshAsync(lastReplacementManifestPath, checkedManifestPaths).ConfigureAwait(true);
-            StatusText = $"Repaired {completed:N0} checked pack(s). Each corrected replacement is checked; the completed originals remain unchanged.";
+            StatusText = $"Repaired {completed:N0} checked pack(s). Each corrected replacement is checked; install the checked packs to update the game files.";
+            await OfferInstallAfterRepairAsync(completedRepairs).ConfigureAwait(true);
         }
         catch (OperationCanceledException)
         {
@@ -1190,20 +1247,25 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             {
                 applyChoices = async choices =>
                 {
+                    TexturePackBuildResult? revisionResult = null;
                     await RunOperationAsync(
                         "Hash-verifying the pack and revising only the reviewed textures...",
                         async (progress, token) =>
                         {
-                            var result = await workflow.RepairStagedPackAsync(
+                            revisionResult = await workflow.RepairStagedPackAsync(
                                 paths,
                                 baselineManifestPath,
                                 progress: progress,
                                 cancellationToken: token,
                                 textureOverrides: choices).ConfigureAwait(false);
-                            return result.StagedBuild.ManifestPath;
+                            return revisionResult.StagedBuild.ManifestPath;
                         },
-                        "Texture revision complete. Unselected prior work was reused and the new immutable pack is checked.",
+                        "Texture revision complete. Unselected prior work was reused and the new immutable pack is checked; install the checked packs to update the game files.",
                         replaceSelectedManifestPath: baselineManifestPath).ConfigureAwait(true);
+                    if (revisionResult is not null)
+                    {
+                        await OfferInstallAfterRepairAsync([revisionResult]).ConfigureAwait(true);
+                    }
                 };
             }
 
@@ -1649,12 +1711,18 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             var needsTranslucentMaterialSafety = missingRepairRules.Contains(
                 TextureProcessingPipeline.LegacyTranslucentMaterialSafetyRuleId,
                 StringComparer.Ordinal);
+            var needsExpandedCoverage = missingRepairRules.Contains(
+                TextureProcessingPipeline.ExpandedClassicCoverageRuleId,
+                StringComparer.Ordinal);
             RepairReasonText = BuildRepairReasonText(
                 isCharacterScope,
                 IsTargetedSafetyRepairCandidate,
                 needsCelestialSkySafety,
                 needsCutoutSafety,
-                needsTranslucentMaterialSafety);
+                needsTranslucentMaterialSafety)
+                + (needsExpandedCoverage
+                    ? " Expanded coverage also re-attempts previously preserved classic textures (walls, trim, and similar world art) that are enhanceable now; this one-time pass can take a while on large painted packs."
+                    : string.Empty);
             RepairStatusText = CanRepairSourceMismatch
                 ? "Managed source mismatch detected. Repair verifies original-source provenance first, then applies current texture safety fixes in the same immutable replacement."
                 : RepairReasonText;

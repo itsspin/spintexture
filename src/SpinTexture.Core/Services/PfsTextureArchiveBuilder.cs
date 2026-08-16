@@ -16,6 +16,9 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         "B8G8R8A8_UNORM", "B8G8R8X8_UNORM"
     };
 
+    internal const string RetriedPreservedOriginalReason =
+        TextureProcessingPipeline.RetriedPreservedOriginalReason;
+
     private readonly NativeTextureProcessor processor;
     private readonly TextureHeaderSniffer sniffer;
     private readonly TextureSemanticClassifier classifier;
@@ -825,7 +828,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                 }
 
                 counter.Preserve(item.RetriedPreservedOriginal
-                    ? "Previously preserved texture stayed original after retry"
+                    ? RetriedPreservedOriginalReason
                     : "Texture processing failed safely");
                 counter.Warn(
                     $"{item.Entry.Name} was kept original because its enhanced output failed validation: "
@@ -918,7 +921,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                 }
 
                 counter.Preserve(item.RetriedPreservedOriginal
-                    ? "Previously preserved texture stayed original after retry"
+                    ? RetriedPreservedOriginalReason
                     : "Texture processing failed safely");
                 counter.Warn(
                     $"{item.Entry.Name} was kept original because its enhanced output failed validation: "
