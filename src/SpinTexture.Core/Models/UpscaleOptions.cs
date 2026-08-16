@@ -72,7 +72,16 @@ public sealed record UpscaleOptions(
     // (0 = off, the compatibility default).
     [property: System.Text.Json.Serialization.JsonIgnore(
         Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
-    double MipSharpen = 0)
+    double MipSharpen = 0,
+    // Build-time provenance, populated from the exact external diffusion
+    // worker and worker-config used for Graphic Painted. Keeping it in the
+    // manifest also fences crash-resume plan identity.
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string? ArtisticWorkerFingerprint = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string? ArtisticWorkerPreset = null)
 {
     /// <summary>
     /// The effective painted style: explicit settings when present, otherwise

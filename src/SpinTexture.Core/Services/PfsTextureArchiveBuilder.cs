@@ -31,6 +31,10 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
     private readonly bool rebuildFromReuseArchive;
     private readonly bool requireRequestedVisualProfile;
     private readonly bool allowRequestedVisualProfileRegeneration;
+    private readonly bool repairLegacyMaterialClassification;
+    private readonly bool repairPaintedAtCap;
+    private readonly bool requireExternalArtisticWorker;
+    private readonly bool allowRequestedProfileFailureToKeepOriginal;
     private readonly IReadOnlyDictionary<string, string> reuseArchivePaths;
     private readonly IReadOnlyDictionary<string, StagedPackFileFingerprint> reuseArchiveFingerprints;
     private readonly IStagedPackPayloadMaterializer reuseMaterializer;
@@ -52,6 +56,10 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         bool rebuildFromReuseArchive = false,
         bool requireRequestedVisualProfile = false,
         bool allowRequestedVisualProfileRegeneration = false,
+        bool repairLegacyMaterialClassification = false,
+        bool repairPaintedAtCap = false,
+        bool requireExternalArtisticWorker = false,
+        bool allowRequestedProfileFailureToKeepOriginal = false,
         IReadOnlyDictionary<string, string>? reuseArchivePaths = null,
         IReadOnlyDictionary<string, StagedPackFileFingerprint>? reuseArchiveFingerprints = null,
         IStagedPackPayloadMaterializer? reuseMaterializer = null,
@@ -62,6 +70,22 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
     {
         this.processor = processor ?? throw new ArgumentNullException(nameof(processor));
         this.counter = counter ?? throw new ArgumentNullException(nameof(counter));
+        if (allowRequestedProfileFailureToKeepOriginal
+            && rebuildFromReuseArchive)
+        {
+            throw new ArgumentException(
+                "Verified-original failure retention cannot be enabled for a baseline-reuse rebuild.",
+                nameof(allowRequestedProfileFailureToKeepOriginal));
+        }
+
+        if (allowRequestedProfileFailureToKeepOriginal
+            && !requireRequestedVisualProfile)
+        {
+            throw new ArgumentException(
+                "Verified-original failure retention is only meaningful with strict painted-profile validation.",
+                nameof(allowRequestedProfileFailureToKeepOriginal));
+        }
+
         this.progress = progress;
         this.previewCollector = previewCollector;
         this.sniffer = sniffer ?? new TextureHeaderSniffer();
@@ -74,6 +98,11 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         this.rebuildFromReuseArchive = rebuildFromReuseArchive;
         this.requireRequestedVisualProfile = requireRequestedVisualProfile;
         this.allowRequestedVisualProfileRegeneration = allowRequestedVisualProfileRegeneration;
+        this.repairLegacyMaterialClassification = repairLegacyMaterialClassification;
+        this.repairPaintedAtCap = repairPaintedAtCap;
+        this.requireExternalArtisticWorker = requireExternalArtisticWorker;
+        this.allowRequestedProfileFailureToKeepOriginal =
+            allowRequestedProfileFailureToKeepOriginal;
         this.reuseArchivePaths = reuseArchivePaths
             ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         this.reuseArchiveFingerprints = reuseArchiveFingerprints
@@ -180,6 +209,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
             StringComparer.OrdinalIgnoreCase);
         var maskedColorKeyTextures = new HashSet<string>(
             StringComparer.OrdinalIgnoreCase);
+        var legacyMaterialMisclassifiedTextures = new HashSet<string>(
+            StringComparer.OrdinalIgnoreCase);
         foreach (var wldEntry in source.Entries.Where(entry =>
                      entry.Name.EndsWith(".wld", StringComparison.OrdinalIgnoreCase)))
         {
@@ -189,6 +220,9 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                 LegacyTranslucentMaterialSafetyPolicy.FindProtectedTextureNames(wldPayload));
             maskedColorKeyTextures.UnionWith(
                 LegacyTranslucentMaterialSafetyPolicy.FindMaskedTextureNames(wldPayload));
+            legacyMaterialMisclassifiedTextures.UnionWith(
+                LegacyTranslucentMaterialSafetyPolicy
+                    .FindLegacyBitRuleMisclassifiedTextureNames(wldPayload));
         }
         var textureEntries = source.Entries
             .Where(entry => entry.IsTexture
@@ -214,7 +248,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                 textureEntries
                     .Where(entry => IsEntryAllowed(context.RelativeInstallPath, entry.Name))
                     .ToArray(),
-                context.Options.MaximumDimension);
+                context.Options.MaximumDimension,
+                context.Options.Preset);
         }
 
         try
@@ -411,7 +446,17 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                 }
 
                 var classification = classifier.Classify(entry.Name, metadata);
-                var preservedReason = GetPreservedReason(metadata, classification, context.Options.MaximumDimension);
+                var isPaintedAtCapRepair = repairPaintedAtCap
+                    && IsPaintedPreset(context.Options.Preset)
+                    && Math.Max(metadata.Width, metadata.Height)
+                        == context.Options.MaximumDimension
+                    && classification.CanUseColorUpscaler
+                    && classification.Kind is TextureKind.Color or TextureKind.Cutout;
+                var preservedReason = GetPreservedReason(
+                    metadata,
+                    classification,
+                    context.Options.MaximumDimension,
+                    context.Options.Preset);
                 if (preservedReason is null
                     && metadata.FileFormat == TextureFileFormat.Bmp
                     && metadata.BitsPerPixel == 8
@@ -461,7 +506,53 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                     reviewDimensions.OutputWidth,
                     reviewDimensions.OutputHeight));
 
+                var isLegacyMaterialClassificationRepair =
+                    repairLegacyMaterialClassification
+                    && legacyMaterialMisclassifiedTextures.Contains(entry.Name);
+                var retriesPreviouslyUnchangedOriginal =
+                    isLegacyMaterialClassificationRepair || isPaintedAtCapRepair;
                 if (!forceReprocess
+                    && retriesPreviouslyUnchangedOriginal
+                    && reuseArchive is not null
+                    && reuseArchive.TryGetEntry(entry.Name, out var retryReusedEntry)
+                    && retryReusedEntry is not null)
+                {
+                    var retryReusedTexturePath = Path.Combine(
+                        context.WorkingDirectory,
+                        $"{index:D5}-retry-reused{GetPayloadExtension(entry.Content.Kind)}");
+                    enhancedTexturePaths.Add(retryReusedTexturePath);
+                    await ExtractEntryToFileAsync(
+                        reuseArchive,
+                        retryReusedEntry,
+                        retryReusedTexturePath,
+                        cancellationToken).ConfigureAwait(false);
+                    var baselineStayedOriginal = await FilesEqualAsync(
+                            sourceTexturePath,
+                            retryReusedTexturePath,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    TryDeleteTemporaryFile(retryReusedTexturePath);
+                    if (baselineStayedOriginal)
+                    {
+                        if (!retryUnchangedEntries)
+                        {
+                            counter.Preserve("Source-identical reusable texture");
+                            TryDeleteTemporaryFile(sourceTexturePath);
+                            continue;
+                        }
+
+                        // A false-protected or formerly skipped at-cap member
+                        // is a safe best-effort retry when its verified baseline
+                        // is still the exact original, so a fidelity rejection
+                        // may keep it. A changed legacy output (for example a
+                        // false palette key) does not receive this exemption.
+                        retriedPreservedOriginal = true;
+                    }
+                }
+
+                if (!forceReprocess
+                    && !isLegacyMaterialClassificationRepair
+                    && !isPaintedAtCapRepair
                     && reuseArchive is not null
                     && reuseArchive.TryGetEntry(entry.Name, out var reusedEntry)
                     && reusedEntry is not null)
@@ -653,8 +744,13 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                                 Path.GetFileName(context.RelativeInstallPath))),
                         HasMaskedColorKey: maskedColorKeyTextures.Contains(entry.Name)
                             && metadata.FileFormat == TextureFileFormat.Bmp
-                            && metadata.BitsPerPixel == 8),
-                    RetriedPreservedOriginal: retriedPreservedOriginal));
+                            && metadata.BitsPerPixel == 8,
+                        LogicalName: entry.Name,
+                        SuppressIndexedColorKeyHeuristic:
+                            legacyMaterialMisclassifiedTextures.Contains(entry.Name)
+                            && !maskedColorKeyTextures.Contains(entry.Name)),
+                    RetriedPreservedOriginal: retriedPreservedOriginal
+                        || allowRequestedProfileFailureToKeepOriginal));
             }
 
             await ProcessPendingTexturesAsync(
@@ -868,6 +964,14 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                         $"Repair stopped because {item.Entry.Name} would not use its recorded {item.Request.Options.Preset} processing route. The completed baseline remains unchanged; SpinTexture will not publish a mixed-style replacement.");
                 }
 
+                if (requireExternalArtisticWorker
+                    && item.Request.Options.Preset == TexturePreset.Illustrated
+                    && processResult.UsedBuiltInPaintedRenderer)
+                {
+                    throw new InvalidDataException(
+                        $"Repair stopped because {item.Entry.Name} fell back from its recorded external diffusion renderer to the built-in painter. The completed baseline remains unchanged; SpinTexture will not publish a mixed-renderer replacement.");
+                }
+
                 var enhancedMetadata = await sniffer.ReadFileAsync(
                     item.EnhancedTexturePath,
                     cancellationToken).ConfigureAwait(false);
@@ -892,8 +996,15 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                         item.Metadata.FileFormat,
                         item.Metadata.TexconvFormat,
                         processResult.ExpectedMipCount));
-                counter.Enhanced(enhancedLength);
-                if (usedFallback)
+                counter.Enhanced(enhancedLength, processResult);
+                if (processResult.UsedBoundedRepaintMemoryGuard)
+                {
+                    counter.Fallback();
+                    counter.Warn(processResult.UsedExternalArtisticWorker
+                        ? $"{item.Entry.Name} kept the diffusion renderer but used its bounded single-pass route because a full-resolution tile blend exceeded the safe working-set limit."
+                        : $"{item.Entry.Name} used the memory-bounded built-in painted renderer because both the full-resolution tile blend and one external output exceeded safe limits; this pack is mixed-renderer and must be fully rebuilt rather than repaired.");
+                }
+                else if (usedFallback)
                 {
                     counter.Fallback();
                     counter.Warn(
@@ -1025,13 +1136,18 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         }
     }
 
-    internal static bool IsPotentialCandidate(PfsArchiveEntry entry, int maximumDimension)
+    internal static bool IsPotentialCandidate(
+        PfsArchiveEntry entry,
+        int maximumDimension,
+        TexturePreset preset = TexturePreset.Faithful)
     {
         if (!entry.IsTexture
             || entry.Content.Kind is not (PfsContentKind.Dds or PfsContentKind.Bitmap or PfsContentKind.Targa)
             || entry.Content.Width < 8
             || entry.Content.Height < 8
-            || Math.Max(entry.Content.Width, entry.Content.Height) >= maximumDimension)
+            || Math.Max(entry.Content.Width, entry.Content.Height) > maximumDimension
+            || (Math.Max(entry.Content.Width, entry.Content.Height) == maximumDimension
+                && !IsPaintedPreset(preset)))
         {
             return false;
         }
@@ -1215,7 +1331,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
     private static void EnsureArchiveSizeBudget(
         string sourcePath,
         IReadOnlyList<PfsArchiveEntry> textureEntries,
-        int maximumDimension)
+        int maximumDimension,
+        TexturePreset preset)
     {
         // PFS directory offsets are 32-bit. Use a deliberately conservative
         // preflight so a multi-hour 4K build cannot discover the format limit
@@ -1224,7 +1341,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         var estimatedBytes = new FileInfo(sourcePath).Length;
         foreach (var entry in textureEntries)
         {
-            if (!IsPotentialCandidate(entry, maximumDimension))
+            if (!IsPotentialCandidate(entry, maximumDimension, preset))
             {
                 continue;
             }
@@ -1253,7 +1370,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
     internal static string? GetPreservedReason(
         TextureMetadata metadata,
         TextureClassification classification,
-        int maximumDimension)
+        int maximumDimension,
+        TexturePreset preset = TexturePreset.Faithful)
     {
         if (!metadata.IsSimpleTwoDimensionalTexture)
         {
@@ -1274,7 +1392,9 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
             return "Likely sprite strip or packed cells";
         }
 
-        if (Math.Max(metadata.Width, metadata.Height) >= maximumDimension)
+        if (Math.Max(metadata.Width, metadata.Height) > maximumDimension
+            || (Math.Max(metadata.Width, metadata.Height) == maximumDimension
+                && !IsPaintedPreset(preset)))
         {
             return "Already at the selected resolution cap";
         }
@@ -1290,13 +1410,17 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         if (metadata.FileFormat == TextureFileFormat.Bmp
             && (metadata.BitsPerPixel is not (8 or 32) || metadata.IsCompressed))
         {
-            return "Legacy bitmap representation cannot be reproduced byte-compatibly";
+            return metadata.IsCompressed
+                ? $"Compressed {metadata.BitsPerPixel}-bit BMP encoding is unsupported and was kept original"
+                : $"{metadata.BitsPerPixel}-bit BMP encoding cannot be reproduced safely and was kept original";
         }
 
         if (metadata.FileFormat == TextureFileFormat.Tga
             && (metadata.BitsPerPixel != 32 || metadata.IsCompressed))
         {
-            return "Legacy bitmap representation cannot be reproduced byte-compatibly";
+            return metadata.IsCompressed
+                ? $"Compressed {metadata.BitsPerPixel}-bit TGA encoding is unsupported and was kept original"
+                : $"{metadata.BitsPerPixel}-bit TGA encoding cannot be reproduced safely and was kept original";
         }
 
         if (!classification.CanUseColorUpscaler
@@ -1307,6 +1431,9 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
 
         return null;
     }
+
+    private static bool IsPaintedPreset(TexturePreset preset) =>
+        preset is TexturePreset.Illustrated or TexturePreset.RusticPainted;
 
     private void ValidateEnhancedPayload(
         string logicalName,

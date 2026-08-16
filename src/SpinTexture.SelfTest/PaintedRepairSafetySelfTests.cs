@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using SpinTexture.Core;
 using SpinTexture.Core.Archives;
 using SpinTexture.Core.Models;
@@ -30,6 +31,8 @@ internal static class PaintedRepairSafetySelfTests
         await TestFailureCannotPublishMixedReplacementAsync(cancellationToken)
             .ConfigureAwait(false);
         await TestRetriedPreservedFailureKeepsOriginalAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await TestVerifiedOriginalAdditionFailureKeepsOriginalAsync(cancellationToken)
             .ConfigureAwait(false);
         await TestRetriedPreservedFailureSurvivesForeignCompressionAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -84,7 +87,9 @@ internal static class PaintedRepairSafetySelfTests
                 MaximumDimension: 1024,
                 GenerateMipMaps: false,
                 InstallAfterBuild: false,
-                PaintedTheme: PaintedTheme.ComicInk);
+                PaintedTheme: PaintedTheme.ComicInk,
+                ArtisticWorkerFingerprint: new string('d', 64),
+                ArtisticWorkerPreset: "configured-but-unused");
             var baseline = await new StagedBuildService().BuildAsync(
                     new StagedBuildRequest(
                         paths,
@@ -112,36 +117,39 @@ internal static class PaintedRepairSafetySelfTests
                     TextureProcessingPipeline.ExpandedClassicCoverageRuleId,
                     StringComparison.Ordinal))
                 .ToArray();
+            var rendererReport = new TextureBuildReport(
+                TextureBuildReport.CurrentSchemaVersion,
+                baseline.BuildId,
+                DateTimeOffset.UtcNow,
+                installPath,
+                baseline.BuildDirectory,
+                1,
+                new TextureBuildStatistics(
+                    1,
+                    1,
+                    0,
+                    1,
+                    1,
+                    new Dictionary<string, int>(),
+                    []))
+            {
+                TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
+                PaintedProfileRevision =
+                    TextureBuildReport.CurrentIllustratedProfileRevision,
+                UsedExternalArtisticWorker = true,
+                PaintedRendererOutcome = PaintedRendererOutcome.ExternalOnly,
+                AppliedRepairRuleIds = recordedRules
+            };
+            var reportPath = Path.Combine(baseline.BuildDirectory, "texture-report.json");
             await using (var reportStream = new FileStream(
-                Path.Combine(baseline.BuildDirectory, "texture-report.json"),
+                reportPath,
                 FileMode.CreateNew,
                 FileAccess.Write,
                 FileShare.None))
             {
                 await JsonSerializer.SerializeAsync(
                         reportStream,
-                        new TextureBuildReport(
-                            TextureBuildReport.CurrentSchemaVersion,
-                            baseline.BuildId,
-                            DateTimeOffset.UtcNow,
-                            installPath,
-                            baseline.BuildDirectory,
-                            1,
-                            new TextureBuildStatistics(
-                                1,
-                                1,
-                                0,
-                                1,
-                                1,
-                                new Dictionary<string, int>(),
-                                []))
-                        {
-                            TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
-                            PaintedProfileRevision =
-                                TextureBuildReport.CurrentIllustratedProfileRevision,
-                            UsedExternalArtisticWorker = true,
-                            AppliedRepairRuleIds = recordedRules
-                        },
+                        rendererReport,
                         cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
             }
@@ -168,6 +176,174 @@ internal static class PaintedRepairSafetySelfTests
                         cancellationToken)
                     .ConfigureAwait(false),
                 "renderer mismatch leaves the immutable baseline unchanged");
+
+            await WriteReportAsync(
+                    reportPath,
+                    rendererReport with
+                    {
+                        PaintedRendererOutcome = PaintedRendererOutcome.Mixed
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+            Assert(
+                (await File.ReadAllTextAsync(reportPath, cancellationToken)
+                    .ConfigureAwait(false))
+                .Contains(
+                    "\"paintedRendererOutcome\": \"mixed\"",
+                    StringComparison.Ordinal),
+                "the repair fixture uses the production camel-case string-enum report format");
+            var mixedFailure = await AssertThrowsAsync<InvalidOperationException>(
+                    () => new TexturePackWorkflow(clientClosedGuard: () => { })
+                        .RepairStagedPackAsync(
+                            paths,
+                            baseline.ManifestPath,
+                            cancellationToken: cancellationToken),
+                    "a mixed-renderer pack without per-member provenance must not be repaired")
+                .ConfigureAwait(false);
+            Assert(
+                mixedFailure.Message.Contains("both external-diffusion and built-in", StringComparison.OrdinalIgnoreCase),
+                "mixed-renderer repair refusal must clearly name the integrity problem");
+
+            await WriteReportAsync(
+                    reportPath,
+                    rendererReport with
+                    {
+                        UsedExternalArtisticWorker = null,
+                        ArtisticWorkerFingerprint = null,
+                        ArtisticWorkerPreset = null,
+                        PaintedRendererOutcome = PaintedRendererOutcome.Unknown
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var unknownFailure = await AssertThrowsAsync<InvalidOperationException>(
+                    () => new TexturePackWorkflow(clientClosedGuard: () => { })
+                        .RepairStagedPackAsync(
+                            paths,
+                            baseline.ManifestPath,
+                            cancellationToken: cancellationToken),
+                    "a legacy painted pack with unknown renderer provenance must not gain new pixels")
+                .ConfigureAwait(false);
+            Assert(
+                unknownFailure.Message.Contains(
+                    "predates reliable painted-renderer provenance",
+                    StringComparison.OrdinalIgnoreCase),
+                "unknown-renderer repair refusal must direct the user to a complete rebuild");
+
+            await WriteReportAsync(
+                    reportPath,
+                    rendererReport with
+                    {
+                        SchemaVersion = 3,
+                        UsedExternalArtisticWorker = true,
+                        PaintedRendererOutcome = PaintedRendererOutcome.ExternalOnly
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var legacyAvailabilityFailure = await AssertThrowsAsync<InvalidOperationException>(
+                    () => new TexturePackWorkflow(clientClosedGuard: () => { })
+                        .RepairStagedPackAsync(
+                            paths,
+                            baseline.ManifestPath,
+                            cancellationToken: cancellationToken),
+                    "a schema-3 availability flag must not be promoted into renderer provenance")
+                .ConfigureAwait(false);
+            Assert(
+                legacyAvailabilityFailure.Message.Contains(
+                    "predates reliable painted-renderer provenance",
+                    StringComparison.OrdinalIgnoreCase),
+                "legacy worker availability must require a complete rebuild");
+
+            var fakeWorkerPath = Path.Combine(root, "fake-artistic-worker.exe");
+            await File.WriteAllBytesAsync(
+                    fakeWorkerPath,
+                    "synthetic-worker"u8.ToArray(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var previousWorker = Environment.GetEnvironmentVariable("SPINTEXTURE_ARTISTIC_WORKER");
+            try
+            {
+                await WriteReportAsync(
+                        reportPath,
+                        rendererReport with
+                        {
+                            UsedExternalArtisticWorker = false,
+                            PaintedRendererOutcome = PaintedRendererOutcome.BuiltInOnly
+                        },
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                // The manifest deliberately contains the fingerprint of the
+                // worker that was configured when the build started. Its
+                // completed report is authoritative: every external job fell
+                // back, so a built-in repair with that worker disabled remains
+                // reproducible instead of becoming impossible.
+                Environment.SetEnvironmentVariable("SPINTEXTURE_ARTISTIC_WORKER", null);
+                var builtInRepair = await new TexturePackWorkflow(clientClosedGuard: () => { })
+                    .RepairStagedPackAsync(
+                        paths,
+                        baseline.ManifestPath,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                Assert(
+                    builtInRepair.Report.PaintedRendererOutcome
+                        == PaintedRendererOutcome.BuiltInOnly
+                    && builtInRepair.Report.ArtisticWorkerFingerprint is null,
+                    "built-in-only repair must ignore a configured-but-unused manifest worker identity");
+
+                Environment.SetEnvironmentVariable("SPINTEXTURE_ARTISTIC_WORKER", fakeWorkerPath);
+                var builtInFailure = await AssertThrowsAsync<InvalidOperationException>(
+                        () => new TexturePackWorkflow(clientClosedGuard: () => { })
+                            .RepairStagedPackAsync(
+                                paths,
+                                baseline.ManifestPath,
+                                cancellationToken: cancellationToken),
+                        "a built-in-only pack must not silently adopt an installed external worker")
+                    .ConfigureAwait(false);
+                Assert(
+                    builtInFailure.Message.Contains("built-in painterly", StringComparison.OrdinalIgnoreCase)
+                    && builtInFailure.Message.Contains("enabled", StringComparison.OrdinalIgnoreCase),
+                    "built-in-only repair refusal must explain that the external worker must be disabled");
+
+                await WriteReportAsync(
+                        reportPath,
+                        rendererReport with
+                        {
+                            UsedExternalArtisticWorker = false,
+                            PaintedRendererOutcome = PaintedRendererOutcome.BuiltInOnly,
+                            AppliedRepairRuleIds = TextureProcessingPipeline
+                                .GetCurrentRepairRuleIds(
+                                    options.Scope,
+                                    ["paintzone.s3d"],
+                                    options.Preset)
+                        },
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                var manualMismatch = await AssertThrowsAsync<InvalidOperationException>(
+                        () => new TexturePackWorkflow(clientClosedGuard: () => { })
+                            .RepairStagedPackAsync(
+                                paths,
+                                baseline.ManifestPath,
+                                cancellationToken: cancellationToken,
+                                textureOverrides:
+                                [
+                                    new TextureOverride(
+                                        "paintzone.s3d",
+                                        "surface.tga",
+                                        TextureOverrideAction.Reprocess,
+                                        TexturePreset.Illustrated)
+                                ]),
+                        "manual reprocess must enforce the baseline renderer route")
+                    .ConfigureAwait(false);
+                Assert(
+                    manualMismatch.Message.Contains(
+                        "built-in painterly",
+                        StringComparison.OrdinalIgnoreCase),
+                    "manual renderer mismatch must fail before generating mixed pixels");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("SPINTEXTURE_ARTISTIC_WORKER", previousWorker);
+            }
         }
         finally
         {
@@ -652,7 +828,9 @@ internal static class PaintedRepairSafetySelfTests
                                 []))
                         {
                             TexturePipelineRevision = 0,
-                            PaintedProfileRevision = TextureBuildReport.CurrentIllustratedProfileRevision
+                            PaintedProfileRevision = TextureBuildReport.CurrentIllustratedProfileRevision,
+                            UsedExternalArtisticWorker = false,
+                            PaintedRendererOutcome = PaintedRendererOutcome.BuiltInOnly
                         },
                         cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
@@ -785,6 +963,127 @@ internal static class PaintedRepairSafetySelfTests
                 originalTexture,
                 await repairedArchive.ReadEntryAsync("retry.tga", cancellationToken).ConfigureAwait(false),
                 "retried preserved member keeps its original bytes");
+        }
+        finally
+        {
+            DeleteTree(root);
+        }
+    }
+
+    /// <summary>
+    /// A coverage-rule addition starts from an exact verified original rather
+    /// than an older painted artifact. One rejected member may stay original
+    /// while another member is painted successfully; strict route validation
+    /// still prevents accepting a different renderer as the replacement.
+    /// </summary>
+    private static async Task TestVerifiedOriginalAdditionFailureKeepsOriginalAsync(
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-painted-verified-addition-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var sourcePath = Path.Combine(root, "source.s3d");
+            var destinationPath = Path.Combine(root, "addition.s3d");
+            var rejectedOriginal = CreateTarga(32, 32, seed: 51);
+            var paintableOriginal = CreateTarga(48, 48, seed: 63);
+            await WriteArchiveAsync(
+                    sourcePath,
+                    [
+                        new("rejected.tga", rejectedOriginal),
+                        new("paintable.tga", paintableOriginal)
+                    ],
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            var rejectedUnsafeBaselineConfiguration = false;
+            try
+            {
+                _ = new PfsTextureArchiveBuilder(
+                    UnavailableProcessor(),
+                    new TextureBuildCounter(),
+                    rebuildFromReuseArchive: true,
+                    requireRequestedVisualProfile: true,
+                    allowRequestedProfileFailureToKeepOriginal: true);
+            }
+            catch (ArgumentException)
+            {
+                rejectedUnsafeBaselineConfiguration = true;
+            }
+            Assert(
+                rejectedUnsafeBaselineConfiguration,
+                "verified-original failure retention cannot weaken a baseline-reuse builder");
+
+            byte[]? painted = null;
+            var builder = new PfsTextureArchiveBuilder(
+                UnavailableProcessor(),
+                new TextureBuildCounter(),
+                requireRequestedVisualProfile: true,
+                allowRequestedVisualProfileRegeneration: true,
+                allowRequestedProfileFailureToKeepOriginal: true,
+                processBatch: async (requests, token) =>
+                {
+                    AssertEqual(2, requests.Count, "verified-addition painted request count");
+                    var outcomes = new NativeTextureProcessOutcome[requests.Count];
+                    for (var index = 0; index < requests.Count; index++)
+                    {
+                        var request = requests[index];
+                        if (string.Equals(
+                                request.LogicalName,
+                                "rejected.tga",
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            outcomes[index] = new NativeTextureProcessOutcome(
+                                null,
+                                new NotSupportedException("synthetic fidelity rejection"));
+                            continue;
+                        }
+
+                        var dimensions = UpscaleDimensions.Calculate(
+                            request.Metadata.Width,
+                            request.Metadata.Height,
+                            request.Options.MaximumDimension);
+                        painted = CreateTarga(
+                            dimensions.OutputWidth,
+                            dimensions.OutputHeight,
+                            seed: 79);
+                        await File.WriteAllBytesAsync(
+                                request.DestinationPath,
+                                painted,
+                                token)
+                            .ConfigureAwait(false);
+                        outcomes[index] = new NativeTextureProcessOutcome(
+                            new NativeTextureProcessResult(
+                                request.DestinationPath,
+                                dimensions,
+                                "Synthetic illustrated dark gothic finishing",
+                                TimeSpan.Zero,
+                                UsedBuiltInPaintedRenderer: true),
+                            null);
+                    }
+
+                    return outcomes;
+                });
+
+            await builder.BuildAsync(
+                    CreateContext(root, sourcePath, destinationPath),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await using var result = await PfsArchive.OpenAsync(
+                destinationPath,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            AssertSequenceEqual(
+                rejectedOriginal,
+                await result.ReadEntryAsync("rejected.tga", cancellationToken)
+                    .ConfigureAwait(false),
+                "a rejected verified-original addition member remains byte-identical");
+            AssertSequenceEqual(
+                painted ?? throw new InvalidOperationException("painted fixture was not produced"),
+                await result.ReadEntryAsync("paintable.tga", cancellationToken)
+                    .ConfigureAwait(false),
+                "a successful member still makes the verified-original archive a real addition");
         }
         finally
         {
@@ -958,6 +1257,30 @@ internal static class PaintedRepairSafetySelfTests
     {
         await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
         await PfsArchiveWriter.WriteAsync(stream, entries, options, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task WriteReportAsync(
+        string path,
+        TextureBuildReport report,
+        CancellationToken cancellationToken)
+    {
+        var options = new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        };
+        options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+        await using var stream = new FileStream(
+            path,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.None);
+        await JsonSerializer.SerializeAsync(
+                stream,
+                report,
+                options,
+                cancellationToken: cancellationToken)
             .ConfigureAwait(false);
     }
 

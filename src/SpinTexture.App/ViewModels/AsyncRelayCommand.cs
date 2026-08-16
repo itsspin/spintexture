@@ -7,7 +7,9 @@ public sealed class AsyncRelayCommand : ICommand, IDisposable
     private readonly Func<CancellationToken, Task> _execute;
     private readonly Func<bool>? _canExecute;
     private CancellationTokenSource? _cancellation;
+    private TaskCompletionSource? _completion;
     private bool _isRunning;
+    private bool _isDisposed;
 
     public AsyncRelayCommand(Func<CancellationToken, Task> execute, Func<bool>? canExecute = null)
     {
@@ -19,7 +21,8 @@ public sealed class AsyncRelayCommand : ICommand, IDisposable
 
     public bool IsRunning => _isRunning;
 
-    public bool CanExecute(object? parameter) => !_isRunning && (_canExecute?.Invoke() ?? true);
+    public bool CanExecute(object? parameter) =>
+        !_isDisposed && !_isRunning && (_canExecute?.Invoke() ?? true);
 
     public async void Execute(object? parameter)
     {
@@ -30,7 +33,10 @@ public sealed class AsyncRelayCommand : ICommand, IDisposable
 
         _isRunning = true;
         var cancellation = new CancellationTokenSource();
+        var completion = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         _cancellation = cancellation;
+        _completion = completion;
         RaiseCanExecuteChanged();
 
         try
@@ -50,18 +56,27 @@ public sealed class AsyncRelayCommand : ICommand, IDisposable
             }
 
             _isRunning = false;
+            completion.TrySetResult();
             RaiseCanExecuteChanged();
         }
     }
 
     public void Cancel() => _cancellation?.Cancel();
 
+    public Task WaitForCompletionAsync() =>
+        _completion?.Task ?? Task.CompletedTask;
+
     public void RaiseCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
 
     public void Dispose()
     {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        _isDisposed = true;
         _cancellation?.Cancel();
-        _cancellation?.Dispose();
-        _cancellation = null;
+        RaiseCanExecuteChanged();
     }
 }

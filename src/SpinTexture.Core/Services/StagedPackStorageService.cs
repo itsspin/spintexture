@@ -160,18 +160,80 @@ public sealed class StagedPackStorageService
     {
         ArgumentNullException.ThrowIfNull(paths);
         cancellationToken.ThrowIfCancellationRequested();
+        return Task.Run(
+            () => InspectCore(paths, cancellationToken),
+            cancellationToken);
+    }
+
+    private static StagedPackStorageStatus InspectCore(
+        ProjectPaths paths,
+        CancellationToken cancellationToken)
+    {
         var snapshot = SnapshotTree(paths.StagingPath, allowMissing: true, cancellationToken);
-        var packCount = Directory.Exists(paths.StagingPath)
+        var bytesByTopLevelDirectory = snapshot
+            .Select(file => (Name: GetTopLevelName(file.RelativePath), file.Length))
+            .Where(item => item.Name is not null)
+            .GroupBy(item => item.Name!, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group => group.Sum(item => item.Length),
+                StringComparer.OrdinalIgnoreCase);
+        var directories = Directory.Exists(paths.StagingPath)
             ? Directory.EnumerateDirectories(paths.StagingPath, "*", SearchOption.TopDirectoryOnly)
-                .Count(directory => File.Exists(Path.Combine(directory, "manifest.json")))
-            : 0;
-        return Task.FromResult(new StagedPackStorageStatus(
+                .Select(directory => InspectLibraryDirectory(
+                    directory,
+                    bytesByTopLevelDirectory.GetValueOrDefault(
+                        Path.GetFileName(directory))))
+                .ToArray()
+            : [];
+        var completed = directories
+            .Where(directory => directory.Kind == StorageDirectoryKind.CompletedPack)
+            .ToArray();
+        var resumable = directories
+            .Where(directory => directory.Kind == StorageDirectoryKind.ResumableBuild)
+            .ToArray();
+        var leftovers = directories
+            .Where(directory => directory.Kind == StorageDirectoryKind.Leftover)
+            .ToArray();
+        return new StagedPackStorageStatus(
             paths.StagingPath,
             paths.DefaultStagingPath,
             snapshot.Sum(file => file.Length),
             snapshot.Count,
-            packCount,
-            PathGuard.SamePath(paths.StagingPath, paths.DefaultStagingPath)));
+            completed.Length,
+            PathGuard.SamePath(paths.StagingPath, paths.DefaultStagingPath),
+            completed.Sum(directory => directory.Bytes),
+            resumable.Length,
+            resumable.Sum(directory => directory.Bytes),
+            leftovers.Length,
+            leftovers.Sum(directory => directory.Bytes));
+    }
+
+    private static StorageDirectory InspectLibraryDirectory(
+        string directory,
+        long bytes)
+    {
+        if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException(
+                $"The staged-pack library contains an unsafe reparse point: {directory}");
+        }
+
+        var hasManifest = File.Exists(Path.Combine(directory, "manifest.json"));
+        var hasCheckpoint = File.Exists(Path.Combine(directory, "build-checkpoint.json"));
+        var kind = hasManifest && !hasCheckpoint
+            ? StorageDirectoryKind.CompletedPack
+            : hasCheckpoint
+                ? StorageDirectoryKind.ResumableBuild
+                : StorageDirectoryKind.Leftover;
+        return new StorageDirectory(kind, bytes);
+    }
+
+    private static string? GetTopLevelName(string relativePath)
+    {
+        var separator = relativePath.IndexOfAny(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]);
+        return separator <= 0 ? null : relativePath[..separator];
     }
 
     public async Task<StagedPackStoragePlan> PlanAsync(
@@ -763,5 +825,13 @@ public sealed class StagedPackStorageService
     }
 
     private sealed record StorageFile(string RelativePath, long Length);
+    private sealed record StorageDirectory(StorageDirectoryKind Kind, long Bytes);
     private sealed record RelocatedInstallManifest(string Path, InstallManifest Original);
+
+    private enum StorageDirectoryKind
+    {
+        CompletedPack,
+        ResumableBuild,
+        Leftover
+    }
 }

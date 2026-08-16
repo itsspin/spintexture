@@ -8,7 +8,10 @@ namespace SpinTexture.Core.Services;
 
 public sealed record StagedPackDeletionDependency(
     string CompositionId,
-    string CompositionManifestPath);
+    string CompositionManifestPath)
+{
+    public bool IsReferencedByCurrentInstall { get; init; }
+}
 
 public sealed record StagedPackDeletionPlan(
     string ManifestPath,
@@ -22,10 +25,130 @@ public sealed record StagedPackDeletionPlan(
     IReadOnlyList<string> SafetyBlockers,
     string Summary)
 {
+    public bool IsRequiredByCurrentInstall =>
+        IsReferencedByCurrentInstall
+        || CompositionDependencies.Any(dependency =>
+            dependency.IsReferencedByCurrentInstall);
+
     public bool CanDelete =>
         !IsReferencedByCurrentInstall
         && CompositionDependencies.Count == 0
         && SafetyBlockers.Count == 0;
+}
+
+public sealed record StagedPackDeletionBatchBlocker(
+    string BuildId,
+    string ManifestPath,
+    string Summary);
+
+public sealed record StagedPackDeletionBatchPlan(
+    IReadOnlyList<StagedPackDeletionPlan> RequestedPlans,
+    IReadOnlyList<StagedPackDeletionPlan> OrderedPlans,
+    IReadOnlyList<StagedPackDeletionBatchBlocker> Blockers,
+    string Summary)
+{
+    public bool CanDelete => RequestedPlans.Count > 0
+        && OrderedPlans.Count == RequestedPlans.Count
+        && Blockers.Count == 0;
+
+    public long StagedBytes => RequestedPlans.Sum(plan => plan.StagedBytes);
+}
+
+public sealed record StagedPackCleanupCandidate(
+    string ManifestPath,
+    DateTimeOffset CreatedUtc,
+    StagedPackDeletionPlan DeletionPlan);
+
+/// <summary>
+/// Conservative retention policy for the pack-library cleanup shortcut. The
+/// recommendation keeps recent packs, the current install, and the complete
+/// dependency chain of anything kept. The catalog omits unfinished builds,
+/// and deletion independently rechecks the checkpoint marker under the
+/// staging lock before removing anything.
+/// </summary>
+public static class StagedPackCleanupPolicy
+{
+    public static readonly TimeSpan RecentPackAge = TimeSpan.FromDays(3);
+
+    public static bool IsRecent(
+        DateTimeOffset createdUtc,
+        DateTimeOffset utcNow,
+        TimeSpan? recentPackAge = null)
+    {
+        var age = recentPackAge ?? RecentPackAge;
+        if (age <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(recentPackAge),
+                "The recent-pack retention age must be positive.");
+        }
+
+        return createdUtc >= utcNow - age;
+    }
+
+    public static IReadOnlySet<string> RecommendSafeOldPackDeletions(
+        IReadOnlyList<StagedPackCleanupCandidate> candidates,
+        DateTimeOffset utcNow,
+        TimeSpan? recentPackAge = null)
+    {
+        ArgumentNullException.ThrowIfNull(candidates);
+        var age = recentPackAge ?? RecentPackAge;
+        if (age <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(recentPackAge),
+                "The recent-pack retention age must be positive.");
+        }
+
+        var byManifest = candidates.ToDictionary(
+            candidate => Path.GetFullPath(candidate.ManifestPath),
+            StringComparer.OrdinalIgnoreCase);
+        var retained = candidates
+            .Where(candidate =>
+                candidate.DeletionPlan.IsRequiredByCurrentInstall
+                || candidate.DeletionPlan.SafetyBlockers.Count != 0
+                || IsRecent(candidate.CreatedUtc, utcNow, age))
+            .Select(candidate => Path.GetFullPath(candidate.ManifestPath))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Dependencies point from a source pack to the compositions that use
+        // it. If a composition is retained, its source must be retained too.
+        // Repeating the pass also handles nested legacy compositions safely.
+        var changed = true;
+        while (changed)
+        {
+            changed = false;
+            foreach (var candidate in candidates)
+            {
+                var candidatePath = Path.GetFullPath(candidate.ManifestPath);
+                if (retained.Contains(candidatePath))
+                {
+                    continue;
+                }
+
+                var requiredByRetainedOrUnknownComposition = candidate
+                    .DeletionPlan
+                    .CompositionDependencies
+                    .Any(dependency =>
+                    {
+                        var dependencyPath = Path.GetFullPath(
+                            dependency.CompositionManifestPath);
+                        return !byManifest.ContainsKey(dependencyPath)
+                               || retained.Contains(dependencyPath);
+                    });
+                if (requiredByRetainedOrUnknownComposition)
+                {
+                    retained.Add(candidatePath);
+                    changed = true;
+                }
+            }
+        }
+
+        return candidates
+            .Select(candidate => Path.GetFullPath(candidate.ManifestPath))
+            .Where(path => !retained.Contains(path))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
 }
 
 public sealed record StagedPackDeletionResult(
@@ -62,31 +185,46 @@ public sealed class StagedPackDeletionService
         string manifestPath,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(paths);
         ArgumentException.ThrowIfNullOrWhiteSpace(manifestPath);
-        cancellationToken.ThrowIfCancellationRequested();
-
-        var location = ResolveTargetLocation(paths, manifestPath);
-        var manifestFingerprint = await FileIntegrity
-            .FingerprintAsync(location.ManifestPath, cancellationToken)
-            .ConfigureAwait(false);
-        var inspected = await catalog.InspectAsync(
+        var plans = await PlanManyAsync(
                 paths,
-                location.ManifestPath,
-                StagedPackVerificationMode.Metadata,
+                [manifestPath],
                 cancellationToken)
             .ConfigureAwait(false);
-        var blockers = new List<string>();
-        try
+        return plans[0];
+    }
+
+    /// <summary>
+    /// Plans every requested completed pack from one active-install read and
+    /// one composition-graph scan. This keeps a large pack library responsive
+    /// and gives every row a consistent view of its dependencies.
+    /// </summary>
+    public async Task<IReadOnlyList<StagedPackDeletionPlan>> PlanManyAsync(
+        ProjectPaths paths,
+        IReadOnlyList<string> manifestPaths,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(manifestPaths);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (manifestPaths.Count == 0)
         {
-            EnsureDeletionTreeSafe(paths, location.BuildDirectory);
-        }
-        catch (Exception exception) when (IsSafetyFailure(exception))
-        {
-            blockers.Add(exception.Message);
+            return [];
         }
 
+        var locations = manifestPaths
+            .Select(manifestPath =>
+            {
+                ArgumentException.ThrowIfNullOrWhiteSpace(manifestPath);
+                return ResolveTargetLocation(paths, manifestPath);
+            })
+            .DistinctBy(
+                location => location.ManifestPath,
+                StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
         string? currentInstallBuildManifest = null;
+        string? currentInstallBlocker = null;
         try
         {
             currentInstallBuildManifest = await FindCurrentInstallBuildManifestAsync(
@@ -96,54 +234,164 @@ public sealed class StagedPackDeletionService
         }
         catch (Exception exception) when (IsSafetyFailure(exception))
         {
-            blockers.Add(
-                $"The current install dependency could not be verified: {exception.Message}");
+            currentInstallBlocker =
+                $"The current install dependency could not be verified: {exception.Message}";
         }
 
         var dependencyScan = await FindCompositionDependenciesAsync(
                 paths,
-                location.ManifestPath,
                 cancellationToken)
             .ConfigureAwait(false);
-        blockers.AddRange(dependencyScan.SafetyBlockers);
-        var isCurrentInstall = currentInstallBuildManifest is not null
-            && PathGuard.SamePath(currentInstallBuildManifest, location.ManifestPath);
-        var buildId = Path.GetFileName(location.BuildDirectory);
-        var stagedBytes = inspected.StagedBytes;
-        var isComposition = File.Exists(Path.Combine(location.BuildDirectory, "composition.json"));
+        var results = new List<StagedPackDeletionPlan>(locations.Length);
+        foreach (var location in locations)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var manifestFingerprint = await FileIntegrity
+                .FingerprintAsync(location.ManifestPath, cancellationToken)
+                .ConfigureAwait(false);
+            var inspected = await catalog.InspectAsync(
+                    paths,
+                    location.ManifestPath,
+                    StagedPackVerificationMode.Metadata,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var blockers = new List<string>();
+            try
+            {
+                EnsureDeletionTreeSafe(paths, location.BuildDirectory);
+            }
+            catch (Exception exception) when (IsSafetyFailure(exception))
+            {
+                blockers.Add(exception.Message);
+            }
 
-        string summary;
-        if (isCurrentInstall)
-        {
-            summary = "This pack is referenced by the current install transaction. Restore or switch packs before deleting it.";
-        }
-        else if (dependencyScan.Dependencies.Count != 0)
-        {
-            summary = dependencyScan.Dependencies.Count == 1
-                ? $"Composition '{dependencyScan.Dependencies[0].CompositionId}' depends on this pack. Delete that composition first."
-                : $"{dependencyScan.Dependencies.Count:N0} compositions depend on this pack. Delete those compositions first.";
-        }
-        else if (blockers.Count != 0)
-        {
-            summary = $"SpinTexture could not prove this pack is safe to delete. {blockers[0]}";
-        }
-        else
-        {
-            summary = "This completed pack is not active, has no dependent compositions, and is contained safely in the managed staging workspace.";
+            if (currentInstallBlocker is not null)
+            {
+                blockers.Add(currentInstallBlocker);
+            }
+
+            blockers.AddRange(dependencyScan.SafetyBlockers);
+            var isCurrentInstall = currentInstallBuildManifest is not null
+                && PathGuard.SamePath(
+                    currentInstallBuildManifest,
+                    location.ManifestPath);
+            var dependencies = dependencyScan.DependenciesByManifest
+                .GetValueOrDefault(location.ManifestPath, [])
+                .Select(dependency => dependency with
+                {
+                    IsReferencedByCurrentInstall =
+                        currentInstallBuildManifest is not null
+                        && PathGuard.SamePath(
+                            dependency.CompositionManifestPath,
+                            currentInstallBuildManifest)
+                })
+                .ToArray();
+            var buildId = Path.GetFileName(location.BuildDirectory);
+            var isComposition = File.Exists(
+                Path.Combine(location.BuildDirectory, "composition.json"));
+            var summary = BuildPlanSummary(
+                isCurrentInstall,
+                dependencies,
+                blockers);
+            results.Add(new StagedPackDeletionPlan(
+                location.ManifestPath,
+                location.BuildDirectory,
+                buildId,
+                inspected.StagedBytes,
+                isComposition,
+                isCurrentInstall,
+                new StagedPackFileFingerprint(
+                    manifestFingerprint.Length,
+                    manifestFingerprint.Sha256),
+                dependencies,
+                blockers.Distinct(StringComparer.Ordinal).ToArray(),
+                summary));
         }
 
-        return new StagedPackDeletionPlan(
-            location.ManifestPath,
-            location.BuildDirectory,
-            buildId,
-            stagedBytes,
-            isComposition,
-            isCurrentInstall,
-            new StagedPackFileFingerprint(
-                manifestFingerprint.Length,
-                manifestFingerprint.Sha256),
-            dependencyScan.Dependencies,
-            blockers,
+        return results;
+    }
+
+    /// <summary>
+    /// Proves a checkbox-selected cleanup set can be removed together and
+    /// orders generated compositions before the source packs they reference.
+    /// </summary>
+    public async Task<StagedPackDeletionBatchPlan> PlanBatchAsync(
+        ProjectPaths paths,
+        IReadOnlyList<string> manifestPaths,
+        CancellationToken cancellationToken = default)
+    {
+        var plans = await PlanManyAsync(paths, manifestPaths, cancellationToken)
+            .ConfigureAwait(false);
+        if (plans.Count == 0)
+        {
+            return new StagedPackDeletionBatchPlan(
+                [],
+                [],
+                [],
+                "No completed packs were selected for deletion.");
+        }
+
+        var selectedPaths = plans
+            .Select(plan => plan.ManifestPath)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var blockers = new List<StagedPackDeletionBatchBlocker>();
+        foreach (var plan in plans)
+        {
+            if (plan.IsReferencedByCurrentInstall)
+            {
+                blockers.Add(new StagedPackDeletionBatchBlocker(
+                    plan.BuildId,
+                    plan.ManifestPath,
+                    "This pack is installed now and cannot be deleted."));
+            }
+
+            if (plan.SafetyBlockers.Count != 0)
+            {
+                blockers.Add(new StagedPackDeletionBatchBlocker(
+                    plan.BuildId,
+                    plan.ManifestPath,
+                    $"Its safety preflight could not be completed: {plan.SafetyBlockers[0]}"));
+            }
+
+            var retainedDependencies = plan.CompositionDependencies
+                .Where(dependency =>
+                    !selectedPaths.Contains(dependency.CompositionManifestPath))
+                .ToArray();
+            if (retainedDependencies.Length != 0)
+            {
+                var detail = retainedDependencies.Length == 1
+                    ? $"Keep it, or also check composition '{retainedDependencies[0].CompositionId}' for deletion."
+                    : $"Keep it, or also check its {retainedDependencies.Length:N0} dependent compositions for deletion.";
+                blockers.Add(new StagedPackDeletionBatchBlocker(
+                    plan.BuildId,
+                    plan.ManifestPath,
+                    detail));
+            }
+        }
+
+        var ordered = blockers.Count == 0
+            ? OrderPlansForDeletion(plans)
+            : [];
+        if (blockers.Count == 0 && ordered.Count != plans.Count)
+        {
+            blockers.Add(new StagedPackDeletionBatchBlocker(
+                "pack selection",
+                paths.StagingPath,
+                "The selected composition dependency graph contains a cycle."));
+        }
+
+        var distinctBlockers = blockers
+            .DistinctBy(
+                blocker => $"{blocker.ManifestPath}\n{blocker.Summary}",
+                StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var summary = distinctBlockers.Length == 0
+            ? $"{plans.Count:N0} completed pack(s) passed cleanup preflight. Generated compositions will be removed before source packs."
+            : $"Nothing can be deleted until {distinctBlockers.Length:N0} cleanup blocker(s) are resolved.";
+        return new StagedPackDeletionBatchPlan(
+            plans,
+            ordered,
+            distinctBlockers,
             summary);
     }
 
@@ -217,7 +465,13 @@ public sealed class StagedPackDeletionService
             .ConfigureAwait(false);
         if (health.InstallManifestPath is null)
         {
-            return null;
+            if (health.State == InstallHealthState.None)
+            {
+                return null;
+            }
+
+            throw new InvalidDataException(
+                $"SpinTexture could not prove that no staged pack is active. {health.Summary}");
         }
 
         var install = await manifestStore
@@ -232,12 +486,75 @@ public sealed class StagedPackDeletionService
         return Path.GetFullPath(install.BuildManifestPath);
     }
 
+    private static string BuildPlanSummary(
+        bool isCurrentInstall,
+        IReadOnlyList<StagedPackDeletionDependency> dependencies,
+        IReadOnlyList<string> blockers)
+    {
+        if (isCurrentInstall)
+        {
+            return "This pack is referenced by the current install transaction. Restore or switch packs before deleting it.";
+        }
+
+        var installedDependencies = dependencies
+            .Where(dependency => dependency.IsReferencedByCurrentInstall)
+            .ToArray();
+        if (installedDependencies.Length != 0)
+        {
+            return installedDependencies.Length == 1
+                ? $"The installed composition '{installedDependencies[0].CompositionId}' needs this source pack. Switch installs before deleting it."
+                : $"{installedDependencies.Length:N0} installed compositions need this source pack. Switch installs before deleting it.";
+        }
+
+        if (blockers.Count != 0)
+        {
+            return $"SpinTexture could not prove this pack is safe to delete. {blockers[0]}";
+        }
+
+        if (dependencies.Count != 0)
+        {
+            return dependencies.Count == 1
+                ? $"Composition '{dependencies[0].CompositionId}' depends on this pack. Check both for deletion so the composition is removed first."
+                : $"{dependencies.Count:N0} compositions depend on this pack. Check them together so compositions are removed first.";
+        }
+
+        return "This completed pack is not active, has no retained dependent compositions, and is contained safely in the managed staging workspace.";
+    }
+
+    private static IReadOnlyList<StagedPackDeletionPlan> OrderPlansForDeletion(
+        IReadOnlyList<StagedPackDeletionPlan> plans)
+    {
+        var remaining = plans.ToDictionary(
+            plan => plan.ManifestPath,
+            StringComparer.OrdinalIgnoreCase);
+        var ordered = new List<StagedPackDeletionPlan>(plans.Count);
+        while (remaining.Count != 0)
+        {
+            var next = remaining.Values
+                .Where(plan => plan.CompositionDependencies.All(dependency =>
+                    !remaining.ContainsKey(dependency.CompositionManifestPath)))
+                .OrderByDescending(plan => plan.IsComposition)
+                .ThenBy(plan => plan.BuildId, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+            if (next is null)
+            {
+                break;
+            }
+
+            ordered.Add(next);
+            remaining.Remove(next.ManifestPath);
+        }
+
+        return ordered;
+    }
+
     private static async Task<DependencyScanResult> FindCompositionDependenciesAsync(
         ProjectPaths paths,
-        string targetManifestPath,
         CancellationToken cancellationToken)
     {
-        var dependencies = new List<StagedPackDeletionDependency>();
+        var dependencies = new Dictionary<
+            string,
+            List<StagedPackDeletionDependency>>(StringComparer.OrdinalIgnoreCase);
         var blockers = new List<string>();
         foreach (var directory in Directory.EnumerateDirectories(
                      paths.StagingPath,
@@ -255,10 +572,16 @@ public sealed class StagedPackDeletionService
                 }
 
                 var compositionPath = Path.Combine(directory, "composition.json");
-                if (!File.Exists(compositionPath)
-                    || PathGuard.SamePath(directory, Path.GetDirectoryName(targetManifestPath)!))
+                if (!File.Exists(compositionPath))
                 {
                     continue;
+                }
+
+                var compositionManifestPath = Path.Combine(directory, "manifest.json");
+                if (!File.Exists(compositionManifestPath))
+                {
+                    throw new InvalidDataException(
+                        "A composition document has no completed manifest.json commit marker.");
                 }
 
                 var document = await ReadCompositionAsync(
@@ -266,6 +589,7 @@ public sealed class StagedPackDeletionService
                         cancellationToken)
                     .ConfigureAwait(false);
                 ValidateCompositionDocument(paths, directory, document);
+                var componentPaths = new List<string>(document.Components.Count);
                 foreach (var component in document.Components)
                 {
                     if (component is null)
@@ -277,13 +601,6 @@ public sealed class StagedPackDeletionService
                     var componentManifestPath = ResolveComponentManifestPath(
                         paths,
                         component.ManifestRelativePath);
-                    if (PathGuard.SamePath(componentManifestPath, targetManifestPath))
-                    {
-                        dependencies.Add(new StagedPackDeletionDependency(
-                            document.CompositionId,
-                            Path.Combine(directory, "manifest.json")));
-                    }
-
                     await FileIntegrity.EnsureMatchesAsync(
                             componentManifestPath,
                             component.ManifestLength,
@@ -291,6 +608,25 @@ public sealed class StagedPackDeletionService
                             $"Composition component for {document.CompositionId}",
                             cancellationToken)
                         .ConfigureAwait(false);
+                    componentPaths.Add(componentManifestPath);
+                }
+
+                foreach (var componentManifestPath in componentPaths.Distinct(
+                             StringComparer.OrdinalIgnoreCase))
+                {
+                    if (!dependencies.TryGetValue(
+                            componentManifestPath,
+                            out var componentDependencies))
+                    {
+                        componentDependencies = [];
+                        dependencies.Add(
+                            componentManifestPath,
+                            componentDependencies);
+                    }
+
+                    componentDependencies.Add(new StagedPackDeletionDependency(
+                        document.CompositionId,
+                        compositionManifestPath));
                 }
             }
             catch (OperationCanceledException)
@@ -305,12 +641,17 @@ public sealed class StagedPackDeletionService
         }
 
         return new DependencyScanResult(
-            dependencies
-                .DistinctBy(
-                    dependency => dependency.CompositionManifestPath,
-                    StringComparer.OrdinalIgnoreCase)
-                .OrderBy(dependency => dependency.CompositionId, StringComparer.OrdinalIgnoreCase)
-                .ToArray(),
+            dependencies.ToDictionary(
+                pair => pair.Key,
+                pair => (IReadOnlyList<StagedPackDeletionDependency>)pair.Value
+                    .DistinctBy(
+                        dependency => dependency.CompositionManifestPath,
+                        StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(
+                        dependency => dependency.CompositionId,
+                        StringComparer.OrdinalIgnoreCase)
+                    .ToArray(),
+                StringComparer.OrdinalIgnoreCase),
             blockers.Distinct(StringComparer.Ordinal).ToArray());
     }
 
@@ -449,6 +790,12 @@ public sealed class StagedPackDeletionService
                 "The selected pack is not a direct child of the staging root.");
         }
 
+        if (File.Exists(Path.Combine(safeBuildDirectory, "build-checkpoint.json")))
+        {
+            throw new InvalidDataException(
+                "Deletion is blocked because this pack is still finalizing or can be resumed.");
+        }
+
         foreach (var entry in EnumerateTree(safeBuildDirectory))
         {
             var attributes = File.GetAttributes(entry);
@@ -476,6 +823,7 @@ public sealed class StagedPackDeletionService
                      .Where(path => !Directory.Exists(path))
                      .OrderByDescending(path => path.Length))
         {
+            EnsureEntryAncestorsRemainSafe(buildDirectory, file);
             var attributes = File.GetAttributes(file);
             if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.ReadOnly)) != 0)
             {
@@ -491,6 +839,7 @@ public sealed class StagedPackDeletionService
                      .OrderByDescending(path => path.Count(character =>
                          character == Path.DirectorySeparatorChar)))
         {
+            EnsureEntryAncestorsRemainSafe(buildDirectory, directory);
             var attributes = File.GetAttributes(directory);
             if ((attributes & FileAttributes.ReparsePoint) != 0)
             {
@@ -499,6 +848,53 @@ public sealed class StagedPackDeletionService
             }
 
             Directory.Delete(directory, recursive: false);
+        }
+    }
+
+    private static void EnsureEntryAncestorsRemainSafe(
+        string buildDirectory,
+        string entry)
+    {
+        var safeRoot = Path.TrimEndingDirectorySeparator(
+            Path.GetFullPath(buildDirectory));
+        var safeEntry = Path.GetFullPath(entry);
+        if (!PathGuard.SamePath(safeRoot, safeEntry)
+            && !safeEntry.StartsWith(
+                safeRoot + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"The staged pack changed to an out-of-root entry before deletion: {entry}");
+        }
+
+        if (PathGuard.SamePath(safeRoot, safeEntry))
+        {
+            return;
+        }
+
+        var ancestor = Path.GetDirectoryName(safeEntry);
+        while (ancestor is not null && !PathGuard.SamePath(ancestor, safeRoot))
+        {
+            if (!Directory.Exists(ancestor))
+            {
+                throw new InvalidDataException(
+                    $"The staged pack hierarchy changed before deletion: {ancestor}");
+            }
+
+            var attributes = File.GetAttributes(ancestor);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidDataException(
+                    $"The staged pack gained an unsafe ancestor before deletion: {ancestor}");
+            }
+
+            ancestor = Path.GetDirectoryName(ancestor);
+        }
+
+        if (ancestor is null)
+        {
+            throw new InvalidDataException(
+                $"The staged pack hierarchy escaped its managed root before deletion: {entry}");
         }
     }
 
@@ -585,6 +981,8 @@ public sealed class StagedPackDeletionService
         string BuildDirectory);
 
     private sealed record DependencyScanResult(
-        IReadOnlyList<StagedPackDeletionDependency> Dependencies,
+        IReadOnlyDictionary<
+            string,
+            IReadOnlyList<StagedPackDeletionDependency>> DependenciesByManifest,
         IReadOnlyList<string> SafetyBlockers);
 }

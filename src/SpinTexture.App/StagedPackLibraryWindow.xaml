@@ -119,7 +119,17 @@
         </Style>
     </UserControl.Resources>
 
-    <Grid Margin="24">
+    <Grid>
+        <Grid.Style>
+            <Style TargetType="Grid">
+                <Setter Property="Margin" Value="24" />
+                <Style.Triggers>
+                    <DataTrigger Binding="{Binding IsCompactLayout}" Value="True">
+                        <Setter Property="Margin" Value="18,16,18,18" />
+                    </DataTrigger>
+                </Style.Triggers>
+            </Style>
+        </Grid.Style>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -134,16 +144,28 @@
             </Grid.ColumnDefinitions>
             <StackPanel>
                 <TextBlock Text="MANAGE TEXTURE PACKS" Style="{StaticResource Eyebrow}" />
-                <TextBlock Text="Choose which completed packs should be active"
-                           FontSize="28" FontWeight="SemiBold" Margin="0,5,0,0" />
-                <TextBlock Text="A checkmark means “include this pack the next time I install.” Clicking the rest of a row only opens its details; it does not add or remove that pack."
-                           Style="{StaticResource Caption}" FontSize="13" Margin="0,7,18,0" />
-                <TextBlock Text="{Binding PackStorageText}" Foreground="#8FA6A1" FontSize="11"
+                <TextBlock Text="Install what you want. Remove what you no longer need."
+                           FontSize="26" FontWeight="SemiBold" Margin="0,4,0,0" />
+                <TextBlock Text="Each pack has separate Install and Delete checkboxes. Installed packs and anything they depend on are locked automatically; unfinished builds never appear as delete choices."
+                           FontSize="13" Margin="0,7,18,0">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource Caption}">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsCompactLayout}" Value="True">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+                <TextBlock Text="{Binding LibrarySummaryText}" Foreground="{StaticResource Safe}" FontSize="12"
+                           FontWeight="SemiBold" Margin="0,7,18,0" />
+                <TextBlock Text="{Binding PackStorageText}" Foreground="#8FA6A1" FontSize="10"
                            TextTrimming="CharacterEllipsis" Margin="0,6,18,0"
                            ToolTip="Change this location from Pack Storage Settings on the main window." />
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
-                <Button Content="Clean Up Leftovers" Click="CleanupDebris_Click"
+                <Button Content="Clean Interrupted Leftovers" Click="CleanupDebris_Click"
                         IsEnabled="{Binding CanCleanupDebris}" Margin="12,0,0,0"
                         ToolTip="Find and remove folders left behind by interrupted builds. Completed packs and resumable builds are never touched." />
                 <Button Content="Refresh Library" Click="Refresh_Click"
@@ -152,23 +174,46 @@
             </StackPanel>
         </Grid>
 
-        <Border Grid.Row="1" Margin="0,16,0,14" Padding="12,10"
+        <Border Grid.Row="1"
                 Background="#0D1015" BorderBrush="{StaticResource Border}"
                 BorderThickness="1" CornerRadius="8">
-            <WrapPanel VerticalAlignment="Center">
-                <TextBlock Text="QUICK GUIDE" Style="{StaticResource Eyebrow}" VerticalAlignment="Center" Margin="0,0,16,0" />
-                <TextBlock Text="1  Check packs" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,16,0" />
-                <TextBlock Text="2  Review the summary" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,16,0" />
-                <TextBlock Text="3  Install checked packs" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,22,0" />
-                <Border Background="#17352B" BorderBrush="#356A57" BorderThickness="1" CornerRadius="4" Padding="8,4" Margin="0,0,7,0">
-                    <TextBlock Text="ACTIVE" Foreground="{StaticResource Safe}" FontSize="11" FontWeight="Bold" />
+            <Border.Style>
+                <Style TargetType="Border">
+                    <Setter Property="Margin" Value="0,16,0,14" />
+                    <Setter Property="Padding" Value="14,11" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding IsCompactLayout}" Value="True">
+                            <Setter Property="Margin" Value="0,10,0,10" />
+                            <Setter Property="Padding" Value="11,8" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Border.Style>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border Background="#341C20" BorderBrush="#7D424A" BorderThickness="1"
+                        CornerRadius="5" Padding="9,5" Margin="0,0,13,0" VerticalAlignment="Center">
+                    <TextBlock Text="SAFE CLEANUP" Foreground="#F6B6BC" FontSize="11" FontWeight="Bold" />
                 </Border>
-                <TextBlock Text="installed now" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="0,0,18,0" />
-                <Border Background="#20252C" BorderBrush="#4A525E" BorderThickness="1" CornerRadius="4" Padding="8,4" Margin="0,0,7,0">
-                    <TextBlock Text="STAGED" Foreground="#E9EDF3" FontSize="11" FontWeight="Bold" />
-                </Border>
-                <TextBlock Text="saved and reusable" Style="{StaticResource Caption}" VerticalAlignment="Center" />
-            </WrapPanel>
+                <StackPanel Grid.Column="1">
+                    <TextBlock Text="{Binding CleanupOverviewText}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                    <TextBlock Text="“Select Safe Old Packs” keeps the current install, its full source chain, every safety-blocked pack, and everything created in the last three days. You review the red checkboxes before deletion."
+                               FontSize="11" Margin="0,3,0,0">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock" BasedOn="{StaticResource Caption}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsCompactLayout}" Value="True">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </StackPanel>
+            </Grid>
         </Border>
 
         <Grid Grid.Row="2">
@@ -180,8 +225,19 @@
 
             <Border Background="{StaticResource Panel}" BorderBrush="{StaticResource Border}"
                     BorderThickness="1" CornerRadius="10" Padding="14">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Grid.ColumnSpan" Value="1" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsCompactLayout}" Value="True">
+                                <Setter Property="Grid.ColumnSpan" Value="3" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
                 <Grid>
                     <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
@@ -193,10 +249,20 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <StackPanel>
-                            <TextBlock Text="1 / CHECK PACKS TO INCLUDE" Style="{StaticResource Eyebrow}" />
-                            <TextBlock Text="Available completed packs" Style="{StaticResource SectionTitle}" Margin="0,4,0,0" />
-                            <TextBlock Text="Use the checkbox inside each card. To manage several cards at once, Ctrl/Shift-click their rows so they have an orange outline."
-                                       Style="{StaticResource Caption}" Margin="0,4,16,0" />
+                            <TextBlock Text="1 / COMPLETED PACK LIBRARY" Style="{StaticResource Eyebrow}" />
+                            <TextBlock Text="Choose Install or Delete per pack" Style="{StaticResource SectionTitle}" Margin="0,4,0,0" />
+                            <TextBlock Text="The two choices are mutually exclusive. Click the rest of a card only to show its details on the right."
+                                       Margin="0,4,16,0">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock" BasedOn="{StaticResource Caption}">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsCompactLayout}" Value="True">
+                                                <Setter Property="Visibility" Value="Collapsed" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
                         </StackPanel>
                         <StackPanel Grid.Column="1" Width="210">
                             <TextBlock Text="SHOW CATEGORY" Foreground="{StaticResource Muted}" FontSize="10" FontWeight="Bold" />
@@ -207,29 +273,140 @@
                         </StackPanel>
                     </Grid>
 
-                    <Expander Grid.Row="1" Header="Advanced multi-pack selection tools" Margin="0,0,0,11"
-                              Foreground="#D9DDE4" ToolTip="Most users only need the checkbox in each pack card.">
+                    <Expander Grid.Row="1" Margin="0,0,0,8" Foreground="#D9DDE4">
+                        <Expander.Style>
+                            <Style TargetType="Expander">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsCompactLayout}" Value="True">
+                                        <Setter Property="Visibility" Value="Visible" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Expander.Style>
+                        <Expander.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="FOCUSED PACK DETAILS + ACTIONS" Foreground="#FFA56F"
+                                           FontSize="10" FontWeight="Bold" />
+                                <TextBlock Text=" · " Foreground="{StaticResource Muted}" FontSize="10" />
+                                <TextBlock Text="{Binding SelectedPack.Title, TargetNullValue=select a card}"
+                                           Foreground="{StaticResource Muted}" FontSize="10"
+                                           MaxWidth="420" TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+                        </Expander.Header>
                         <Border Background="{StaticResource PanelInset}" BorderBrush="{StaticResource Border}"
-                                BorderThickness="1" CornerRadius="7" Padding="10,10,4,2" Margin="0,7,0,0">
-                            <WrapPanel>
-                                <Button Content="Add Highlighted to Install" Style="{StaticResource ToolbarButton}"
-                                        Click="CheckHighlighted_Click" IsEnabled="{Binding CanCheckHighlighted}" />
-                                <Button Content="Remove Highlighted from Install" Style="{StaticResource ToolbarButton}"
-                                        Click="UncheckHighlighted_Click" IsEnabled="{Binding CanUncheckHighlighted}" />
-                                <Button Content="Keep Active + Add Highlighted" Style="{StaticResource ToolbarButton}"
-                                        Click="AddHighlightedToCurrent_Click" IsEnabled="{Binding CanAddHighlightedToCurrent}"
-                                        Background="#1A3028" BorderBrush="#356A57" />
-                                <Button Content="Reset Checks to Active Packs" Style="{StaticResource ToolbarButton}"
-                                        Click="CheckCurrentInstall_Click" IsEnabled="{Binding CanCheckCurrentInstall}" />
-                                <Button Content="Check Every Compatible Pack" Style="{StaticResource ToolbarButton}"
-                                        Click="CheckAll_Click" IsEnabled="{Binding CanCheckAll}" />
-                                <Button Content="Clear All Checkmarks" Style="{StaticResource ToolbarButton}"
-                                        Click="ClearChecks_Click" IsEnabled="{Binding CanClearChecks}" />
-                            </WrapPanel>
+                                BorderThickness="1" CornerRadius="7" Padding="11" Margin="0,6,0,0">
+                            <ScrollViewer MaxHeight="330" VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <StackPanel>
+                                    <TextBlock Text="{Binding FocusedPackText}" Foreground="{StaticResource Muted}"
+                                               FontSize="11" TextWrapping="Wrap" />
+                                    <TextBlock Text="{Binding SelectedPack.Title, TargetNullValue=Click a pack card below to focus it.}"
+                                               FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,6,0,0" />
+                                    <WrapPanel Margin="0,7,0,0">
+                                        <Button Content="Open Preview" Click="Preview_Click" IsEnabled="{Binding CanPreview}"
+                                                Style="{StaticResource ToolbarButton}"
+                                                Background="#193027" BorderBrush="#356A57" />
+                                        <Button Content="Rename" Click="Rename_Click" IsEnabled="{Binding CanRename}"
+                                                Style="{StaticResource ToolbarButton}" />
+                                        <Button Content="Repair Checked Packs" Click="RepairCheckedPacks_Click"
+                                                IsEnabled="{Binding CanRepairCheckedPacks}"
+                                                Style="{StaticResource ToolbarButton}"
+                                                Background="#382B18" BorderBrush="#785C2F" />
+                                        <Button Content="Repair Focused Pack" Click="Repair_Click" IsEnabled="{Binding CanRepair}"
+                                                Style="{StaticResource ToolbarButton}"
+                                                Background="#26324A" BorderBrush="#526D9E" />
+                                    </WrapPanel>
+                                    <TextBlock Text="{Binding SelectedPack.ContentsSummary, TargetNullValue='Choose a pack card to review its coverage and actions without hiding the library.'}"
+                                               Foreground="#D2D6DD" FontSize="11" TextWrapping="Wrap"
+                                               LineHeight="17" Margin="0,5,0,0" />
+                                    <Border Background="#111924" BorderBrush="#344B66" BorderThickness="1"
+                                            CornerRadius="6" Padding="9" Margin="0,8,0,8">
+                                        <StackPanel>
+                                            <TextBlock Text="ARCHIVE SCOPE VS. TEXTURE COVERAGE" Foreground="#B9D0FF"
+                                                       FontSize="10" FontWeight="Bold" />
+                                            <TextBlock Text="{Binding SelectedPack.CoverageSummary, TargetNullValue='Select a pack to review its texture coverage.'}"
+                                                       Foreground="#D5DCE7" FontSize="11" TextWrapping="Wrap"
+                                                       LineHeight="16" Margin="0,3,0,0" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Expander Header="Archives provided by the focused pack" Foreground="#D9DDE4"
+                                              Margin="0,2,0,0">
+                                        <ListBox ItemsSource="{Binding SelectedPack.ArtifactPaths}" MaxHeight="125"
+                                                 Margin="0,6,0,0" Background="#0B0D11"
+                                                 BorderBrush="{StaticResource Border}" BorderThickness="1"
+                                                 ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                                            <ListBox.ItemContainerStyle>
+                                                <Style TargetType="ListBoxItem">
+                                                    <Setter Property="Padding" Value="0" />
+                                                    <Setter Property="Margin" Value="0" />
+                                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                                    <Setter Property="Background" Value="Transparent" />
+                                                </Style>
+                                            </ListBox.ItemContainerStyle>
+                                            <ListBox.ItemTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding}" Foreground="#C8CDD5"
+                                                               FontFamily="Cascadia Mono, Consolas" FontSize="11" Margin="9,4" />
+                                                </DataTemplate>
+                                            </ListBox.ItemTemplate>
+                                        </ListBox>
+                                    </Expander>
+                                </StackPanel>
+                            </ScrollViewer>
                         </Border>
                     </Expander>
 
-                    <Grid Grid.Row="2">
+                    <StackPanel Grid.Row="2" Margin="0,0,0,8">
+                        <Border Background="#1B1114" BorderBrush="#6F3A42"
+                                BorderThickness="1" CornerRadius="7" Padding="9,6,2,0">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="DELETE SHORTCUTS" Foreground="#F6B6BC"
+                                           FontSize="10" FontWeight="Bold" Margin="2,0,12,6"
+                                           VerticalAlignment="Center" />
+                                <WrapPanel Grid.Column="1">
+                                    <Button Content="Select Safe Old Packs" Style="{StaticResource ToolbarButton}"
+                                            Click="SelectSafeOld_Click" IsEnabled="{Binding CanSelectSafeOldPacks}"
+                                            Background="#3A1D20" BorderBrush="#8C4A53"
+                                            ToolTip="Checks old unused packs as one dependency-aware set while keeping installed, recent, unfinished, and safety-blocked work." />
+                                    <Button Content="Select Every Removable Pack" Style="{StaticResource ToolbarButton}"
+                                            Click="SelectAllDeletable_Click" IsEnabled="{Binding CanSelectAllForDeletion}" />
+                                    <Button Content="Clear Delete Checks" Style="{StaticResource ToolbarButton}"
+                                            Click="ClearDeleteChecks_Click" IsEnabled="{Binding CanClearDeletionSelection}" />
+                                </WrapPanel>
+                            </Grid>
+                        </Border>
+                        <Expander Header="Install checkbox shortcuts" Margin="0,5,0,0"
+                                  Foreground="#D9DDE4">
+                            <Expander.Style>
+                                <Style TargetType="Expander">
+                                    <Setter Property="Visibility" Value="Visible" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsCompactLayout}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Expander.Style>
+                            <Border Background="{StaticResource PanelInset}" BorderBrush="{StaticResource Border}"
+                                    BorderThickness="1" CornerRadius="7" Padding="10,9,4,1" Margin="0,6,0,0">
+                                <WrapPanel>
+                                    <Button Content="Match Current Install" Style="{StaticResource ToolbarButton}"
+                                            Click="CheckCurrentInstall_Click" IsEnabled="{Binding CanCheckCurrentInstall}" />
+                                    <Button Content="Install Every Compatible Pack" Style="{StaticResource ToolbarButton}"
+                                            Click="CheckAll_Click" IsEnabled="{Binding CanCheckAll}" />
+                                    <Button Content="Clear Install Checks" Style="{StaticResource ToolbarButton}"
+                                            Click="ClearChecks_Click" IsEnabled="{Binding CanClearChecks}" />
+                                </WrapPanel>
+                            </Border>
+                        </Expander>
+                    </StackPanel>
+
+                    <Grid Grid.Row="3">
                         <TextBlock Text="No completed packs yet.&#x0a;&#x0a;Build one from the main window: choose your EverQuest folder, click Analyze Client, pick a zone and a texture style, then Build Staged Pack. Completed packs appear here, ready to verify and install — building never touches the live game."
                                    Foreground="#9AA3B2" FontSize="13" TextWrapping="Wrap" LineHeight="20"
                                    MaxWidth="420" HorizontalAlignment="Center" VerticalAlignment="Center"
@@ -238,7 +415,7 @@
                     <ListBox x:Name="PackList"
                              ItemsSource="{Binding PacksView}"
                              SelectedItem="{Binding SelectedPack, Mode=TwoWay}"
-                             SelectionMode="Extended"
+                             SelectionMode="Single"
                              SelectionChanged="PackList_SelectionChanged"
                              BorderThickness="0" Background="Transparent"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
@@ -271,18 +448,29 @@
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
                                             <ColumnDefinition Width="*" />
                                         </Grid.ColumnDefinitions>
                                         <CheckBox IsChecked="{Binding IsSelected}" IsEnabled="{Binding CanSelect}"
                                                   ToolTip="{Binding SelectionHint}" VerticalAlignment="Top"
-                                                  Margin="0,3,14,0" Padding="2"
+                                                  Margin="0,3,12,0" Padding="2"
                                                   AutomationProperties.Name="{Binding Title}">
                                             <StackPanel Margin="5,0,0,0">
-                                                <TextBlock Text="INCLUDE" Foreground="#E9EDF3" FontSize="11" FontWeight="Bold" />
-                                                <TextBlock Text="WHEN INSTALLING" Foreground="#AAB0BA" FontSize="9" FontWeight="SemiBold" />
+                                                <TextBlock Text="INSTALL" Foreground="{StaticResource Safe}" FontSize="11" FontWeight="Bold" />
+                                                <TextBlock Text="USE NEXT" Foreground="#AAB0BA" FontSize="9" FontWeight="SemiBold" />
                                             </StackPanel>
                                         </CheckBox>
-                                        <StackPanel Grid.Column="1">
+                                        <CheckBox Grid.Column="1" IsChecked="{Binding IsMarkedForDeletion}"
+                                                  IsEnabled="{Binding CanMarkForDeletion}"
+                                                  ToolTip="{Binding DeletionHint}" VerticalAlignment="Top"
+                                                  Margin="0,3,14,0" Padding="2"
+                                                  AutomationProperties.HelpText="{Binding DeletionHint}">
+                                            <StackPanel Margin="5,0,0,0">
+                                                <TextBlock Text="DELETE" Foreground="#F6B6BC" FontSize="11" FontWeight="Bold" />
+                                                <TextBlock Text="REMOVE PACK" Foreground="#AAB0BA" FontSize="9" FontWeight="SemiBold" />
+                                            </StackPanel>
+                                        </CheckBox>
+                                        <StackPanel Grid.Column="2">
                                             <Grid>
                                                 <Grid.ColumnDefinitions>
                                                     <ColumnDefinition Width="*" />
@@ -297,25 +485,42 @@
                                                                FontSize="10" FontWeight="Bold" />
                                                 </Border>
                                             </Grid>
-                                            <TextBlock Text="{Binding Details}" Foreground="#D0D4DB" FontSize="13"
-                                                       Margin="0,7,0,0" TextWrapping="Wrap" LineHeight="19" />
-                                            <Border Background="#101319" BorderBrush="#2D333D" BorderThickness="1"
-                                                    CornerRadius="5" Padding="9,7" Margin="0,8,0,0">
-                                                <TextBlock Text="{Binding StateText}" Foreground="{StaticResource Safe}"
-                                                           FontSize="12" TextWrapping="Wrap" LineHeight="18" />
-                                            </Border>
+                                            <TextBlock Text="{Binding Details}" Foreground="#D0D4DB" FontSize="12"
+                                                       Margin="0,6,0,0" TextWrapping="Wrap" LineHeight="17"
+                                                       MaxHeight="36" TextTrimming="CharacterEllipsis" />
+                                            <Grid Margin="0,7,0,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="8" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <Border Background="#101319" BorderBrush="#2D333D" BorderThickness="1"
+                                                        CornerRadius="5" Padding="8,6">
+                                                    <TextBlock Text="{Binding StateText}" Foreground="{StaticResource Safe}"
+                                                               FontSize="11" TextWrapping="Wrap" LineHeight="15"
+                                                               MaxHeight="32" TextTrimming="CharacterEllipsis" />
+                                                </Border>
+                                                <Border Grid.Column="2" Background="{Binding DeletionPanelBackground}"
+                                                        BorderBrush="{Binding DeletionPanelBorderBrush}" BorderThickness="1"
+                                                        CornerRadius="5" Padding="8,6" ToolTip="{Binding DeletionHint}">
+                                                    <StackPanel>
+                                                        <TextBlock Text="{Binding DeletionStateText}"
+                                                                   Foreground="{Binding DeletionStateForeground}"
+                                                                   FontSize="10" FontWeight="Bold" TextWrapping="Wrap" />
+                                                        <TextBlock Text="{Binding DeletionHint}"
+                                                                   Foreground="#C9CDD4" FontSize="10"
+                                                                   TextWrapping="Wrap" LineHeight="14" Margin="0,2,0,0"
+                                                                   MaxHeight="29" TextTrimming="CharacterEllipsis" />
+                                                    </StackPanel>
+                                                </Border>
+                                            </Grid>
                                             <Border Background="{Binding RepairPanelBackground}" BorderBrush="{Binding RepairPanelBorderBrush}" BorderThickness="1"
-                                                    CornerRadius="5" Padding="9,8" Margin="0,8,0,0"
+                                                    CornerRadius="5" Padding="8,5" Margin="0,6,0,0"
                                                     Visibility="{Binding CanRepairAny, Converter={StaticResource BoolToVisibility}}">
-                                                <StackPanel>
-                                                    <TextBlock Text="{Binding RepairBadgeText}"
-                                                               Foreground="{Binding RepairStatusForeground}" FontSize="11" FontWeight="Bold" />
-                                                    <TextBlock Text="{Binding RepairStatusText}" Foreground="{Binding RepairStatusForeground}"
-                                                               FontSize="12" TextWrapping="Wrap" LineHeight="18" Margin="0,3,0,0" />
-                                                </StackPanel>
+                                                <TextBlock Text="{Binding RepairBadgeText}"
+                                                           Foreground="{Binding RepairStatusForeground}" FontSize="10" FontWeight="Bold"
+                                                           ToolTip="{Binding RepairStatusText}" />
                                             </Border>
-                                            <TextBlock Text="{Binding SelectionHint}" Foreground="#9FA6B1" FontSize="11"
-                                                       FontStyle="Italic" TextWrapping="Wrap" Margin="0,7,0,0" />
                                         </StackPanel>
                                     </Grid>
                                 </Border>
@@ -328,8 +533,19 @@
 
             <Border Grid.Column="2" Background="{StaticResource Panel}" BorderBrush="{StaticResource Border}"
                     BorderThickness="1" CornerRadius="10" Padding="16">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Visibility" Value="Visible" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsCompactLayout}" Value="True">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
                 <Grid>
                     <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
@@ -337,8 +553,8 @@
                     </Grid.RowDefinitions>
                     <StackPanel>
                         <TextBlock Text="2 / FOCUSED PACK" Style="{StaticResource Eyebrow}" />
-                        <TextBlock Text="Review, repair, or remove one pack" Style="{StaticResource SectionTitle}" Margin="0,4,0,0" />
-                        <TextBlock Text="{Binding HighlightedSelectionText}" Style="{StaticResource Caption}" Margin="0,4,0,0" />
+                        <TextBlock Text="Understand one pack in detail" Style="{StaticResource SectionTitle}" Margin="0,4,0,0" />
+                        <TextBlock Text="{Binding FocusedPackText}" Style="{StaticResource Caption}" Margin="0,4,0,0" />
                     </StackPanel>
 
                     <Border Grid.Row="1" Background="{StaticResource PanelInset}" BorderBrush="{StaticResource Border}"
@@ -346,12 +562,23 @@
                         <StackPanel>
                             <TextBlock Text="{Binding SelectedPack.Title, TargetNullValue=Click a pack card to see its details.}"
                                        FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding SelectedPack.ContentsSummary, TargetNullValue='The checkbox controls installation. Clicking a card controls which pack is shown here. Ctrl/Shift-click several cards only when you want a bulk action.'}"
+                            <TextBlock Text="{Binding SelectedPack.ContentsSummary, TargetNullValue='Click any pack card to see exactly what it contains, what a generated combination uses, and how much texture work was enhanced versus intentionally kept original.'}"
                                        Foreground="#D2D6DD" FontSize="12" TextWrapping="Wrap" LineHeight="18" Margin="0,7,0,0" />
                         </StackPanel>
                     </Border>
 
-                    <StackPanel Grid.Row="2">
+                    <Border Grid.Row="2" Background="#111924" BorderBrush="#344B66"
+                            BorderThickness="1" CornerRadius="7" Padding="11" Margin="0,0,0,11">
+                        <StackPanel>
+                            <TextBlock Text="ARCHIVE SCOPE VS. TEXTURE COVERAGE" Foreground="#B9D0FF"
+                                       FontSize="10" FontWeight="Bold" />
+                            <TextBlock Text="{Binding SelectedPack.CoverageSummary, TargetNullValue='Select a pack to review its texture coverage.'}"
+                                       Foreground="#D5DCE7" FontSize="11" TextWrapping="Wrap"
+                                       LineHeight="17" Margin="0,4,0,0" />
+                        </StackPanel>
+                    </Border>
+
+                    <StackPanel Grid.Row="3">
                         <WrapPanel>
                             <Button Content="Open This Pack’s Preview" Click="Preview_Click" IsEnabled="{Binding CanPreview}"
                                     Background="#193027" BorderBrush="#356A57" />
@@ -362,18 +589,15 @@
                                     Background="#382B18" BorderBrush="#785C2F"
                                     ToolTip="Repairs every checked source pack that needs an update. Source mismatches run first; completed replacements stay checked if a later pack fails." />
                             <Button Content="Repair Pack"
-                                    Click="Repair_Click" IsEnabled="{Binding CanRepairAny}"
+                                    Click="Repair_Click" IsEnabled="{Binding CanRepair}"
                                     ToolTip="Repairs the focused pack named above. Checkmarks do not control this button. The completed original remains unchanged."
                                     Background="#26324A" BorderBrush="#526D9E" />
-                            <Button Content="{Binding DeleteButtonText}" Click="Delete_Click" IsEnabled="{Binding CanDelete}"
-                                    Background="#3A1D20" BorderBrush="#8C4A53" Foreground="#FFDADD"
-                                    ToolTip="Preflight and permanently delete every highlighted pack. Active or referenced packs block the whole operation." />
                         </WrapPanel>
-                        <TextBlock Text="Repair Checked Packs is the simplest fix for an installed combination: affected checked source packs are replaced safely. Preview and Repair Pack affect only the focused pack named above. Delete affects every orange-outlined row. None of these actions deletes live game files or original backups."
+                        <TextBlock Text="Repair Checked Packs fixes affected green Install selections as a set. Preview, Rename, and Repair Pack affect only the focused card. Cleanup is controlled exclusively by the red Delete checkboxes and confirmation bar below."
                                    Style="{StaticResource Caption}" FontSize="11" Margin="0,0,0,9" />
                     </StackPanel>
 
-                    <Grid Grid.Row="3">
+                    <Grid Grid.Row="4">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="*" />
@@ -405,45 +629,70 @@
         </Grid>
 
         <Border Grid.Row="3" Background="#0D1015" BorderBrush="{StaticResource Border}"
-                BorderThickness="1" CornerRadius="9" Padding="14" Margin="0,14,0,0">
+                BorderThickness="1" CornerRadius="9">
+            <Border.Style>
+                <Style TargetType="Border">
+                    <Setter Property="Padding" Value="10" />
+                    <Setter Property="Margin" Value="0,10,0,0" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding IsCompactLayout}" Value="True">
+                            <Setter Property="Padding" Value="8" />
+                            <Setter Property="Margin" Value="0,8,0,0" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Border.Style>
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="260" />
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Text="{Binding SelectionText}" Foreground="{StaticResource Safe}"
-                               FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" />
-                    <ProgressBar Grid.Column="1" Height="6" Margin="16,0,0,0"
-                                 IsIndeterminate="{Binding IsBusy}" Background="#242A32"
-                                 Foreground="{StaticResource Accent}" BorderThickness="0" />
-                </Grid>
-                <CheckBox Grid.Row="1" IsChecked="{Binding IsInstallAcknowledged}" Margin="0,10,0,0">
-                    <TextBlock Text="I reviewed the checked packs above and understand that installing custom client files may be unsupported."
-                               TextWrapping="Wrap" FontSize="12" Foreground="#CDD1D8" />
-                </CheckBox>
-                <Grid Grid.Row="2" Margin="0,10,0,0">
+                <Border Background="#211316" BorderBrush="#6F3A42" BorderThickness="1"
+                        CornerRadius="6" Padding="10,7" Margin="0,0,0,8">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="{Binding CleanupSelectionText}" Foreground="#F6B6BC"
+                                   FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" />
+                        <Button Grid.Column="1" Content="{Binding DeleteButtonText}"
+                                Click="Delete_Click" IsEnabled="{Binding CanDeleteMarked}"
+                                Background="#3A1D20" BorderBrush="#A3545F" Foreground="#FFDADD"
+                                Padding="11,7"
+                                Margin="8,0,0,0"
+                                ToolTip="Permanently delete the red-checkmarked staged packs after one dependency-aware safety preflight." />
+                    </Grid>
+                </Border>
+                <Grid Grid.Row="1">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource Muted}"
-                               FontSize="12" TextWrapping="Wrap" LineHeight="18"
-                               VerticalAlignment="Center" Margin="0,0,18,0" />
+                    <StackPanel Margin="0,0,18,0" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding SelectionText}" Foreground="{StaticResource Safe}"
+                                   FontSize="12" FontWeight="SemiBold" />
+                        <CheckBox IsChecked="{Binding IsInstallAcknowledged}" Margin="0,5,0,0">
+                            <TextBlock Text="I reviewed the checked packs and understand that installing custom client files may be unsupported."
+                                       TextWrapping="Wrap" FontSize="11" Foreground="#CDD1D8" />
+                        </CheckBox>
+                        <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource Muted}"
+                                   FontSize="10" TextWrapping="Wrap" LineHeight="14" Margin="0,5,0,0"
+                                   MaxHeight="30" TextTrimming="CharacterEllipsis" ToolTip="{Binding StatusText}" />
+                    </StackPanel>
                     <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
-                        <Button Content="Cancel Operation" Click="Cancel_Click" IsEnabled="{Binding IsBusy}" />
-                        <Button Content="Back to Build" Click="Close_Click" IsEnabled="{Binding CanClose}" />
+                        <Button Content="Cancel Operation" Click="Cancel_Click" IsEnabled="{Binding IsBusy}" Padding="11,7" />
+                        <Button Content="Back to Build" Click="Close_Click" IsEnabled="{Binding CanClose}" Padding="11,7" />
                         <Button Content="{Binding InstallButtonText}" Click="Install_Click"
                                 IsEnabled="{Binding CanInstall}" IsDefault="True"
                                 Background="#9B3B16" BorderBrush="#F1793D" Foreground="White"
+                                Padding="11,7"
                                 ToolTip="Exact-verify, conflict-check, and install only the checkmarked set. AI upscaling is not rerun." />
                     </WrapPanel>
                 </Grid>
+                <ProgressBar Grid.Row="1" Height="4" VerticalAlignment="Bottom"
+                             IsIndeterminate="{Binding IsBusy}" Background="#242A32"
+                             Foreground="{StaticResource Accent}" BorderThickness="0" />
             </Grid>
         </Border>
     </Grid>

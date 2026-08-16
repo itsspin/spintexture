@@ -873,6 +873,7 @@
                                                        ToolTip="How broad the painted planes and brush clumps are. Left keeps forms tight; right paints with a wider brush." />
                                             </DockPanel>
                                             <Slider x:Name="PaintedStrokeSizeSlider" Value="{Binding PaintedStrokeSize, Delay=200}"
+                                                    IsEnabled="{Binding AreBuiltInPaintedStyleControlsEnabled}"
                                                     AutomationProperties.Name="Painted stroke size" />
                                         </StackPanel>
                                         <StackPanel Grid.Row="0" Grid.Column="4">
@@ -883,6 +884,7 @@
                                                        ToolTip="Visibility of brush-hair grain, value jitter, and warm/cool drift inside the painted planes." />
                                             </DockPanel>
                                             <Slider x:Name="PaintedStrokeStrengthSlider" Value="{Binding PaintedStrokeStrength, Delay=200}"
+                                                    IsEnabled="{Binding AreBuiltInPaintedStyleControlsEnabled}"
                                                     AutomationProperties.Name="Painted stroke strength" />
                                         </StackPanel>
                                         <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,10,0,0">
@@ -893,6 +895,7 @@
                                                        ToolTip="How strongly text, signage, masonry lines, and fine material detail resist the painted simplification. Detail is repainted with a smaller brush, never left photographic." />
                                             </DockPanel>
                                             <Slider x:Name="PaintedDetailSlider" Value="{Binding PaintedDetailPreservation, Delay=200}"
+                                                    IsEnabled="{Binding AreBuiltInPaintedStyleControlsEnabled}"
                                                     AutomationProperties.Name="Painted detail preservation" />
                                         </StackPanel>
                                         <StackPanel Grid.Row="1" Grid.Column="2" Margin="0,10,0,0">
@@ -903,6 +906,7 @@
                                                        ToolTip="How much hue variation merges into broader color planes. Luminance detail is preserved either way." />
                                             </DockPanel>
                                             <Slider x:Name="PaintedColorSlider" Value="{Binding PaintedColorSimplification, Delay=200}"
+                                                    IsEnabled="{Binding AreBuiltInPaintedStyleControlsEnabled}"
                                                     AutomationProperties.Name="Painted color simplification" />
                                         </StackPanel>
                                         <StackPanel Grid.Row="1" Grid.Column="4" Margin="0,10,0,0">
@@ -913,6 +917,7 @@
                                                        ToolTip="Subtle paper/canvas texture so flat planes do not read as vector fill." />
                                             </DockPanel>
                                             <Slider x:Name="PaintedGrainSlider" Value="{Binding PaintedCanvasGrain, Delay=200}"
+                                                    IsEnabled="{Binding AreBuiltInPaintedStyleControlsEnabled}"
                                                     AutomationProperties.Name="Painted canvas grain" />
                                         </StackPanel>
                                         <Button Grid.Row="2" Grid.Column="0" Content="Reset style"
@@ -922,7 +927,7 @@
                                                 AutomationProperties.Name="Reset painted style sliders" />
                                     </Grid>
                                     <TextBlock Margin="0,9,0,0" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap"
-                                               Text="Style sliders shape the painterly finish for new Graphic Painted builds and are recorded in the pack so repairs reproduce the same look. Use Live Settings Preview to judge them on your own textures." />
+                                               Text="{Binding PaintedStyleControlsHelpText}" />
 
                                     <Border Margin="0,12,0,0" Padding="11" CornerRadius="6"
                                             Background="#100D16" BorderBrush="#4E3A6A" BorderThickness="1">
@@ -931,7 +936,7 @@
                                             <TextBlock Text="{Binding ArtisticWorkerStatusText}" Margin="0,6,0,0"
                                                        Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" LineHeight="17" />
                                             <Grid Margin="0,10,0,0"
-                                                  Visibility="{Binding IsArtisticWorkerInstalled, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                                  Visibility="{Binding IsArtisticWorkerEnabled, Converter={StaticResource BooleanToVisibilityConverter}}">
                                                 <Grid.ColumnDefinitions>
                                                     <ColumnDefinition Width="220" />
                                                     <ColumnDefinition Width="*" />
@@ -942,6 +947,7 @@
                                                     <ComboBox Margin="0,6,0,0"
                                                               ItemsSource="{Binding ArtisticStyleOptions}"
                                                               SelectedItem="{Binding SelectedArtisticStyleOption}"
+                                                              IsEnabled="{Binding CanEditArtisticWorkerSettings}"
                                                               DisplayMemberPath="Name"
                                                               AutomationProperties.Name="Diffusion repaint art style" />
                                                 </StackPanel>
@@ -952,7 +958,8 @@
                                             </Grid>
                                             <CheckBox Margin="0,9,0,0"
                                                       IsChecked="{Binding FullResolutionRepaint}"
-                                                      Visibility="{Binding IsArtisticWorkerInstalled, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                                      IsEnabled="{Binding CanEditFullResolutionRepaint}"
+                                                      Visibility="{Binding IsArtisticWorkerEnabled, Converter={StaticResource BooleanToVisibilityConverter}}"
                                                       Foreground="{StaticResource PrimaryTextBrush}"
                                                       AutomationProperties.Name="Full-resolution repaint"
                                                       ToolTip="Paints textures larger than the diffusion bound in overlapping full-resolution tiles instead of one bounded pass. Maximum painted detail on 2K/4K textures, but a large texture becomes many diffusion passes — expect builds several times slower. Recorded in the pack, so repairs match.">

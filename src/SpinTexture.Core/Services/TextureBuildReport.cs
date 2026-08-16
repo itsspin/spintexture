@@ -1,5 +1,7 @@
 using SpinTexture.Core.Models;
+using SpinTexture.Core.Pipeline;
 using SpinTexture.Core.Textures;
+using SpinTexture.Core.Tooling;
 
 namespace SpinTexture.Core.Services;
 
@@ -21,13 +23,19 @@ namespace SpinTexture.Core.Services;
 /// assets ("metal1" doors, "window2" walls), tall trim is no longer skipped
 /// as a sprite strip, and thin or low-color indexed bitmaps become
 /// enhanceable — a repair re-attempts previously preserved textures under
-/// the widened rules. Older packs can advance through these independent
-/// safety rules without rerunning unaffected successfully enhanced
-/// textures.
+/// the widened rules. Revision 10 corrects the legacy WLD material render
+/// method from a bit field to its actual enum, recovering diffuse 0x14
+/// character/world art that revision 6 mistakenly protected as translucent
+/// and regenerating diffuse 0x12/0x31/0x553 textures that revision 8 could
+/// mistakenly encode with a palette color key. It also lets painted presets
+/// stylize safe textures that already equal the selected output cap instead
+/// of copying them unchanged. Older packs can advance through these
+/// independent safety rules without rerunning unaffected successfully
+/// enhanced textures.
 /// </summary>
 public static class TextureProcessingPipeline
 {
-    public const int CurrentRevision = 9;
+    public const int CurrentRevision = 10;
     // Preservation reason recorded when a repair retried a previously
     // preserved member and safely kept its original bytes; shared so repair
     // summaries in the workflow and app can count these outcomes.
@@ -47,6 +55,10 @@ public static class TextureProcessingPipeline
         "masked-material-color-key-v8";
     public const string ExpandedClassicCoverageRuleId =
         "expanded-classic-coverage-v9";
+    public const string LegacyMaterialClassificationRuleId =
+        "legacy-material-classification-v10";
+    public const string PaintedAtCapRepaintRuleId =
+        "painted-at-cap-repaint-v10";
 
     public static bool RequiresRepair(
         TextureBuildReport? report,
@@ -57,6 +69,13 @@ public static class TextureProcessingPipeline
         TextureBuildReport? report,
         AssetScope scope,
         IEnumerable<string>? artifactPaths)
+        => RequiresRepair(report, scope, artifactPaths, preset: null);
+
+    public static bool RequiresRepair(
+        TextureBuildReport? report,
+        AssetScope scope,
+        IEnumerable<string>? artifactPaths,
+        TexturePreset? preset)
     {
         if (scope is not (AssetScope.CharactersAndEquipmentOnly
             or AssetScope.WorldCharactersAndEquipment
@@ -73,7 +92,7 @@ public static class TextureProcessingPipeline
         // not contain environmental sky/celestial assets and therefore has no
         // revision-4 work to do.
         return report is null
-            || GetMissingRepairRuleIds(report, scope, artifactPaths).Count != 0;
+            || GetMissingRepairRuleIds(report, scope, artifactPaths, preset).Count != 0;
     }
 
     /// <summary>
@@ -92,8 +111,15 @@ public static class TextureProcessingPipeline
         TextureBuildReport? report,
         AssetScope scope,
         IEnumerable<string>? artifactPaths)
+        => RequiresTargetedSafetyRepair(report, scope, artifactPaths, preset: null);
+
+    public static bool RequiresTargetedSafetyRepair(
+        TextureBuildReport? report,
+        AssetScope scope,
+        IEnumerable<string>? artifactPaths,
+        TexturePreset? preset)
     {
-        if (!RequiresRepair(report, scope, artifactPaths))
+        if (!RequiresRepair(report, scope, artifactPaths, preset))
         {
             return false;
         }
@@ -140,12 +166,30 @@ public static class TextureProcessingPipeline
         RequiresTargetedSafetyRepair(report, scope);
 
     public static IReadOnlyList<string> GetCurrentRepairRuleIds(AssetScope scope) =>
-        GetRepairRuleIdsThroughRevision(scope, CurrentRevision, artifactPaths: null);
+        GetRepairRuleIdsThroughRevision(
+            scope,
+            CurrentRevision,
+            artifactPaths: null,
+            includePaintedAtCap: true);
 
     public static IReadOnlyList<string> GetCurrentRepairRuleIds(
         AssetScope scope,
         IEnumerable<string>? artifactPaths) =>
-        GetRepairRuleIdsThroughRevision(scope, CurrentRevision, artifactPaths);
+        GetRepairRuleIdsThroughRevision(
+            scope,
+            CurrentRevision,
+            artifactPaths,
+            includePaintedAtCap: true);
+
+    public static IReadOnlyList<string> GetCurrentRepairRuleIds(
+        AssetScope scope,
+        IEnumerable<string>? artifactPaths,
+        TexturePreset preset) =>
+        GetRepairRuleIdsThroughRevision(
+            scope,
+            CurrentRevision,
+            artifactPaths,
+            includePaintedAtCap: IsPaintedPreset(preset));
 
     public static IReadOnlyList<string> GetMissingRepairRuleIds(
         TextureBuildReport? report,
@@ -156,10 +200,27 @@ public static class TextureProcessingPipeline
         TextureBuildReport? report,
         AssetScope scope,
         IEnumerable<string>? artifactPaths)
+        => GetMissingRepairRuleIds(report, scope, artifactPaths, preset: null);
+
+    public static IReadOnlyList<string> GetMissingRepairRuleIds(
+        TextureBuildReport? report,
+        AssetScope scope,
+        IEnumerable<string>? artifactPaths,
+        TexturePreset? preset)
     {
-        var recorded = GetRecordedRepairRuleIds(report, scope)
+        var includePaintedAtCap = preset is { } explicitPreset
+            ? IsPaintedPreset(explicitPreset)
+            : (report?.PaintedProfileRevision ?? 0) > 0;
+        var recorded = GetRecordedRepairRuleIds(
+                report,
+                scope,
+                includePaintedAtCap)
             .ToHashSet(StringComparer.Ordinal);
-        return GetCurrentRepairRuleIds(scope, artifactPaths)
+        return GetRepairRuleIdsThroughRevision(
+                scope,
+                CurrentRevision,
+                artifactPaths,
+                includePaintedAtCap)
             .Where(ruleId => !recorded.Contains(ruleId))
             .ToArray();
     }
@@ -167,6 +228,15 @@ public static class TextureProcessingPipeline
     public static IReadOnlyList<string> GetRecordedRepairRuleIds(
         TextureBuildReport? report,
         AssetScope scope)
+        => GetRecordedRepairRuleIds(
+            report,
+            scope,
+            includePaintedAtCap: (report?.PaintedProfileRevision ?? 0) > 0);
+
+    private static IReadOnlyList<string> GetRecordedRepairRuleIds(
+        TextureBuildReport? report,
+        AssetScope scope,
+        bool includePaintedAtCap)
     {
         if (report?.AppliedRepairRuleIds is { Count: > 0 } recorded)
         {
@@ -179,15 +249,17 @@ public static class TextureProcessingPipeline
         return GetRepairRuleIdsThroughRevision(
             scope,
             report?.TexturePipelineRevision ?? 0,
-            artifactPaths: null);
+            artifactPaths: null,
+            includePaintedAtCap);
     }
 
     private static IReadOnlyList<string> GetRepairRuleIdsThroughRevision(
         AssetScope scope,
         int revision,
-        IEnumerable<string>? artifactPaths)
+        IEnumerable<string>? artifactPaths,
+        bool includePaintedAtCap)
     {
-        var rules = new List<string>(5);
+        var rules = new List<string>(8);
         if (revision >= 1
             && scope is AssetScope.CharactersAndEquipmentOnly
                 or AssetScope.WorldCharactersAndEquipment)
@@ -220,6 +292,19 @@ public static class TextureProcessingPipeline
                 or AssetScope.SelectedZone)
         {
             rules.Add(ExpandedClassicCoverageRuleId);
+        }
+
+        if (revision >= 10
+            && scope is AssetScope.CharactersAndEquipmentOnly
+                or AssetScope.WorldCharactersAndEquipment
+                or AssetScope.WorldOnly
+                or AssetScope.SelectedZone)
+        {
+            rules.Add(LegacyMaterialClassificationRuleId);
+            if (includePaintedAtCap)
+            {
+                rules.Add(PaintedAtCapRepaintRuleId);
+            }
         }
 
         var paths = artifactPaths?.ToArray();
@@ -265,6 +350,9 @@ public static class TextureProcessingPipeline
 
         return rules.ToArray();
     }
+
+    private static bool IsPaintedPreset(TexturePreset preset) =>
+        preset is TexturePreset.Illustrated or TexturePreset.RusticPainted;
 }
 
 /// <summary>
@@ -292,6 +380,16 @@ public sealed record TextureBuildStatistics(
 {
     public int ReusedTextures { get; init; }
     public int FallbackTextures { get; init; }
+    public int ExternalArtisticTextures { get; init; }
+    public int BuiltInPaintedTextures { get; init; }
+}
+
+public enum PaintedRendererOutcome
+{
+    Unknown = 0,
+    BuiltInOnly = 1,
+    ExternalOnly = 2,
+    Mixed = 3
 }
 
 public sealed record TextureBuildReport(
@@ -303,8 +401,17 @@ public sealed record TextureBuildReport(
     int SelectedArchives,
     TextureBuildStatistics Statistics)
 {
-    public const int CurrentSchemaVersion = 3;
-    public const int CurrentIllustratedProfileRevision = 7;
+    public const int MinimumSupportedSchemaVersion = 1;
+    // Schema 4 makes PaintedRendererOutcome and the external worker identity
+    // actual completed-route provenance. In schemas 1-3 the nullable worker
+    // flag only described configured availability and is unsafe for repair.
+    public const int CurrentSchemaVersion = 4;
+    // Revision 8 restored logical texture names to material-aware diffusion
+    // prompts. Revision 9 keeps oversized full-resolution requests on a
+    // bounded single-pass diffusion route when safe instead of silently
+    // mixing in built-in-painted members. Resume/repair must not combine those
+    // route recipes under one claimed Graphic Painted profile.
+    public const int CurrentIllustratedProfileRevision = 9;
     public const int CurrentRusticPaintedProfileRevision = 1;
 
     public static int GetCurrentPaintedProfileRevision(TexturePreset preset) => preset switch
@@ -337,7 +444,112 @@ public sealed record TextureBuildReport(
     // when it is set up and through the built-in painterly stylization when it
     // is not. Null means the report predates this provenance marker.
     public bool? UsedExternalArtisticWorker { get; init; }
+    // SHA-256 identity of the exact worker executable/script plus adjacent
+    // worker-config.json. Null means either the built-in route was used or
+    // the report predates exact external-renderer provenance.
+    public string? ArtisticWorkerFingerprint { get; init; }
+    public string? ArtisticWorkerPreset { get; init; }
+    public PaintedRendererOutcome PaintedRendererOutcome { get; init; }
     public IReadOnlyList<string> AppliedRepairRuleIds { get; init; } = [];
+}
+
+/// <summary>
+/// Validates optional report metadata before it is allowed to influence a
+/// staged pack's UI or repair decisions. A report is not pack identity; a
+/// missing, foreign, future, or malformed report must be treated as absent.
+/// </summary>
+public static class TextureBuildReportValidation
+{
+    public static bool IsUsableForStagedPack(
+        TextureBuildReport? report,
+        string expectedBuildId,
+        string? expectedInstallPath,
+        string expectedBuildDirectory)
+    {
+        if (report is null
+            || string.IsNullOrWhiteSpace(expectedBuildId)
+            || string.IsNullOrWhiteSpace(expectedBuildDirectory)
+            || report.SchemaVersion is < TextureBuildReport.MinimumSupportedSchemaVersion
+                or > TextureBuildReport.CurrentSchemaVersion
+            || string.IsNullOrWhiteSpace(report.BuildId)
+            || string.IsNullOrWhiteSpace(report.InstallPath)
+            || string.IsNullOrWhiteSpace(report.StagingPath)
+            || !report.BuildId.Equals(expectedBuildId, StringComparison.Ordinal)
+            || report.CompletedUtc == default
+            || report.SelectedArchives < 0
+            || report.ResumedArtifacts < 0
+            || report.BaselineTexturePipelineRevision < 0
+            || report.ReusedArtifacts < 0
+            || report.RebuiltArtifacts < 0
+            || report.SafetyUpgradedArtifacts < 0
+            || report.TexturePipelineRevision < 0
+            || report.PaintedProfileRevision < 0
+            || report.DurationSeconds is { } durationSeconds
+                && (!double.IsFinite(durationSeconds) || durationSeconds < 0)
+            || report.StartedUtc is { } startedUtc
+                && (startedUtc == default || startedUtc > report.CompletedUtc)
+            || !Enum.IsDefined(report.PaintedRendererOutcome)
+            || report.AppliedRepairRuleIds is null
+            || report.AppliedRepairRuleIds.Any(string.IsNullOrWhiteSpace))
+        {
+            return false;
+        }
+
+        var statistics = report.Statistics;
+        if (statistics is null
+            || statistics.PreservedReasons is null
+            || statistics.Warnings is null
+            || statistics.DiscoveredTextures < 0
+            || statistics.EnhancedTextures < 0
+            || statistics.PreservedTextures < 0
+            || statistics.ReusedTextures < 0
+            || statistics.FallbackTextures < 0
+            || statistics.ExternalArtisticTextures < 0
+            || statistics.BuiltInPaintedTextures < 0
+            || statistics.SourceTextureBytes < 0
+            || statistics.EnhancedTextureBytes < 0
+            || statistics.EnhancedTextures
+                > int.MaxValue - statistics.ReusedTextures
+            || statistics.PreservedReasons.Any(pair =>
+                string.IsNullOrWhiteSpace(pair.Key) || pair.Value < 0)
+            || statistics.Warnings.Any(string.IsNullOrWhiteSpace))
+        {
+            return false;
+        }
+
+        long preservedReasonTotal = 0;
+        foreach (var reason in statistics.PreservedReasons)
+        {
+            preservedReasonTotal += reason.Value;
+            if (preservedReasonTotal > statistics.PreservedTextures)
+            {
+                return false;
+            }
+        }
+
+        try
+        {
+            if (!Path.GetFileName(Path.TrimEndingDirectorySeparator(expectedBuildDirectory))
+                    .Equals(expectedBuildId, StringComparison.Ordinal)
+                || (!string.IsNullOrWhiteSpace(expectedInstallPath)
+                    && !PathGuard.SamePath(report.InstallPath, expectedInstallPath))
+                || (!PathGuard.SamePath(report.StagingPath, expectedBuildDirectory)
+                    && !Path.GetFileName(Path.TrimEndingDirectorySeparator(report.StagingPath))
+                        .Equals(expectedBuildId, StringComparison.Ordinal)))
+            {
+                return false;
+            }
+        }
+        catch (Exception exception) when (exception is
+            IOException or
+            ArgumentException or
+            NotSupportedException)
+        {
+            return false;
+        }
+
+        return true;
+    }
 }
 
 internal sealed class TextureBuildCounter
@@ -350,6 +562,8 @@ internal sealed class TextureBuildCounter
     private int preserved;
     private int reused;
     private int fallback;
+    private int externalArtistic;
+    private int builtInPainted;
     private int suppressedWarnings;
     private long sourceBytes;
     private long enhancedBytes;
@@ -374,12 +588,21 @@ internal sealed class TextureBuildCounter
         }
     }
 
-    public void Enhanced(long bytes)
+    public void Enhanced(long bytes, NativeTextureProcessResult? result = null)
     {
         lock (gate)
         {
             enhanced++;
             enhancedBytes += bytes;
+            if (result?.UsedExternalArtisticWorker == true)
+            {
+                externalArtistic++;
+            }
+
+            if (result?.UsedBuiltInPaintedRenderer == true)
+            {
+                builtInPainted++;
+            }
         }
     }
 
@@ -443,7 +666,9 @@ internal sealed class TextureBuildCounter
                 reportedWarnings)
             {
                 ReusedTextures = reused,
-                FallbackTextures = fallback
+                FallbackTextures = fallback,
+                ExternalArtisticTextures = externalArtistic,
+                BuiltInPaintedTextures = builtInPainted
             };
         }
     }
@@ -461,7 +686,11 @@ internal sealed class TextureBuildCounter
                 sourceBytes,
                 enhancedBytes,
                 new Dictionary<string, int>(reasons, StringComparer.OrdinalIgnoreCase),
-                warnings.ToArray());
+                warnings.ToArray())
+            {
+                ExternalArtisticTextures = externalArtistic,
+                BuiltInPaintedTextures = builtInPainted
+            };
         }
     }
 
@@ -485,7 +714,13 @@ internal sealed class TextureBuildCounter
             checked(after.SourceTextureBytes - before.SourceTextureBytes),
             checked(after.EnhancedTextureBytes - before.EnhancedTextureBytes),
             reasonDelta,
-            appendedWarnings);
+            appendedWarnings)
+        {
+            ExternalArtisticTextures = checked(
+                after.ExternalArtisticTextures - before.ExternalArtisticTextures),
+            BuiltInPaintedTextures = checked(
+                after.BuiltInPaintedTextures - before.BuiltInPaintedTextures)
+        };
     }
 
     internal void RestoreCheckpoint(TextureBuildCounterCheckpoint contribution)
@@ -498,6 +733,10 @@ internal sealed class TextureBuildCounter
             preserved = checked(preserved + contribution.PreservedTextures);
             reused = checked(reused + contribution.ReusedTextures);
             fallback = checked(fallback + contribution.FallbackTextures);
+            externalArtistic = checked(
+                externalArtistic + contribution.ExternalArtisticTextures);
+            builtInPainted = checked(
+                builtInPainted + contribution.BuiltInPaintedTextures);
             sourceBytes = checked(sourceBytes + contribution.SourceTextureBytes);
             enhancedBytes = checked(enhancedBytes + contribution.EnhancedTextureBytes);
             foreach (var pair in contribution.PreservedReasons)
@@ -523,6 +762,8 @@ internal sealed class TextureBuildCounter
             || contribution.PreservedTextures < 0
             || contribution.ReusedTextures < 0
             || contribution.FallbackTextures < 0
+            || contribution.ExternalArtisticTextures < 0
+            || contribution.BuiltInPaintedTextures < 0
             || contribution.SourceTextureBytes < 0
             || contribution.EnhancedTextureBytes < 0
             || contribution.PreservedReasons.Any(pair => string.IsNullOrWhiteSpace(pair.Key) || pair.Value < 0)
@@ -542,4 +783,8 @@ internal sealed record TextureBuildCounterCheckpoint(
     long SourceTextureBytes,
     long EnhancedTextureBytes,
     IReadOnlyDictionary<string, int> PreservedReasons,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings)
+{
+    public int ExternalArtisticTextures { get; init; }
+    public int BuiltInPaintedTextures { get; init; }
+}

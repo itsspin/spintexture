@@ -176,6 +176,14 @@ public sealed class TextureOptionPreviewService
         // changes only which already-safe sources are shown; it cannot weaken
         // eligibility or let two different sets share a cache entry.
         var candidates = SelectProcessingCandidates(candidatePool, sampleSeed);
+        await using var artisticWorkerLease =
+            await ArtisticWorkerDirectoryLock.AcquireManagedSharedAsync(
+                    paths,
+                    tools,
+                    mayUseArtisticWorker: candidates.Any(candidate =>
+                        candidate.ResolvedOptions.Preset == TexturePreset.Illustrated),
+                    cancellationToken)
+                .ConfigureAwait(false);
 
         var toolSignature = await CreateToolSignatureAsync(
                 tools,
@@ -362,7 +370,8 @@ public sealed class TextureOptionPreviewService
                             candidate.Metadata,
                             candidate.Classification,
                             candidate.ResolvedOptions,
-                            WrapEdges: candidate.WrapEdges)));
+                            WrapEdges: candidate.WrapEdges,
+                            LogicalName: candidate.LogicalName)));
                 }
 
                 progress?.Report(new ProgressUpdate(
@@ -1569,6 +1578,7 @@ public sealed class TextureOptionPreviewService
             SerializeOverrides(options.TextureOverrides),
             toolSignature
         };
+        AppendRenderOptionsIdentity(parts, options);
         foreach (var candidate in candidates
                      .OrderBy(item => item.ContainerRelativePath, StringComparer.OrdinalIgnoreCase)
                      .ThenBy(item => item.LogicalName, StringComparer.OrdinalIgnoreCase))
@@ -1576,13 +1586,44 @@ public sealed class TextureOptionPreviewService
             parts.Add(candidate.ContainerRelativePath.ToLowerInvariant());
             parts.Add(candidate.LogicalName.ToLowerInvariant());
             parts.Add(candidate.PayloadSha256);
-            parts.Add(candidate.ResolvedOptions.Preset.ToString());
-            parts.Add(candidate.ResolvedOptions.PaintedTheme.ToString());
+            AppendRenderOptionsIdentity(parts, candidate.ResolvedOptions);
             parts.Add(candidate.WrapEdges ? "wrap" : "clamp");
             parts.Add(candidate.SourceProvenance.ToString());
         }
 
         return HashParts(parts);
+    }
+
+    internal static string ComputeRenderOptionsIdentityForTest(UpscaleOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        var parts = new List<string>();
+        AppendRenderOptionsIdentity(parts, options);
+        return HashParts(parts);
+    }
+
+    private static void AppendRenderOptionsIdentity(
+        ICollection<string> parts,
+        UpscaleOptions options)
+    {
+        var style = options.ResolvedPaintedStyle;
+        parts.Add(options.Preset.ToString());
+        parts.Add(options.PaintedTheme.ToString());
+        parts.Add(style.StrokeSize.ToString("R", CultureInfo.InvariantCulture));
+        parts.Add(style.StrokeStrength.ToString("R", CultureInfo.InvariantCulture));
+        parts.Add(style.DetailPreservation.ToString("R", CultureInfo.InvariantCulture));
+        parts.Add(style.ColorSimplification.ToString("R", CultureInfo.InvariantCulture));
+        parts.Add(style.CanvasGrain.ToString("R", CultureInfo.InvariantCulture));
+        parts.Add(style.Strength.ToString("R", CultureInfo.InvariantCulture));
+        parts.Add(Math.Clamp(options.BakedDepth, 0d, 1d)
+            .ToString("R", CultureInfo.InvariantCulture));
+        parts.Add(Math.Clamp(options.EmissiveGlow, 0d, 1d)
+            .ToString("R", CultureInfo.InvariantCulture));
+        parts.Add(options.FullResolutionRepaint ? "full-repaint" : "bounded-repaint");
+        parts.Add(Math.Clamp(options.MipSharpen, 0d, 1d)
+            .ToString("R", CultureInfo.InvariantCulture));
+        parts.Add(options.ArtisticWorkerFingerprint ?? "no-artistic-worker");
+        parts.Add(options.ArtisticWorkerPreset ?? "no-artistic-preset");
     }
 
     private static string SerializeOverrides(IReadOnlyList<TextureOverride>? overrides)
@@ -1607,6 +1648,11 @@ public sealed class TextureOptionPreviewService
         IReadOnlyList<PreviewCandidate> candidates,
         CancellationToken cancellationToken)
     {
+        var artisticIdentity = candidates.Any(item =>
+                item.ResolvedOptions.Preset == TexturePreset.Illustrated)
+            ? await ArtisticWorkerIdentityProvider.ResolveAsync(tools, cancellationToken)
+                .ConfigureAwait(false)
+            : null;
         var files = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         AddRequiredFile(files, tools.TexconvPath);
         AddRequiredFile(files, tools.RealEsrganPath);
@@ -1647,6 +1693,12 @@ public sealed class TextureOptionPreviewService
         }
 
         var parts = new List<string>();
+        if (artisticIdentity is not null)
+        {
+            parts.Add("artistic-worker");
+            parts.Add(artisticIdentity.Fingerprint);
+            parts.Add(artisticIdentity.Preset ?? "custom-or-unspecified");
+        }
         foreach (var file in files)
         {
             cancellationToken.ThrowIfCancellationRequested();

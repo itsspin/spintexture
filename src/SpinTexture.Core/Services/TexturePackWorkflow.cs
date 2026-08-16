@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using SpinTexture.Core.Archives;
@@ -16,6 +17,22 @@ public sealed record TexturePackBuildResult(
     ApplyResult? ApplyResult,
     string? PreviewManifestPath);
 
+public sealed record ArtisticWorkerRoute(
+    string WorkerPath,
+    string? Fingerprint,
+    string? Preset,
+    string? IdentityError)
+{
+    public bool HasVerifiedIdentity => Fingerprint is { Length: 64 }
+        && string.IsNullOrWhiteSpace(IdentityError);
+}
+
+internal sealed record SourceRepairPaintedRendererProvenance(
+    bool? UsedExternalArtisticWorker,
+    string? ArtisticWorkerFingerprint,
+    string? ArtisticWorkerPreset,
+    PaintedRendererOutcome RendererOutcome);
+
 public sealed class TexturePackWorkflow
 {
     public static string FreshBuildResumeOperationKey =>
@@ -31,6 +48,155 @@ public sealed class TexturePackWorkflow
 
     internal static int GetFreshPaintedProfileRevision(TexturePreset preset) =>
         TextureBuildReport.GetCurrentPaintedProfileRevision(preset);
+
+    internal static PaintedRendererOutcome ResolvePaintedRendererOutcome(
+        TexturePreset preset,
+        TextureBuildStatistics statistics)
+    {
+        ArgumentNullException.ThrowIfNull(statistics);
+        if (preset != TexturePreset.Illustrated)
+        {
+            return PaintedRendererOutcome.Unknown;
+        }
+
+        return (statistics.ExternalArtisticTextures > 0,
+            statistics.BuiltInPaintedTextures > 0) switch
+        {
+            (true, true) => PaintedRendererOutcome.Mixed,
+            (true, false) => PaintedRendererOutcome.ExternalOnly,
+            (false, true) => PaintedRendererOutcome.BuiltInOnly,
+            _ => PaintedRendererOutcome.Unknown
+        };
+    }
+
+    internal static SourceRepairPaintedRendererProvenance
+        ResolveSourceRepairPaintedRendererProvenance(
+            UpscaleOptions baselineOptions,
+            TextureBuildReport? baselineReport,
+            bool enforceCurrentRoute,
+            bool currentWorkerAvailable,
+            string? currentWorkerFingerprint)
+    {
+        ArgumentNullException.ThrowIfNull(baselineOptions);
+        var legacyWorker = baselineReport?.UsedExternalArtisticWorker;
+        // Schema 4 is the first report contract whose renderer outcome means
+        // the routes that actually produced completed pixels. Older nullable
+        // booleans described worker availability and cannot prove provenance.
+        var outcome = baselineReport is
+            { SchemaVersion: >= 4, PaintedRendererOutcome: var recordedOutcome }
+            ? recordedOutcome
+            : PaintedRendererOutcome.Unknown;
+
+        var usedExternal = outcome switch
+        {
+            PaintedRendererOutcome.ExternalOnly => true,
+            PaintedRendererOutcome.BuiltInOnly => false,
+            PaintedRendererOutcome.Mixed => true,
+            _ => legacyWorker
+        };
+        var fingerprint = outcome == PaintedRendererOutcome.ExternalOnly
+            ? baselineReport?.ArtisticWorkerFingerprint
+                ?? baselineOptions.ArtisticWorkerFingerprint
+            : null;
+        var preset = outcome == PaintedRendererOutcome.ExternalOnly
+            ? baselineReport?.ArtisticWorkerPreset
+                ?? baselineOptions.ArtisticWorkerPreset
+            : null;
+
+        if (baselineOptions.Preset != TexturePreset.Illustrated
+            || !enforceCurrentRoute)
+        {
+            return new SourceRepairPaintedRendererProvenance(
+                usedExternal,
+                fingerprint,
+                preset,
+                outcome);
+        }
+
+        if (outcome == PaintedRendererOutcome.Mixed)
+        {
+            throw new InvalidOperationException(
+                "This Graphic Painted Fantasy pack contains both external-diffusion and built-in painted outputs. Source repair must rebuild contaminated archives, but per-texture renderer provenance is unavailable; rebuild the complete pack instead.");
+        }
+
+        if (outcome == PaintedRendererOutcome.Unknown)
+        {
+            throw new InvalidOperationException(
+                "This Graphic Painted Fantasy pack predates reliable painted-renderer provenance. Source repair cannot prove which renderer created reused members; rebuild the complete pack instead of mixing an unknown legacy look.");
+        }
+
+        if (outcome == PaintedRendererOutcome.BuiltInOnly)
+        {
+            if (currentWorkerAvailable)
+            {
+                throw new InvalidOperationException(
+                    "This Graphic Painted Fantasy pack was created with the built-in painterly renderer, but a diffusion repaint worker is currently enabled. Disable it or rebuild the complete pack before source repair.");
+            }
+
+            return new SourceRepairPaintedRendererProvenance(
+                usedExternal,
+                fingerprint,
+                preset,
+                outcome);
+        }
+
+        if (!currentWorkerAvailable)
+        {
+            throw new InvalidOperationException(
+                "This Graphic Painted Fantasy pack was created with the diffusion repaint worker, but that worker is not currently available. Restore the exact worker or rebuild the complete pack before source repair.");
+        }
+
+        if (fingerprint is not { Length: 64 }
+            || fingerprint.Any(character => !Uri.IsHexDigit(character))
+            || string.IsNullOrWhiteSpace(preset))
+        {
+            throw new InvalidOperationException(
+                "This diffusion-painted pack has no complete exact renderer identity. Source repair cannot safely reproduce contaminated archives; rebuild the complete pack instead.");
+        }
+
+        if (string.IsNullOrWhiteSpace(currentWorkerFingerprint)
+            || !fingerprint.Equals(currentWorkerFingerprint, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "This Graphic Painted Fantasy pack was created with a different diffusion worker, model, or configuration. Restore that exact renderer or rebuild the complete pack before source repair.");
+        }
+
+        return new SourceRepairPaintedRendererProvenance(
+            usedExternal,
+            fingerprint,
+            preset,
+            outcome);
+    }
+
+    private async Task EnsureArtisticWorkerIdentityUnchangedAsync(
+        ProjectPaths paths,
+        ArtisticWorkerIdentity? expectedIdentity,
+        CancellationToken cancellationToken)
+    {
+        var currentTools = toolchainDiscovery.Discover(paths);
+        if (!currentTools.IsReady)
+        {
+            throw new InvalidOperationException(
+                "Graphic Painted build tools changed or became incomplete while the build was running. The staged manifest was not published.");
+        }
+
+        var currentIdentity = await ArtisticWorkerIdentityProvider.ResolveAsync(
+                currentTools,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!string.Equals(
+                expectedIdentity?.Fingerprint,
+                currentIdentity?.Fingerprint,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                expectedIdentity?.Preset,
+                currentIdentity?.Preset,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The Graphic Painted diffusion worker, model, or style configuration changed while the build was running. SpinTexture kept the verified checkpoint but did not publish a mixed-identity pack; resume with the original setup or start a fresh build.");
+        }
+    }
 
     private static readonly JsonSerializerOptions CompositionJsonOptions =
         CreateCompositionJsonOptions();
@@ -98,6 +264,62 @@ public sealed class TexturePackWorkflow
         CancellationToken cancellationToken = default) =>
         scanner.AnalyzeAsync(installPath, progress, cancellationToken);
 
+    /// <summary>
+    /// Resolves the same env/workspace/application artistic worker route used
+    /// by builds, then computes its semantic renderer identity off the UI
+    /// thread. A discovered but invalid worker is still returned with an
+    /// actionable identity error so status surfaces do not silently call it
+    /// unavailable or match it to historical timing data.
+    /// </summary>
+    public async Task<ArtisticWorkerRoute?> ResolveArtisticWorkerRouteAsync(
+        ProjectPaths paths,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        var tools = toolchainDiscovery.Discover(paths);
+        if (!tools.HasArtisticWorker)
+        {
+            return null;
+        }
+
+        try
+        {
+            await using var artisticWorkerLease =
+                await ArtisticWorkerDirectoryLock.AcquireManagedSharedAsync(
+                        paths,
+                        tools,
+                        mayUseArtisticWorker: true,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            var identity = await ArtisticWorkerIdentityProvider.ResolveAsync(
+                    tools,
+                    cancellationToken)
+                .ConfigureAwait(false)
+                ?? throw new InvalidDataException(
+                    "The discovered artistic worker did not resolve an identity.");
+            return new ArtisticWorkerRoute(
+                tools.ArtisticWorkerPath!,
+                identity.Fingerprint,
+                identity.Preset,
+                IdentityError: null);
+        }
+        catch (Exception exception) when (exception is IOException
+                                               or UnauthorizedAccessException
+                                               or InvalidDataException
+                                               or JsonException
+                                               or ArgumentException
+                                               or InvalidOperationException
+                                               or NotSupportedException
+                                               or CryptographicException)
+        {
+            return new ArtisticWorkerRoute(
+                tools.ArtisticWorkerPath!,
+                Fingerprint: null,
+                Preset: null,
+                IdentityError: exception.Message);
+        }
+    }
+
     public async Task<TexturePackBuildResult> BuildAsync(
         ProjectPaths paths,
         UpscaleOptions options,
@@ -148,10 +370,26 @@ public sealed class TexturePackWorkflow
                 "SpinTexture's bundled processing tools are incomplete. "
                 + string.Join(" ", tools.Diagnostics));
         }
+        await using var artisticWorkerLease =
+            await ArtisticWorkerDirectoryLock.AcquireManagedSharedAsync(
+                    paths,
+                    tools,
+                    mayUseArtisticWorker: options.Preset == TexturePreset.Illustrated,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        var artisticIdentity = options.Preset == TexturePreset.Illustrated
+            ? await ArtisticWorkerIdentityProvider.ResolveAsync(tools, cancellationToken)
+                .ConfigureAwait(false)
+            : null;
+        var recordedOptions = options with
+        {
+            ArtisticWorkerFingerprint = artisticIdentity?.Fingerprint,
+            ArtisticWorkerPreset = artisticIdentity?.Preset
+        };
 
         var archiveScopes = DiscoverArchiveScopes(paths.InstallPath);
-        var selectedArchives = SelectArchives(archiveScopes, options);
-        if (selectedArchives.Count == 0 && options.Scope != AssetScope.SpellEffectsOnly)
+        var selectedArchives = SelectArchives(archiveScopes, recordedOptions);
+        if (selectedArchives.Count == 0 && recordedOptions.Scope != AssetScope.SpellEffectsOnly)
         {
             throw new InvalidOperationException("The selected scope did not resolve to any EverQuest archives.");
         }
@@ -166,13 +404,13 @@ public sealed class TexturePackWorkflow
             previewCollector,
             clampArchivePaths: SelectCharacterAndEquipmentArchives(
                 archiveScopes,
-                options),
+                recordedOptions),
             filterCharacterEquipmentEntries:
-                options.Scope is AssetScope.CharactersAndEquipmentOnly
+                recordedOptions.Scope is AssetScope.CharactersAndEquipmentOnly
                     or AssetScope.WorldCharactersAndEquipment);
         var items = await PlanArchiveItemsAsync(
             paths,
-            options,
+            recordedOptions,
             selectedArchives,
             archiveBuilder,
             counter,
@@ -180,11 +418,11 @@ public sealed class TexturePackWorkflow
             progress,
             cancellationToken).ConfigureAwait(false);
 
-        if (options.Scope is AssetScope.AllSafeTextures or AssetScope.SpellEffectsOnly)
+        if (recordedOptions.Scope is AssetScope.AllSafeTextures or AssetScope.SpellEffectsOnly)
         {
             await AddLooseTextureItemsAsync(
                 paths,
-                options,
+                recordedOptions,
                 items,
                 processor,
                 counter,
@@ -197,7 +435,7 @@ public sealed class TexturePackWorkflow
         if (items.Count == 0)
         {
             throw new InvalidOperationException(
-                "No safe textures below the selected resolution cap were found in this scope.");
+                "No safe textures eligible for the selected resolution cap were found in this scope.");
         }
 
         TextureBuildReport? report = null;
@@ -206,9 +444,15 @@ public sealed class TexturePackWorkflow
         var staged = await stagedBuildService.BuildAsync(
             new StagedBuildRequest(
                 paths,
-                options,
+                recordedOptions,
                 items,
-                ResumeOperationKey: GetFreshBuildResumeOperationKey(options.Preset)),
+                ResumeOperationKey: GetFreshBuildResumeOperationKey(recordedOptions.Preset),
+                BeforeManifestCommitAsync: recordedOptions.Preset == TexturePreset.Illustrated
+                    ? token => EnsureArtisticWorkerIdentityUnchangedAsync(
+                        paths,
+                        artisticIdentity,
+                        token)
+                    : null),
             progress,
             cancellationToken,
             async (finalizing, metadataCancellationToken) =>
@@ -221,6 +465,9 @@ public sealed class TexturePackWorkflow
                 }
 
                 var buildCompletedUtc = DateTimeOffset.UtcNow;
+                var rendererOutcome = ResolvePaintedRendererOutcome(
+                    recordedOptions.Preset,
+                    statistics);
                 report = new TextureBuildReport(
                     TextureBuildReport.CurrentSchemaVersion,
                     finalizing.BuildId,
@@ -237,14 +484,25 @@ public sealed class TexturePackWorkflow
                     WasResumed = finalizing.ResumedArtifactCount > 0,
                     ResumedArtifacts = finalizing.ResumedArtifactCount,
                     TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
-                    PaintedProfileRevision = GetFreshPaintedProfileRevision(options.Preset),
-                    UsedExternalArtisticWorker = options.Preset == TexturePreset.Illustrated
-                        ? tools.HasArtisticWorker
+                    PaintedProfileRevision = GetFreshPaintedProfileRevision(recordedOptions.Preset),
+                    UsedExternalArtisticWorker = rendererOutcome switch
+                    {
+                        PaintedRendererOutcome.ExternalOnly or PaintedRendererOutcome.Mixed => true,
+                        PaintedRendererOutcome.BuiltInOnly => false,
+                        _ => null
+                    },
+                    ArtisticWorkerFingerprint = statistics.ExternalArtisticTextures > 0
+                        ? artisticIdentity?.Fingerprint
                         : null,
+                    ArtisticWorkerPreset = statistics.ExternalArtisticTextures > 0
+                        ? artisticIdentity?.Preset
+                        : null,
+                    PaintedRendererOutcome = rendererOutcome,
                     AppliedRepairRuleIds = TextureProcessingPipeline
                         .GetCurrentRepairRuleIds(
-                            options.Scope,
-                            finalizing.Manifest.Entries.Select(entry => entry.RelativeInstallPath))
+                            recordedOptions.Scope,
+                            finalizing.Manifest.Entries.Select(entry => entry.RelativeInstallPath),
+                            recordedOptions.Preset)
                 };
                 reportPath = Path.Combine(finalizing.BuildDirectory, "texture-report.json");
                 await WriteReportAsync(reportPath, report, metadataCancellationToken).ConfigureAwait(false);
@@ -410,6 +668,8 @@ public sealed class TexturePackWorkflow
         TextureOverridePolicy.ValidateAll(textureOverrides);
         _ = retryPreset; // Retained for binary/source compatibility; repair never changes pack identity.
         var isManualTextureRevision = textureOverrides is { Count: > 0 };
+        var hasManualReprocess = textureOverrides?.Any(choice =>
+            choice.Action == TextureOverrideAction.Reprocess) == true;
         var repairStartedUtc = DateTimeOffset.UtcNow;
         var validation = EverQuestInstall.Validate(paths.InstallPath);
         if (!validation.IsValid)
@@ -451,6 +711,8 @@ public sealed class TexturePackWorkflow
 
         var baselineReport = await TryReadTextureBuildReportAsync(
                 baselineInfo.BuildDirectory,
+                baseline.BuildId,
+                paths.InstallPath,
                 cancellationToken)
             .ConfigureAwait(false);
         var currentPaintedProfileRevision =
@@ -458,8 +720,7 @@ public sealed class TexturePackWorkflow
         if (isManualTextureRevision
             && currentPaintedProfileRevision > 0
             && (baselineReport?.PaintedProfileRevision ?? 0) != currentPaintedProfileRevision
-            && textureOverrides!.Any(choice =>
-                choice.Action == TextureOverrideAction.Reprocess))
+            && hasManualReprocess)
         {
             throw new InvalidOperationException(
                 "This painted pack uses an older or unknown art-profile revision. SpinTexture will not mix newly processed textures into it; build a fresh painted pack instead. Preserve Original choices remain safe.");
@@ -477,7 +738,8 @@ public sealed class TexturePackWorkflow
         var requiresPipelineRepair = TextureProcessingPipeline.RequiresRepair(
             baselineReport,
             baseline.Options.Scope,
-            baselineArtifactPaths);
+            baselineArtifactPaths,
+            baseline.Options.Preset);
         if (isManualTextureRevision && requiresPipelineRepair)
         {
             throw new InvalidOperationException(
@@ -487,7 +749,8 @@ public sealed class TexturePackWorkflow
             && TextureProcessingPipeline.RequiresTargetedSafetyRepair(
                 baselineReport,
                 baseline.Options.Scope,
-                baselineArtifactPaths);
+                baselineArtifactPaths,
+                baseline.Options.Preset);
         if (!isManualTextureRevision && isPipelineRepairScope && !requiresPipelineRepair)
         {
             throw new InvalidOperationException(
@@ -497,7 +760,8 @@ public sealed class TexturePackWorkflow
         var missingRepairRules = TextureProcessingPipeline.GetMissingRepairRuleIds(
             baselineReport,
             baseline.Options.Scope,
-            baselineArtifactPaths);
+            baselineArtifactPaths,
+            baseline.Options.Preset);
         var missingExactOriginalRules = missingRepairRules
             .Where(ruleId =>
                 ruleId.Equals(
@@ -525,6 +789,12 @@ public sealed class TexturePackWorkflow
                     StringComparison.Ordinal)
                 || ruleId.Equals(
                     TextureProcessingPipeline.ExpandedClassicCoverageRuleId,
+                    StringComparison.Ordinal)
+                || ruleId.Equals(
+                    TextureProcessingPipeline.LegacyMaterialClassificationRuleId,
+                    StringComparison.Ordinal)
+                || ruleId.Equals(
+                    TextureProcessingPipeline.PaintedAtCapRepaintRuleId,
                     StringComparison.Ordinal));
 
         if (baseline.Options.Scope == AssetScope.AllSafeTextures
@@ -628,6 +898,13 @@ public sealed class TexturePackWorkflow
             InstallAfterBuild = false,
             TextureOverrides = textureOverrides
         };
+        await using var artisticWorkerLease =
+            await ArtisticWorkerDirectoryLock.AcquireManagedSharedAsync(
+                    paths,
+                    tools,
+                    mayUseArtisticWorker: baseline.Options.Preset == TexturePreset.Illustrated,
+                    cancellationToken)
+                .ConfigureAwait(false);
         var requireRequestedVisualProfile = baseline.Options.Preset is
             TexturePreset.Illustrated or TexturePreset.RusticPainted;
         var hasReproduciblePaintedProfile = !requireRequestedVisualProfile
@@ -639,11 +916,92 @@ public sealed class TexturePackWorkflow
         // retried textures with whichever renderer is configured today, so a
         // mismatch with the pack's recorded renderer would quietly mix two
         // different art styles into one pack.
-        var recordedArtisticWorker = baselineReport?.UsedExternalArtisticWorker;
+        var legacyRecordedArtisticWorker = baselineReport?.UsedExternalArtisticWorker;
+        // Schema 4 is the first report contract that records actual completed
+        // renderer routes. The legacy nullable worker flag only recorded
+        // availability, so it is never promoted into repair provenance.
+        var recordedRendererOutcome = baselineReport is
+            { SchemaVersion: >= 4, PaintedRendererOutcome: var actualOutcome }
+            ? actualOutcome
+            : PaintedRendererOutcome.Unknown;
+        var enforceRecordedPaintedRenderer = !isManualTextureRevision
+            || hasManualReprocess;
+        // The route outcome is the authoritative completed-build record. Older
+        // reports only have the nullable compatibility flag, but a modern
+        // report can legitimately say BuiltInOnly even when the manifest
+        // records the external worker that was configured before all of its
+        // jobs fell back. Never let that stale configuration win here.
+        var recordedArtisticWorker = recordedRendererOutcome switch
+        {
+            PaintedRendererOutcome.ExternalOnly => true,
+            PaintedRendererOutcome.BuiltInOnly => false,
+            PaintedRendererOutcome.Mixed => true,
+            _ => legacyRecordedArtisticWorker
+        };
+        if (baseline.Options.Preset == TexturePreset.Illustrated
+            && recordedRendererOutcome == PaintedRendererOutcome.Mixed
+            && enforceRecordedPaintedRenderer)
+        {
+            throw new InvalidOperationException(
+                "This Graphic Painted Fantasy pack contains both external-diffusion and built-in painted outputs. Per-texture renderer provenance is unavailable, so repairing it could mix the styles further; rebuild the pack instead.");
+        }
+        if (baseline.Options.Preset == TexturePreset.Illustrated
+            && recordedRendererOutcome == PaintedRendererOutcome.Unknown
+            && enforceRecordedPaintedRenderer)
+        {
+            throw new InvalidOperationException(
+                "This Graphic Painted Fantasy pack predates reliable painted-renderer provenance. An automatic repair could mix its existing look with a different renderer, so rebuild the complete pack instead; the completed baseline was left unchanged.");
+        }
+        // The completed report records what actually rendered, while manifest
+        // options are written before native work finishes and may only record
+        // what was configured. A worker that failed every eligible texture
+        // produces BuiltInOnly output; its configured fingerprint must not make
+        // that pack impossible to repair with the worker correctly disabled.
+        var recordedArtisticFingerprint = recordedRendererOutcome ==
+                PaintedRendererOutcome.ExternalOnly
+            ? baselineReport?.ArtisticWorkerFingerprint
+                ?? baseline.Options.ArtisticWorkerFingerprint
+            : null;
+        var recordedArtisticPreset = recordedRendererOutcome ==
+                PaintedRendererOutcome.ExternalOnly
+            ? baselineReport?.ArtisticWorkerPreset
+                ?? baseline.Options.ArtisticWorkerPreset
+            : null;
+        if (baseline.Options.Preset == TexturePreset.Illustrated
+            && recordedRendererOutcome == PaintedRendererOutcome.ExternalOnly
+            && enforceRecordedPaintedRenderer
+            && (recordedArtisticFingerprint is not { Length: 64 }
+                || recordedArtisticFingerprint.Any(character => !Uri.IsHexDigit(character))
+                || string.IsNullOrWhiteSpace(recordedArtisticPreset)))
+        {
+            throw new InvalidOperationException(
+                "This diffusion-painted pack predates complete exact renderer identity. Repair cannot safely reproduce its look; rebuild the complete pack instead.");
+        }
+        repairOptions = repairOptions with
+        {
+            ArtisticWorkerFingerprint = recordedArtisticFingerprint,
+            ArtisticWorkerPreset = recordedArtisticPreset
+        };
+        var currentArtisticIdentity = baseline.Options.Preset == TexturePreset.Illustrated
+            ? await ArtisticWorkerIdentityProvider.ResolveAsync(tools, cancellationToken)
+                .ConfigureAwait(false)
+            : null;
         if (baseline.Options.Preset == TexturePreset.Illustrated
             && hasReproduciblePaintedProfile
-            && !isManualTextureRevision)
+            && enforceRecordedPaintedRenderer)
         {
+            if (recordedArtisticFingerprint is not null)
+            {
+                if (currentArtisticIdentity is not null
+                    && !recordedArtisticFingerprint.Equals(
+                        currentArtisticIdentity.Fingerprint,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "This Graphic Painted Fantasy pack was created with a different diffusion worker or worker configuration. Restore that exact worker-config (or rebuild the pack) before repairing, so one pack cannot mix two diffusion recipes.");
+                }
+            }
+
             if (recordedArtisticWorker is { } recordedWorker)
             {
                 if (recordedWorker != tools.HasArtisticWorker)
@@ -677,26 +1035,53 @@ public sealed class TexturePackWorkflow
                 $"Repair coverage no longer includes {uncoveredBaselineArtifacts.Length:N0} archive(s) from the original pack ({examples}). The original staged pack remains intact; rebuild instead of creating an incomplete replacement.");
         }
 
-        var repairArchives = (isTargetedSafetyRepair || isManualTextureRevision)
+        var repairArchives = isManualTextureRevision
             ? selectedArchives
                 .Where(path => baselineEntries.ContainsKey(
                     Path.GetRelativePath(paths.InstallPath, path)))
                 .ToArray()
             : selectedArchives;
+        var repairAdditionPaths = repairArchives
+            .Where(path => !baselineEntries.ContainsKey(
+                Path.GetRelativePath(paths.InstallPath, path)))
+            .Select(Path.GetFullPath)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (repairAdditionPaths.Count != 0
+            && requireRequestedVisualProfile
+            && !hasReproduciblePaintedProfile)
+        {
+            throw new InvalidOperationException(
+                "This painted pack omitted archives that are eligible under the current coverage rules, but its older art-profile revision cannot reproduce them consistently. Build a fresh painted pack instead; the completed baseline was left unchanged.");
+        }
+
+        var repairAdditionSources = repairAdditionPaths.Count == 0
+            ? BuildOriginalSourceResolver.Empty
+            : await PrepareBuildOriginalSourcesAsync(paths, cancellationToken)
+                .ConfigureAwait(false);
 
         var processor = new NativeTextureProcessor(tools);
         var previewCollector = new TexturePreviewCollector(maximumEntries: 24);
+        var clampedRepairArchives = SelectCharacterAndEquipmentArchives(
+            archiveScopes,
+            repairOptions);
+        var filtersCharacterEquipmentEntries =
+            repairOptions.Scope is AssetScope.CharactersAndEquipmentOnly
+                or AssetScope.WorldCharactersAndEquipment;
+        var requiresLegacyMaterialRepair = missingRepairRules.Contains(
+            TextureProcessingPipeline.LegacyMaterialClassificationRuleId,
+            StringComparer.Ordinal);
+        var requiresPaintedAtCapRepair = missingRepairRules.Contains(
+            TextureProcessingPipeline.PaintedAtCapRepaintRuleId,
+            StringComparer.Ordinal);
+        var requiresExternalArtisticWorker =
+            recordedRendererOutcome == PaintedRendererOutcome.ExternalOnly;
         var archiveBuilder = new PfsTextureArchiveBuilder(
             processor,
             counter,
             progress,
             previewCollector,
-            clampArchivePaths: SelectCharacterAndEquipmentArchives(
-                archiveScopes,
-                repairOptions),
-            filterCharacterEquipmentEntries:
-                repairOptions.Scope is AssetScope.CharactersAndEquipmentOnly
-                    or AssetScope.WorldCharactersAndEquipment,
+            clampArchivePaths: clampedRepairArchives,
+            filterCharacterEquipmentEntries: filtersCharacterEquipmentEntries,
             reuseArchivePaths: reuseArchivePaths,
             reuseArchiveFingerprints: reuseArchiveFingerprints,
             // A painted repair always starts from the exact verified staged
@@ -713,13 +1098,46 @@ public sealed class TexturePackWorkflow
                 && (!isTargetedSafetyRepair
                     || missingRepairRules.Contains(
                         TextureProcessingPipeline.ExpandedClassicCoverageRuleId,
+                        StringComparer.Ordinal)
+                    || missingRepairRules.Contains(
+                        TextureProcessingPipeline.LegacyMaterialClassificationRuleId,
+                        StringComparer.Ordinal)
+                    || missingRepairRules.Contains(
+                        TextureProcessingPipeline.PaintedAtCapRepaintRuleId,
                         StringComparer.Ordinal)),
             requireRequestedVisualProfile: requireRequestedVisualProfile,
             // Only the explicitly versioned current painted pipeline can
             // reproduce a missing member. Legacy painted pixels can still be
             // reused byte-for-byte, but mixing them with today's algorithm is
             // refused so users receive a rebuild instruction instead.
-            allowRequestedVisualProfileRegeneration: hasReproduciblePaintedProfile);
+            allowRequestedVisualProfileRegeneration: hasReproduciblePaintedProfile,
+            repairLegacyMaterialClassification: requiresLegacyMaterialRepair,
+            repairPaintedAtCap: requiresPaintedAtCapRepair,
+            requireExternalArtisticWorker: requiresExternalArtisticWorker);
+        // An archive absent from the baseline has no reusable staged payload.
+        // Build it independently from an exact original source; never put it
+        // through the baseline-rebuild path, which intentionally fails closed
+        // when a verified reuse archive is missing.
+        var additionArchiveBuilder = new PfsTextureArchiveBuilder(
+            processor,
+            counter,
+            progress,
+            previewCollector,
+            clampArchivePaths: clampedRepairArchives,
+            filterCharacterEquipmentEntries: filtersCharacterEquipmentEntries,
+            retryUnchangedEntries: true,
+            rebuildFromReuseArchive: false,
+            requireRequestedVisualProfile: requireRequestedVisualProfile,
+            allowRequestedVisualProfileRegeneration: hasReproduciblePaintedProfile,
+            repairLegacyMaterialClassification: requiresLegacyMaterialRepair,
+            repairPaintedAtCap: requiresPaintedAtCapRepair,
+            requireExternalArtisticWorker: requiresExternalArtisticWorker,
+            // This builder starts from a verified original rather than from a
+            // prior painted archive. A rejected member can therefore remain
+            // original without accepting a different visual route; if every
+            // member is rejected, the source-identical addition is omitted.
+            allowRequestedProfileFailureToKeepOriginal:
+                requireRequestedVisualProfile);
 
         var items = new List<StagedBuildItem>();
         for (var index = 0; index < repairArchives.Count; index++)
@@ -739,6 +1157,7 @@ public sealed class TexturePackWorkflow
                 relativePath));
 
             var sourcePath = liveArchivePath;
+            ResolvedBuildSource? resolvedAdditionSource = null;
             if (baselineEntries.TryGetValue(relativePath, out var baselineEntry))
             {
                 sourcePath = await ResolveRepairSourceAsync(
@@ -749,39 +1168,45 @@ public sealed class TexturePackWorkflow
                     activeInstallDirectory,
                     cancellationToken).ConfigureAwait(false);
             }
+            else
+            {
+                resolvedAdditionSource = await repairAdditionSources
+                    .ResolveAsync(relativePath, liveArchivePath, cancellationToken)
+                    .ConfigureAwait(false);
+                sourcePath = resolvedAdditionSource.Path;
+            }
 
             try
             {
                 await using var archive = await PfsArchive.OpenAsync(
                     sourcePath,
                     cancellationToken: cancellationToken).ConfigureAwait(false);
-                if (archive.Entries.Any(entry =>
-                        PfsTextureArchiveBuilder.IsPotentialCandidate(
-                            entry,
-                            repairOptions.MaximumDimension)
-                        && (repairOptions.Scope is not (
-                                AssetScope.CharactersAndEquipmentOnly
-                                or AssetScope.WorldCharactersAndEquipment)
-                            || CharacterEquipmentArchiveCatalog.IsTextureEntryAllowed(
-                                relativePath,
-                                entry.Name))))
+                if (HasPotentialArchiveCandidate(
+                        archive,
+                        relativePath,
+                        repairOptions))
                 {
                     items.Add(new StagedBuildItem(
                         relativePath,
-                        archiveBuilder,
+                        baselineEntry is null ? additionArchiveBuilder : archiveBuilder,
                         PathGuard.SamePath(sourcePath, liveArchivePath) ? null : sourcePath,
-                        baselineEntry?.SourceLength,
-                        baselineEntry?.SourceSha256,
+                        baselineEntry?.SourceLength
+                            ?? resolvedAdditionSource?.ExpectedLength,
+                        baselineEntry?.SourceSha256
+                            ?? resolvedAdditionSource?.ExpectedSha256,
                         AllowSourceIdenticalOmission: isTargetedSafetyRepair
-                            && CanOmitSourceIdenticalSafetyArtifact(relativePath)));
+                            && baselineEntry is null));
                 }
             }
             catch (Exception exception) when (exception is IOException or InvalidDataException)
             {
-                if (baselineEntries.ContainsKey(relativePath))
+                if (baselineEntries.ContainsKey(relativePath)
+                    || (isTargetedSafetyRepair
+                        && repairAdditionPaths.Contains(
+                            Path.GetFullPath(liveArchivePath))))
                 {
                     throw new InvalidDataException(
-                        $"A previously staged archive could not be read during repair: {relativePath}. The original staged pack remains intact and no incomplete replacement was created.",
+                        $"A selected archive could not be read during repair: {relativePath}. The original staged pack remains intact and no incomplete replacement was created.",
                         exception);
                 }
 
@@ -796,105 +1221,149 @@ public sealed class TexturePackWorkflow
         }
 
 
+        var plannedRepairPaths = items
+            .Select(item => item.RelativeInstallPath)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var missingBaselineItems = baselineEntries.Keys
+            .Where(relativePath => !plannedRepairPaths.Contains(relativePath))
+            .OrderBy(relativePath => relativePath, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
         if ((isTargetedSafetyRepair || isManualTextureRevision)
-            && items.Count != baselineEntries.Count)
+            && missingBaselineItems.Length != 0)
         {
             throw new InvalidOperationException(
                 "The targeted safety repair could not account for every archive in the verified baseline. The original staged pack remains intact; no incomplete replacement was created.");
         }
-
+        TextureBuildReport? report = null;
+        string? reportPath = null;
+        string? previewManifestPath = null;
         var staged = await stagedBuildService.BuildAsync(
             new StagedBuildRequest(
                 paths,
                 repairOptions,
                 items,
-                RequireAllItems: isTargetedSafetyRepair || isManualTextureRevision),
+                RequireAllItems: isTargetedSafetyRepair || isManualTextureRevision,
+                BeforeManifestCommitAsync:
+                    baseline.Options.Preset == TexturePreset.Illustrated
+                        ? token => EnsureArtisticWorkerIdentityUnchangedAsync(
+                            paths,
+                            currentArtisticIdentity,
+                            token)
+                        : null),
             progress,
-            cancellationToken).ConfigureAwait(false);
-        var preliminaryStatistics = counter.Snapshot();
-        counter.Warn(isManualTextureRevision
-            ? $"Texture revision reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and changed only explicitly reviewed entries."
-            : isTargetedSafetyRepair
-                ? $"Safety repair reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and changed only outputs affected by newer safety rules; source-identical entries were not retried."
-                : $"Repair reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and retried only unchanged eligible entries.");
-        var retriedKeptOriginal = preliminaryStatistics.PreservedReasons.GetValueOrDefault(
-            PfsTextureArchiveBuilder.RetriedPreservedOriginalReason);
-        counter.Warn(
-            $"Repair outcome: {preliminaryStatistics.EnhancedTextures:N0} texture(s) were newly enhanced by this repair"
-            + (retriedKeptOriginal > 0
-                ? $"; {retriedKeptOriginal:N0} retried texture(s) could not be regenerated and kept their verified originals."
-                : "."));
-        var statistics = counter.Snapshot();
-        if (statistics.EnhancedTextures == 0 && statistics.ReusedTextures == 0)
-        {
-            throw new InvalidOperationException(
-                "The repair completed without a reusable or newly enhanced texture.");
-        }
-
-        var repairCompletedUtc = DateTimeOffset.UtcNow;
-        var report = new TextureBuildReport(
-            TextureBuildReport.CurrentSchemaVersion,
-            staged.BuildId,
-            repairCompletedUtc,
-            paths.InstallPath,
-            staged.BuildDirectory,
-            repairArchives.Count,
-            statistics)
-        {
-            StartedUtc = repairStartedUtc,
-            DurationSeconds = (repairCompletedUtc - repairStartedUtc).TotalSeconds,
-            IsIncrementalRepair = true,
-            IsSafetyRepair = isTargetedSafetyRepair,
-            // Compatibility flag: true only when the baseline predates the
-            // cutout rule, even though the targeted route may apply newer rules.
-            IsCutoutMipRepair = isTargetedSafetyRepair
-                && (baselineReport?.TexturePipelineRevision ?? 0) < 3,
-            IsManualTextureRevision = isManualTextureRevision,
-            BaselineBuildId = baseline.BuildId,
-            BaselineTexturePipelineRevision = baselineReport?.TexturePipelineRevision ?? 0,
-            TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
-            PaintedProfileRevision = baselineReport?.PaintedProfileRevision ?? 0,
-            // A pack that predates renderer provenance regenerated its retried
-            // textures with the currently configured renderer just now, so the
-            // replacement records today's renderer as its identity.
-            UsedExternalArtisticWorker = baseline.Options.Preset == TexturePreset.Illustrated
-                ? recordedArtisticWorker ?? tools.HasArtisticWorker
-                : recordedArtisticWorker,
-            AppliedRepairRuleIds = TextureProcessingPipeline
-                .GetCurrentRepairRuleIds(
-                    baseline.Options.Scope,
-                    baselineArtifactPaths)
-        };
-        var reportPath = Path.Combine(staged.BuildDirectory, "texture-report.json");
-        await WriteReportAsync(reportPath, report, cancellationToken).ConfigureAwait(false);
-
-        string? previewManifestPath = null;
-        var previewEntries = previewCollector.Snapshot();
-        var reviewEntries = previewCollector.ReviewSnapshot();
-        if (previewEntries.Count > 0 || reviewEntries.Count > 0)
-        {
-            var previewManifest = new TexturePreviewManifest(
-                TexturePreviewManifest.CurrentSchemaVersion,
-                staged.BuildId,
-                DateTimeOffset.UtcNow,
-                previewEntries)
+            cancellationToken,
+            async (finalizing, metadataCancellationToken) =>
             {
-                ReviewEntries = reviewEntries
-            };
-            previewManifestPath = Path.Combine(
-                staged.BuildDirectory,
-                "previews",
-                "preview-manifest.json");
-            await WritePreviewManifestAsync(
-                previewManifestPath,
-                previewManifest,
-                cancellationToken).ConfigureAwait(false);
-        }
+                if (isTargetedSafetyRepair && repairAdditionPaths.Count != 0)
+                {
+                    var committedAdditions = finalizing.Manifest.Entries.Count(entry =>
+                        !baselineEntries.ContainsKey(entry.RelativeInstallPath));
+                    counter.Warn(
+                        $"Safety repair reconsidered {repairAdditionPaths.Count:N0} selected archive(s) that the older pack omitted entirely; {committedAdditions:N0} produced verified enhanced output and were added.");
+                }
+
+                var preliminaryStatistics = counter.Snapshot();
+                var retriesPreviouslyPreserved = missingRepairRules.Contains(
+                        TextureProcessingPipeline.ExpandedClassicCoverageRuleId,
+                        StringComparer.Ordinal)
+                    || missingRepairRules.Contains(
+                        TextureProcessingPipeline.LegacyMaterialClassificationRuleId,
+                        StringComparer.Ordinal)
+                    || missingRepairRules.Contains(
+                        TextureProcessingPipeline.PaintedAtCapRepaintRuleId,
+                        StringComparer.Ordinal);
+                counter.Warn(isManualTextureRevision
+                    ? $"Texture revision reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and changed only explicitly reviewed entries."
+                    : isTargetedSafetyRepair
+                        ? $"Safety repair reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and changed only outputs affected by newer safety rules; "
+                            + (retriesPreviouslyPreserved
+                                ? "textures previously kept original by superseded coverage/material rules were retried."
+                                : "source-identical entries were not retried.")
+                        : $"Repair reused {preliminaryStatistics.ReusedTextures:N0} prior enhanced textures and retried only unchanged eligible entries.");
+                var retriedKeptOriginal = preliminaryStatistics.PreservedReasons.GetValueOrDefault(
+                    PfsTextureArchiveBuilder.RetriedPreservedOriginalReason);
+                counter.Warn(
+                    $"Repair outcome: {preliminaryStatistics.EnhancedTextures:N0} texture(s) were newly enhanced by this repair"
+                    + (retriedKeptOriginal > 0
+                        ? $"; {retriedKeptOriginal:N0} retried texture(s) could not be regenerated and kept their verified originals."
+                        : "."));
+                var statistics = counter.Snapshot();
+                if (statistics.EnhancedTextures == 0 && statistics.ReusedTextures == 0)
+                {
+                    throw new InvalidOperationException(
+                        "The repair completed without a reusable or newly enhanced texture.");
+                }
+
+                var repairCompletedUtc = DateTimeOffset.UtcNow;
+                report = new TextureBuildReport(
+                    TextureBuildReport.CurrentSchemaVersion,
+                    finalizing.BuildId,
+                    repairCompletedUtc,
+                    paths.InstallPath,
+                    finalizing.BuildDirectory,
+                    repairArchives.Count,
+                    statistics)
+                {
+                    StartedUtc = repairStartedUtc,
+                    DurationSeconds = (repairCompletedUtc - repairStartedUtc).TotalSeconds,
+                    IsIncrementalRepair = true,
+                    IsSafetyRepair = isTargetedSafetyRepair,
+                    // Compatibility flag: true only when the baseline predates the
+                    // cutout rule, even though the targeted route may apply newer rules.
+                    IsCutoutMipRepair = isTargetedSafetyRepair
+                        && (baselineReport?.TexturePipelineRevision ?? 0) < 3,
+                    IsManualTextureRevision = isManualTextureRevision,
+                    BaselineBuildId = baseline.BuildId,
+                    BaselineTexturePipelineRevision = baselineReport?.TexturePipelineRevision ?? 0,
+                    TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
+                    PaintedProfileRevision = baselineReport?.PaintedProfileRevision ?? 0,
+                    UsedExternalArtisticWorker = recordedArtisticWorker,
+                    ArtisticWorkerFingerprint = recordedArtisticFingerprint,
+                    ArtisticWorkerPreset = recordedArtisticPreset,
+                    PaintedRendererOutcome = recordedRendererOutcome,
+                    AppliedRepairRuleIds = TextureProcessingPipeline
+                        .GetCurrentRepairRuleIds(
+                            baseline.Options.Scope,
+                            finalizing.Manifest.Entries.Select(
+                                entry => entry.RelativeInstallPath),
+                            baseline.Options.Preset)
+                };
+                reportPath = Path.Combine(finalizing.BuildDirectory, "texture-report.json");
+                await WriteReportAsync(reportPath, report, metadataCancellationToken)
+                    .ConfigureAwait(false);
+
+                var previewEntries = previewCollector.Snapshot();
+                var reviewEntries = previewCollector.ReviewSnapshot();
+                if (previewEntries.Count > 0 || reviewEntries.Count > 0)
+                {
+                    var previewManifest = new TexturePreviewManifest(
+                        TexturePreviewManifest.CurrentSchemaVersion,
+                        finalizing.BuildId,
+                        DateTimeOffset.UtcNow,
+                        previewEntries)
+                    {
+                        ReviewEntries = reviewEntries
+                    };
+                    previewManifestPath = Path.Combine(
+                        finalizing.BuildDirectory,
+                        "previews",
+                        "preview-manifest.json");
+                    await WritePreviewManifestAsync(
+                        previewManifestPath,
+                        previewManifest,
+                        metadataCancellationToken).ConfigureAwait(false);
+                }
+            }).ConfigureAwait(false);
+
+        var completedReport = report
+            ?? throw new InvalidDataException("The repaired texture pack report was not finalized.");
+        var completedReportPath = reportPath
+            ?? throw new InvalidDataException("The repaired texture pack report path was not finalized.");
 
         return new TexturePackBuildResult(
             staged,
-            report,
-            reportPath,
+            completedReport,
+            completedReportPath,
             ApplyResult: null,
             previewManifestPath);
     }
@@ -1106,6 +1575,8 @@ public sealed class TexturePackWorkflow
             InstallAfterBuild = false,
             TextureOverrides = null
         };
+        TextureBuildReport? report = null;
+        string? reportPath = null;
         StagedBuildResult staged;
         try
         {
@@ -1116,7 +1587,61 @@ public sealed class TexturePackWorkflow
                         items,
                         RequireAllItems: true),
                     progress,
-                    cancellationToken)
+                    cancellationToken,
+                    async (finalizing, metadataCancellationToken) =>
+                    {
+                        var statistics = counter.Snapshot();
+                        counter.Warn(
+                            $"Safety repair exact-reused {exactReusedArtifacts:N0} unaffected artifact(s) and upgraded {safetyUpgradedArtifacts:N0} artifact(s) by restoring protected sky/celestial or legacy translucent-material content from verified originals without AI processing.");
+                        statistics = counter.Snapshot();
+                        var completedUtc = DateTimeOffset.UtcNow;
+                        report = new TextureBuildReport(
+                            TextureBuildReport.CurrentSchemaVersion,
+                            finalizing.BuildId,
+                            completedUtc,
+                            paths.InstallPath,
+                            finalizing.BuildDirectory,
+                            baselineInfo.Artifacts.Count,
+                            statistics)
+                        {
+                            StartedUtc = repairStartedUtc,
+                            DurationSeconds = (completedUtc - repairStartedUtc).TotalSeconds,
+                            IsIncrementalRepair = true,
+                            IsSafetyRepair = true,
+                            IsCutoutMipRepair = false,
+                            BaselineBuildId = baseline.BuildId,
+                            BaselineTexturePipelineRevision = baselineReport?.TexturePipelineRevision ?? 0,
+                            ReusedArtifacts = exactReusedArtifacts,
+                            SafetyUpgradedArtifacts = safetyUpgradedArtifacts,
+                            TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
+                            PaintedProfileRevision = baselineReport?.PaintedProfileRevision ?? 0,
+                            UsedExternalArtisticWorker = baselineReport?.UsedExternalArtisticWorker,
+                            ArtisticWorkerFingerprint = baseline.Options.ArtisticWorkerFingerprint
+                                ?? baselineReport?.ArtisticWorkerFingerprint,
+                            ArtisticWorkerPreset = baseline.Options.ArtisticWorkerPreset
+                                ?? baselineReport?.ArtisticWorkerPreset,
+                            PaintedRendererOutcome = baselineReport?.PaintedRendererOutcome
+                                ?? PaintedRendererOutcome.Unknown,
+                            // Record only what this exact-original pass actually applied on
+                            // top of the pack's prior provenance. Claiming every current rule
+                            // here would silently mark repairs (such as the masked color-key
+                            // regeneration) as done when this path never performs them.
+                            AppliedRepairRuleIds = TextureProcessingPipeline
+                                .GetRecordedRepairRuleIds(baselineReport, baseline.Options.Scope)
+                                .Concat(missingRepairRules)
+                                .Distinct(StringComparer.Ordinal)
+                                .OrderBy(ruleId => ruleId, StringComparer.Ordinal)
+                                .ToArray()
+                        };
+                        reportPath = Path.Combine(
+                            finalizing.BuildDirectory,
+                            "texture-report.json");
+                        await WriteReportAsync(
+                                reportPath,
+                                report,
+                                metadataCancellationToken)
+                            .ConfigureAwait(false);
+                    })
                 .ConfigureAwait(false);
         }
         catch (InvalidOperationException exception) when (
@@ -1129,52 +1654,14 @@ public sealed class TexturePackWorkflow
                 exception);
         }
 
-        var statistics = counter.Snapshot();
-        counter.Warn(
-            $"Safety repair exact-reused {exactReusedArtifacts:N0} unaffected artifact(s) and upgraded {safetyUpgradedArtifacts:N0} artifact(s) by restoring protected sky/celestial or legacy translucent-material content from verified originals without AI processing.");
-        statistics = counter.Snapshot();
-        var completedUtc = DateTimeOffset.UtcNow;
-        var artifactPaths = baselineInfo.Artifacts
-            .Select(artifact => artifact.CanonicalRelativeInstallPath)
-            .ToArray();
-        var report = new TextureBuildReport(
-            TextureBuildReport.CurrentSchemaVersion,
-            staged.BuildId,
-            completedUtc,
-            paths.InstallPath,
-            staged.BuildDirectory,
-            baselineInfo.Artifacts.Count,
-            statistics)
-        {
-            StartedUtc = repairStartedUtc,
-            DurationSeconds = (completedUtc - repairStartedUtc).TotalSeconds,
-            IsIncrementalRepair = true,
-            IsSafetyRepair = true,
-            IsCutoutMipRepair = false,
-            BaselineBuildId = baseline.BuildId,
-            BaselineTexturePipelineRevision = baselineReport?.TexturePipelineRevision ?? 0,
-            ReusedArtifacts = exactReusedArtifacts,
-            SafetyUpgradedArtifacts = safetyUpgradedArtifacts,
-            TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
-            PaintedProfileRevision = baselineReport?.PaintedProfileRevision ?? 0,
-            UsedExternalArtisticWorker = baselineReport?.UsedExternalArtisticWorker,
-            // Record only what this exact-original pass actually applied on
-            // top of the pack's prior provenance. Claiming every current rule
-            // here would silently mark repairs (such as the masked color-key
-            // regeneration) as done when this path never performs them.
-            AppliedRepairRuleIds = TextureProcessingPipeline
-                .GetRecordedRepairRuleIds(baselineReport, baseline.Options.Scope)
-                .Concat(missingRepairRules)
-                .Distinct(StringComparer.Ordinal)
-                .OrderBy(ruleId => ruleId, StringComparer.Ordinal)
-                .ToArray()
-        };
-        var reportPath = Path.Combine(staged.BuildDirectory, "texture-report.json");
-        await WriteReportAsync(reportPath, report, cancellationToken).ConfigureAwait(false);
+        var completedReport = report
+            ?? throw new InvalidDataException("The safety-repair texture report was not finalized.");
+        var completedReportPath = reportPath
+            ?? throw new InvalidDataException("The safety-repair report path was not finalized.");
         return new TexturePackBuildResult(
             staged,
-            report,
-            reportPath,
+            completedReport,
+            completedReportPath,
             ApplyResult: null,
             PreviewManifestPath: null);
     }
@@ -1321,10 +1808,31 @@ public sealed class TexturePackWorkflow
         }
 
         var baseline = baselineInfo.Manifest!;
+        await using var artisticWorkerLease = tools is null
+            ? null
+            : await ArtisticWorkerDirectoryLock.AcquireManagedSharedAsync(
+                    paths,
+                    tools,
+                    mayUseArtisticWorker: baseline.Options.Preset == TexturePreset.Illustrated,
+                    cancellationToken)
+                .ConfigureAwait(false);
         var baselineReport = await TryReadTextureBuildReportAsync(
                 baselineInfo.BuildDirectory,
+                baseline.BuildId,
+                paths.InstallPath,
                 cancellationToken)
             .ConfigureAwait(false);
+        var currentArtisticIdentity = baseline.Options.Preset == TexturePreset.Illustrated
+            && tools is not null
+            ? await ArtisticWorkerIdentityProvider.ResolveAsync(tools, cancellationToken)
+                .ConfigureAwait(false)
+            : null;
+        var rendererProvenance = ResolveSourceRepairPaintedRendererProvenance(
+            baseline.Options,
+            baselineReport,
+            enforceCurrentRoute: tools is not null,
+            currentWorkerAvailable: tools?.HasArtisticWorker == true,
+            currentArtisticIdentity?.Fingerprint);
         var isPaintedBaseline = baseline.Options.Preset is
             TexturePreset.Illustrated or TexturePreset.RusticPainted;
         var currentPaintedProfileRevision =
@@ -1342,7 +1850,8 @@ public sealed class TexturePackWorkflow
                     baselineReport,
                     baseline.Options.Scope,
                     baselineInfo.Artifacts.Select(artifact =>
-                        artifact.CanonicalRelativeInstallPath)));
+                        artifact.CanonicalRelativeInstallPath),
+                    baseline.Options.Preset));
         var originalSources = await PrepareBuildOriginalSourcesAsync(paths, cancellationToken)
             .ConfigureAwait(false);
         var provenance = await LoadManagedInstallProvenanceAsync(paths, cancellationToken)
@@ -1363,7 +1872,9 @@ public sealed class TexturePackWorkflow
                 baseline.Options.Scope is AssetScope.CharactersAndEquipmentOnly
                     or AssetScope.WorldCharactersAndEquipment,
             requireRequestedVisualProfile: isPaintedBaseline,
-            allowRequestedVisualProfileRegeneration: hasReproduciblePaintedProfile);
+            allowRequestedVisualProfileRegeneration: hasReproduciblePaintedProfile,
+            requireExternalArtisticWorker:
+                rendererProvenance.RendererOutcome == PaintedRendererOutcome.ExternalOnly);
         var reuseArchivePaths = baselineInfo.Artifacts.ToDictionary(
             artifact => artifact.CanonicalRelativeInstallPath,
             artifact => artifact.PayloadPath,
@@ -1391,7 +1902,9 @@ public sealed class TexturePackWorkflow
                 reuseArchivePaths: reuseArchivePaths,
                 reuseArchiveFingerprints: reuseArchiveFingerprints,
                 requireRequestedVisualProfile: isPaintedBaseline,
-                allowRequestedVisualProfileRegeneration: hasReproduciblePaintedProfile)
+                allowRequestedVisualProfileRegeneration: hasReproduciblePaintedProfile,
+                requireExternalArtisticWorker:
+                    rendererProvenance.RendererOutcome == PaintedRendererOutcome.ExternalOnly)
             : null;
         var reusableArtifacts = baselineInfo.Artifacts.ToDictionary(
             artifact => artifact.CanonicalRelativeInstallPath,
@@ -1536,86 +2049,118 @@ public sealed class TexturePackWorkflow
                 "This staged pack has no managed source mismatch to repair. The original staged pack remains intact.");
         }
 
-        var repairOptions = baseline.Options with { InstallAfterBuild = false };
+        var repairOptions = baseline.Options with
+        {
+            InstallAfterBuild = false,
+            ArtisticWorkerFingerprint = rendererProvenance.ArtisticWorkerFingerprint,
+            ArtisticWorkerPreset = rendererProvenance.ArtisticWorkerPreset
+        };
+        TextureBuildReport? report = null;
+        string? reportPath = null;
+        string? previewManifestPath = null;
         var staged = await stagedBuildService.BuildAsync(
                 new StagedBuildRequest(
                     paths,
                     repairOptions,
                     items,
-                    RequireAllItems: true),
+                    RequireAllItems: true,
+                    BeforeManifestCommitAsync:
+                        baseline.Options.Preset == TexturePreset.Illustrated
+                        && tools is not null
+                            ? token => EnsureArtisticWorkerIdentityUnchangedAsync(
+                                paths,
+                                currentArtisticIdentity,
+                                token)
+                            : null),
                 progress,
-                cancellationToken)
-            .ConfigureAwait(false);
-        counter.Warn(applyTargetedSafetyRepair
-            ? $"Source and safety repair upgraded {safetyUpgradedCount:N0} clean archive(s) from their exact staged baselines and rebuilt {rebuiltCount:N0} contaminated archive(s) from verified originals."
-            : $"Source repair reused {reusedCount:N0} complete staged archive(s) and rebuilt {rebuiltCount:N0} contaminated archive(s) from verified originals.");
-        var statistics = counter.Snapshot();
-        var repairCompletedUtc = DateTimeOffset.UtcNow;
-        var report = new TextureBuildReport(
-            TextureBuildReport.CurrentSchemaVersion,
-            staged.BuildId,
-            repairCompletedUtc,
-            paths.InstallPath,
-            staged.BuildDirectory,
-            baseline.Entries.Count,
-            statistics)
-        {
-            StartedUtc = repairStartedUtc,
-            DurationSeconds = (repairCompletedUtc - repairStartedUtc).TotalSeconds,
-            IsIncrementalRepair = applyTargetedSafetyRepair,
-            IsSourceMismatchRepair = true,
-            IsSafetyRepair = applyTargetedSafetyRepair,
-            IsCutoutMipRepair = applyTargetedSafetyRepair
-                && (baselineReport?.TexturePipelineRevision ?? 0) < 3,
-            BaselineBuildId = baseline.BuildId,
-            BaselineTexturePipelineRevision = baselineReport?.TexturePipelineRevision ?? 0,
-            ReusedArtifacts = reusedCount,
-            RebuiltArtifacts = rebuiltCount,
-            SafetyUpgradedArtifacts = safetyUpgradedCount,
-            TexturePipelineRevision = applyTargetedSafetyRepair
-                ? TextureProcessingPipeline.CurrentRevision
-                : baselineReport?.TexturePipelineRevision ?? 0,
-            PaintedProfileRevision = baselineReport?.PaintedProfileRevision ?? 0,
-            UsedExternalArtisticWorker = baselineReport?.UsedExternalArtisticWorker,
-            AppliedRepairRuleIds = applyTargetedSafetyRepair
-                ? TextureProcessingPipeline.GetCurrentRepairRuleIds(
-                    baseline.Options.Scope,
-                    baselineInfo.Artifacts.Select(
-                        artifact => artifact.CanonicalRelativeInstallPath))
-                : TextureProcessingPipeline.GetRecordedRepairRuleIds(
-                    baselineReport,
-                    baseline.Options.Scope)
-        };
-        var reportPath = Path.Combine(staged.BuildDirectory, "texture-report.json");
-        await WriteReportAsync(reportPath, report, cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                async (finalizing, metadataCancellationToken) =>
+                {
+                    counter.Warn(applyTargetedSafetyRepair
+                        ? $"Source and safety repair upgraded {safetyUpgradedCount:N0} clean archive(s) from their exact staged baselines and rebuilt {rebuiltCount:N0} contaminated archive(s) from verified originals."
+                        : $"Source repair reused {reusedCount:N0} complete staged archive(s) and rebuilt {rebuiltCount:N0} contaminated archive(s) from verified originals.");
+                    var statistics = counter.Snapshot();
+                    var repairCompletedUtc = DateTimeOffset.UtcNow;
+                    report = new TextureBuildReport(
+                        TextureBuildReport.CurrentSchemaVersion,
+                        finalizing.BuildId,
+                        repairCompletedUtc,
+                        paths.InstallPath,
+                        finalizing.BuildDirectory,
+                        baseline.Entries.Count,
+                        statistics)
+                    {
+                        StartedUtc = repairStartedUtc,
+                        DurationSeconds = (repairCompletedUtc - repairStartedUtc).TotalSeconds,
+                        IsIncrementalRepair = applyTargetedSafetyRepair,
+                        IsSourceMismatchRepair = true,
+                        IsSafetyRepair = applyTargetedSafetyRepair,
+                        IsCutoutMipRepair = applyTargetedSafetyRepair
+                            && (baselineReport?.TexturePipelineRevision ?? 0) < 3,
+                        BaselineBuildId = baseline.BuildId,
+                        BaselineTexturePipelineRevision = baselineReport?.TexturePipelineRevision ?? 0,
+                        ReusedArtifacts = reusedCount,
+                        RebuiltArtifacts = rebuiltCount,
+                        SafetyUpgradedArtifacts = safetyUpgradedCount,
+                        TexturePipelineRevision = applyTargetedSafetyRepair
+                            ? TextureProcessingPipeline.CurrentRevision
+                            : baselineReport?.TexturePipelineRevision ?? 0,
+                        PaintedProfileRevision = baselineReport?.PaintedProfileRevision ?? 0,
+                        UsedExternalArtisticWorker =
+                            rendererProvenance.UsedExternalArtisticWorker,
+                        ArtisticWorkerFingerprint =
+                            rendererProvenance.ArtisticWorkerFingerprint,
+                        ArtisticWorkerPreset = rendererProvenance.ArtisticWorkerPreset,
+                        PaintedRendererOutcome = rendererProvenance.RendererOutcome,
+                        AppliedRepairRuleIds = applyTargetedSafetyRepair
+                            ? TextureProcessingPipeline.GetCurrentRepairRuleIds(
+                                baseline.Options.Scope,
+                                baselineInfo.Artifacts.Select(
+                                    artifact => artifact.CanonicalRelativeInstallPath),
+                                baseline.Options.Preset)
+                            : TextureProcessingPipeline.GetRecordedRepairRuleIds(
+                                baselineReport,
+                                baseline.Options.Scope)
+                    };
+                    reportPath = Path.Combine(
+                        finalizing.BuildDirectory,
+                        "texture-report.json");
+                    await WriteReportAsync(reportPath, report, metadataCancellationToken)
+                        .ConfigureAwait(false);
 
-        string? previewManifestPath = null;
-        var previewEntries = previewCollector.Snapshot();
-        var reviewEntries = previewCollector.ReviewSnapshot();
-        if (previewEntries.Count > 0 || reviewEntries.Count > 0)
-        {
-            var previewManifest = new TexturePreviewManifest(
-                TexturePreviewManifest.CurrentSchemaVersion,
-                staged.BuildId,
-                DateTimeOffset.UtcNow,
-                previewEntries)
-            {
-                ReviewEntries = reviewEntries
-            };
-            previewManifestPath = Path.Combine(
-                staged.BuildDirectory,
-                "previews",
-                "preview-manifest.json");
-            await WritePreviewManifestAsync(
-                previewManifestPath,
-                previewManifest,
-                cancellationToken).ConfigureAwait(false);
-        }
+                    var previewEntries = previewCollector.Snapshot();
+                    var reviewEntries = previewCollector.ReviewSnapshot();
+                    if (previewEntries.Count > 0 || reviewEntries.Count > 0)
+                    {
+                        var previewManifest = new TexturePreviewManifest(
+                            TexturePreviewManifest.CurrentSchemaVersion,
+                            finalizing.BuildId,
+                            DateTimeOffset.UtcNow,
+                            previewEntries)
+                        {
+                            ReviewEntries = reviewEntries
+                        };
+                        previewManifestPath = Path.Combine(
+                            finalizing.BuildDirectory,
+                            "previews",
+                            "preview-manifest.json");
+                        await WritePreviewManifestAsync(
+                            previewManifestPath,
+                            previewManifest,
+                            metadataCancellationToken).ConfigureAwait(false);
+                    }
+                })
+            .ConfigureAwait(false);
+
+        var completedReport = report
+            ?? throw new InvalidDataException("The source-repair texture report was not finalized.");
+        var completedReportPath = reportPath
+            ?? throw new InvalidDataException("The source-repair report path was not finalized.");
 
         return new TexturePackBuildResult(
             staged,
-            report,
-            reportPath,
+            completedReport,
+            completedReportPath,
             ApplyResult: null,
             previewManifestPath);
     }
@@ -1640,6 +2185,8 @@ public sealed class TexturePackWorkflow
 
     private static async Task<TextureBuildReport?> TryReadTextureBuildReportAsync(
         string buildDirectory,
+        string expectedBuildId,
+        string expectedInstallPath,
         CancellationToken cancellationToken)
     {
         var path = Path.Combine(buildDirectory, "texture-report.json");
@@ -1657,11 +2204,18 @@ public sealed class TexturePackWorkflow
                 FileShare.Read,
                 32 * 1024,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
-            return await JsonSerializer.DeserializeAsync<TextureBuildReport>(
+            var report = await JsonSerializer.DeserializeAsync<TextureBuildReport>(
                     stream,
-                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
+                    CompositionJsonOptions,
                     cancellationToken)
                 .ConfigureAwait(false);
+            return TextureBuildReportValidation.IsUsableForStagedPack(
+                report,
+                expectedBuildId,
+                expectedInstallPath,
+                buildDirectory)
+                ? report
+                : null;
         }
         catch (Exception exception) when (exception is
                                            IOException or
@@ -2794,6 +3348,28 @@ public sealed class TexturePackWorkflow
             : SelectCharacterAndEquipmentArchives(scopes, options);
     }
 
+    internal static bool HasPotentialArchiveCandidate(
+        PfsArchive archive,
+        string archivePath,
+        UpscaleOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(archive);
+        ArgumentException.ThrowIfNullOrWhiteSpace(archivePath);
+        ArgumentNullException.ThrowIfNull(options);
+
+        return archive.Entries.Any(entry =>
+            PfsTextureArchiveBuilder.IsPotentialCandidate(
+                entry,
+                options.MaximumDimension,
+                options.Preset)
+            && (options.Scope is not (
+                    AssetScope.CharactersAndEquipmentOnly
+                    or AssetScope.WorldCharactersAndEquipment)
+                || CharacterEquipmentArchiveCatalog.IsTextureEntryAllowed(
+                    archivePath,
+                    entry.Name)));
+    }
+
     private static ArchiveScopes DiscoverArchiveScopes(string installPath)
     {
         var allArchives = Directory.EnumerateFiles(installPath, "*", SearchOption.TopDirectoryOnly)
@@ -3140,14 +3716,7 @@ public sealed class TexturePackWorkflow
                 await using var archive = await PfsArchive.OpenAsync(
                     sourcePath,
                     cancellationToken: cancellationToken).ConfigureAwait(false);
-                if (archive.Entries.Any(entry =>
-                        PfsTextureArchiveBuilder.IsPotentialCandidate(entry, options.MaximumDimension)
-                        && (options.Scope is not (
-                                AssetScope.CharactersAndEquipmentOnly
-                                or AssetScope.WorldCharactersAndEquipment)
-                            || CharacterEquipmentArchiveCatalog.IsTextureEntryAllowed(
-                                archivePath,
-                                entry.Name))))
+                if (HasPotentialArchiveCandidate(archive, archivePath, options))
                 {
                     items.Add(new StagedBuildItem(
                         relativePath,
@@ -3228,6 +3797,7 @@ public sealed class TexturePackWorkflow
                         sourcePath,
                         relativePath,
                         options.MaximumDimension,
+                        options.Preset,
                         cancellationToken).ConfigureAwait(false);
                 if (isCandidate)
                 {

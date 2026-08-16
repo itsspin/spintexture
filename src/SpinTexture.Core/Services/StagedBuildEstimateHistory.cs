@@ -85,7 +85,20 @@ public static class StagedBuildEstimateHistory
             || historical.MaximumDimension != requested.MaximumDimension
             || historical.GenerateMipMaps != requested.GenerateMipMaps
             || (requested.Preset == TexturePreset.Illustrated
-                && historical.PaintedTheme != requested.PaintedTheme))
+                && (historical.PaintedTheme != requested.PaintedTheme
+                    || historical.ResolvedPaintedStyle != requested.ResolvedPaintedStyle
+                    || historical.FullResolutionRepaint != requested.FullResolutionRepaint
+                    || !string.Equals(
+                        historical.ArtisticWorkerFingerprint,
+                        requested.ArtisticWorkerFingerprint,
+                        StringComparison.Ordinal)
+                    || !string.Equals(
+                        historical.ArtisticWorkerPreset,
+                        requested.ArtisticWorkerPreset,
+                        StringComparison.Ordinal)))
+            || historical.BakedDepth != requested.BakedDepth
+            || historical.EmissiveGlow != requested.EmissiveGlow
+            || historical.MipSharpen != requested.MipSharpen)
         {
             return false;
         }
