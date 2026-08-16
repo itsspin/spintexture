@@ -127,6 +127,9 @@
                     <DataTrigger Binding="{Binding IsCompactLayout}" Value="True">
                         <Setter Property="Margin" Value="18,16,18,18" />
                     </DataTrigger>
+                    <DataTrigger Binding="{Binding IsShortLayout}" Value="True">
+                        <Setter Property="Margin" Value="16,10,16,12" />
+                    </DataTrigger>
                 </Style.Triggers>
             </Style>
         </Grid.Style>
@@ -143,15 +146,41 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel>
-                <TextBlock Text="MANAGE TEXTURE PACKS" Style="{StaticResource Eyebrow}" />
+                <TextBlock Text="MANAGE TEXTURE PACKS">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource Eyebrow}">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsShortLayout}" Value="True">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
                 <TextBlock Text="Install what you want. Remove what you no longer need."
-                           FontSize="26" FontWeight="SemiBold" Margin="0,4,0,0" />
+                           FontWeight="SemiBold">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="FontSize" Value="26" />
+                            <Setter Property="Margin" Value="0,4,0,0" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsShortLayout}" Value="True">
+                                    <Setter Property="FontSize" Value="21" />
+                                    <Setter Property="Margin" Value="0" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
                 <TextBlock Text="Each pack has separate Install and Delete checkboxes. Installed packs and anything they depend on are locked automatically; unfinished builds never appear as delete choices."
                            FontSize="13" Margin="0,7,18,0">
                     <TextBlock.Style>
                         <Style TargetType="TextBlock" BasedOn="{StaticResource Caption}">
                             <Style.Triggers>
                                 <DataTrigger Binding="{Binding IsCompactLayout}" Value="True">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsShortLayout}" Value="True">
                                     <Setter Property="Visibility" Value="Collapsed" />
                                 </DataTrigger>
                             </Style.Triggers>
@@ -162,7 +191,17 @@
                            FontWeight="SemiBold" Margin="0,7,18,0" />
                 <TextBlock Text="{Binding PackStorageText}" Foreground="#8FA6A1" FontSize="10"
                            TextTrimming="CharacterEllipsis" Margin="0,6,18,0"
-                           ToolTip="Change this location from Pack Storage Settings on the main window." />
+                           ToolTip="Change this location from Pack Storage Settings on the main window.">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsShortLayout}" Value="True">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
                 <Button Content="Clean Interrupted Leftovers" Click="CleanupDebris_Click"
@@ -179,12 +218,16 @@
                 BorderThickness="1" CornerRadius="8">
             <Border.Style>
                 <Style TargetType="Border">
+                    <Setter Property="Visibility" Value="Visible" />
                     <Setter Property="Margin" Value="0,16,0,14" />
                     <Setter Property="Padding" Value="14,11" />
                     <Style.Triggers>
                         <DataTrigger Binding="{Binding IsCompactLayout}" Value="True">
                             <Setter Property="Margin" Value="0,10,0,10" />
                             <Setter Property="Padding" Value="11,8" />
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding IsShortLayout}" Value="True">
+                            <Setter Property="Visibility" Value="Collapsed" />
                         </DataTrigger>
                     </Style.Triggers>
                 </Style>
@@ -224,13 +267,17 @@
             </Grid.ColumnDefinitions>
 
             <Border Background="{StaticResource Panel}" BorderBrush="{StaticResource Border}"
-                    BorderThickness="1" CornerRadius="10" Padding="14">
+                    BorderThickness="1" CornerRadius="10">
                 <Border.Style>
                     <Style TargetType="Border">
                         <Setter Property="Grid.ColumnSpan" Value="1" />
+                        <Setter Property="Padding" Value="14" />
                         <Style.Triggers>
                             <DataTrigger Binding="{Binding IsCompactLayout}" Value="True">
                                 <Setter Property="Grid.ColumnSpan" Value="3" />
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding IsShortLayout}" Value="True">
+                                <Setter Property="Padding" Value="10" />
                             </DataTrigger>
                         </Style.Triggers>
                     </Style>
@@ -243,13 +290,33 @@
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
 
-                    <Grid Margin="3,1,3,11">
+                    <Grid>
+                        <Grid.Style>
+                            <Style TargetType="Grid">
+                                <Setter Property="Margin" Value="3,1,3,11" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsShortLayout}" Value="True">
+                                        <Setter Property="Margin" Value="3,0,3,6" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Grid.Style>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <StackPanel>
-                            <TextBlock Text="1 / COMPLETED PACK LIBRARY" Style="{StaticResource Eyebrow}" />
+                            <TextBlock Text="1 / COMPLETED PACK LIBRARY">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock" BasedOn="{StaticResource Eyebrow}">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsShortLayout}" Value="True">
+                                                <Setter Property="Visibility" Value="Collapsed" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
                             <TextBlock Text="Choose Install or Delete per pack" Style="{StaticResource SectionTitle}" Margin="0,4,0,0" />
                             <TextBlock Text="The two choices are mutually exclusive. Click the rest of a card only to show its details on the right."
                                        Margin="0,4,16,0">
@@ -357,18 +424,24 @@
                         </Border>
                     </Expander>
 
-                    <StackPanel Grid.Row="2" Margin="0,0,0,8">
-                        <Border Background="#1B1114" BorderBrush="#6F3A42"
-                                BorderThickness="1" CornerRadius="7" Padding="9,6,2,0">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Text="DELETE SHORTCUTS" Foreground="#F6B6BC"
-                                           FontSize="10" FontWeight="Bold" Margin="2,0,12,6"
-                                           VerticalAlignment="Center" />
-                                <WrapPanel Grid.Column="1">
+                    <Expander Grid.Row="2" Header="Selection shortcuts (optional)" Margin="0,0,0,6"
+                              Foreground="#D9DDE4">
+                        <Border Background="{StaticResource PanelInset}" BorderBrush="{StaticResource Border}"
+                                BorderThickness="1" CornerRadius="7" Padding="10,8,4,2" Margin="0,5,0,0">
+                            <StackPanel>
+                                <TextBlock Text="INSTALL CHECKBOXES" Foreground="{StaticResource Safe}"
+                                           FontSize="10" FontWeight="Bold" Margin="2,0,0,4" />
+                                <WrapPanel>
+                                    <Button Content="Match Current Install" Style="{StaticResource ToolbarButton}"
+                                            Click="CheckCurrentInstall_Click" IsEnabled="{Binding CanCheckCurrentInstall}" />
+                                    <Button Content="Install Every Compatible Pack" Style="{StaticResource ToolbarButton}"
+                                            Click="CheckAll_Click" IsEnabled="{Binding CanCheckAll}" />
+                                    <Button Content="Clear Install Checks" Style="{StaticResource ToolbarButton}"
+                                            Click="ClearChecks_Click" IsEnabled="{Binding CanClearChecks}" />
+                                </WrapPanel>
+                                <TextBlock Text="DELETE CHECKBOXES" Foreground="#F6B6BC"
+                                           FontSize="10" FontWeight="Bold" Margin="2,5,0,4" />
+                                <WrapPanel>
                                     <Button Content="Select Safe Old Packs" Style="{StaticResource ToolbarButton}"
                                             Click="SelectSafeOld_Click" IsEnabled="{Binding CanSelectSafeOldPacks}"
                                             Background="#3A1D20" BorderBrush="#8C4A53"
@@ -378,33 +451,9 @@
                                     <Button Content="Clear Delete Checks" Style="{StaticResource ToolbarButton}"
                                             Click="ClearDeleteChecks_Click" IsEnabled="{Binding CanClearDeletionSelection}" />
                                 </WrapPanel>
-                            </Grid>
+                            </StackPanel>
                         </Border>
-                        <Expander Header="Install checkbox shortcuts" Margin="0,5,0,0"
-                                  Foreground="#D9DDE4">
-                            <Expander.Style>
-                                <Style TargetType="Expander">
-                                    <Setter Property="Visibility" Value="Visible" />
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding IsCompactLayout}" Value="True">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </Expander.Style>
-                            <Border Background="{StaticResource PanelInset}" BorderBrush="{StaticResource Border}"
-                                    BorderThickness="1" CornerRadius="7" Padding="10,9,4,1" Margin="0,6,0,0">
-                                <WrapPanel>
-                                    <Button Content="Match Current Install" Style="{StaticResource ToolbarButton}"
-                                            Click="CheckCurrentInstall_Click" IsEnabled="{Binding CanCheckCurrentInstall}" />
-                                    <Button Content="Install Every Compatible Pack" Style="{StaticResource ToolbarButton}"
-                                            Click="CheckAll_Click" IsEnabled="{Binding CanCheckAll}" />
-                                    <Button Content="Clear Install Checks" Style="{StaticResource ToolbarButton}"
-                                            Click="ClearChecks_Click" IsEnabled="{Binding CanClearChecks}" />
-                                </WrapPanel>
-                            </Border>
-                        </Expander>
-                    </StackPanel>
+                    </Expander>
 
                     <Grid Grid.Row="3">
                         <TextBlock Text="No completed packs yet.&#x0a;&#x0a;Build one from the main window: choose your EverQuest folder, click Analyze Client, pick a zone and a texture style, then Build Staged Pack. Completed packs appear here, ready to verify and install — building never touches the live game."
@@ -427,8 +476,19 @@
                             <GroupStyle>
                                 <GroupStyle.HeaderTemplate>
                                     <DataTemplate>
-                                        <Border Background="#0D1015" BorderBrush="#3A414C" BorderThickness="0,0,0,1"
-                                                Padding="9,8" Margin="0,8,0,9">
+                                        <Border Background="#0D1015" BorderBrush="#3A414C" BorderThickness="0,0,0,1">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Padding" Value="9,8" />
+                                                    <Setter Property="Margin" Value="0,8,0,9" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding DataContext.IsShortLayout, RelativeSource={RelativeSource AncestorType={x:Type UserControl}}}" Value="True">
+                                                            <Setter Property="Padding" Value="7,5" />
+                                                            <Setter Property="Margin" Value="0,5,0,6" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
                                             <Grid>
                                                 <TextBlock Text="{Binding Name}" Foreground="#FFA56F"
                                                            FontSize="12" FontWeight="Bold" />
@@ -444,7 +504,17 @@
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <Border Background="{StaticResource PanelRaised}" BorderBrush="{Binding CardBorderBrush}"
-                                        BorderThickness="1" CornerRadius="7" Padding="14">
+                                        BorderThickness="1" CornerRadius="7">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="Padding" Value="14" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding DataContext.IsShortLayout, RelativeSource={RelativeSource AncestorType={x:Type UserControl}}}" Value="True">
+                                                    <Setter Property="Padding" Value="10" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto" />
@@ -486,8 +556,20 @@
                                                 </Border>
                                             </Grid>
                                             <TextBlock Text="{Binding Details}" Foreground="#D0D4DB" FontSize="12"
-                                                       Margin="0,6,0,0" TextWrapping="Wrap" LineHeight="17"
-                                                       MaxHeight="36" TextTrimming="CharacterEllipsis" />
+                                                       TextWrapping="Wrap" LineHeight="17" TextTrimming="CharacterEllipsis">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Margin" Value="0,6,0,0" />
+                                                        <Setter Property="MaxHeight" Value="36" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding DataContext.IsShortLayout, RelativeSource={RelativeSource AncestorType={x:Type UserControl}}}" Value="True">
+                                                                <Setter Property="Margin" Value="0,3,0,0" />
+                                                                <Setter Property="MaxHeight" Value="17" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
                                             <Grid Margin="0,7,0,0">
                                                 <Grid.ColumnDefinitions>
                                                     <ColumnDefinition Width="*" />
@@ -510,7 +592,17 @@
                                                         <TextBlock Text="{Binding DeletionHint}"
                                                                    Foreground="#C9CDD4" FontSize="10"
                                                                    TextWrapping="Wrap" LineHeight="14" Margin="0,2,0,0"
-                                                                   MaxHeight="29" TextTrimming="CharacterEllipsis" />
+                                                                   MaxHeight="29" TextTrimming="CharacterEllipsis">
+                                                            <TextBlock.Style>
+                                                                <Style TargetType="TextBlock">
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding DataContext.IsShortLayout, RelativeSource={RelativeSource AncestorType={x:Type UserControl}}}" Value="True">
+                                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </TextBlock.Style>
+                                                        </TextBlock>
                                                     </StackPanel>
                                                 </Border>
                                             </Grid>
@@ -639,6 +731,10 @@
                             <Setter Property="Padding" Value="8" />
                             <Setter Property="Margin" Value="0,8,0,0" />
                         </DataTrigger>
+                        <DataTrigger Binding="{Binding IsShortLayout}" Value="True">
+                            <Setter Property="Padding" Value="7" />
+                            <Setter Property="Margin" Value="0,6,0,0" />
+                        </DataTrigger>
                     </Style.Triggers>
                 </Style>
             </Border.Style>
@@ -648,7 +744,8 @@
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
                 <Border Background="#211316" BorderBrush="#6F3A42" BorderThickness="1"
-                        CornerRadius="6" Padding="10,7" Margin="0,0,0,8">
+                        CornerRadius="6" Padding="10,7" Margin="0,0,0,8"
+                        Visibility="{Binding HasDeletionSelection, Converter={StaticResource BoolToVisibility}}">
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
@@ -678,7 +775,18 @@
                         </CheckBox>
                         <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource Muted}"
                                    FontSize="10" TextWrapping="Wrap" LineHeight="14" Margin="0,5,0,0"
-                                   MaxHeight="30" TextTrimming="CharacterEllipsis" ToolTip="{Binding StatusText}" />
+                                   TextTrimming="CharacterEllipsis" ToolTip="{Binding StatusText}">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="MaxHeight" Value="30" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsShortLayout}" Value="True">
+                                            <Setter Property="MaxHeight" Value="14" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
                     </StackPanel>
                     <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
                         <Button Content="Cancel Operation" Click="Cancel_Click" IsEnabled="{Binding IsBusy}" Padding="11,7" />

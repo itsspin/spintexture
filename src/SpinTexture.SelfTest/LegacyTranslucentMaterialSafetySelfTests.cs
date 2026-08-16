@@ -19,6 +19,9 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
     public static async Task RunAsync(CancellationToken cancellationToken)
     {
         TestWldMaterialGraphDetection();
+        TestV11RepairRuleSelection();
+        await TestMistmooreStaticDualUseCoverageRepairAsync(cancellationToken)
+            .ConfigureAwait(false);
         await TestLegacyMaterialEnumRepairInvalidatesFalseColorKeyAsync(cancellationToken)
             .ConfigureAwait(false);
         await TestPaintedLegacyMaterialRetryMayKeepVerifiedOriginalAsync(cancellationToken)
@@ -143,6 +146,410 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
             repairableOgreArmor.Contains("ogmhesk11.dds")
             && repairableOgreArmor.Contains("ogfchsk03.dds"),
             "classic Ogre armor omitted by the legacy bit rule is included in v10 repair");
+
+        var mistmooreStaticWalls = new[]
+        {
+            "brick&trim.bmp",
+            "bricktrim&florish.bmp",
+            "bricktrim&protrait.bmp",
+            "bricktrim&shield.bmp",
+            "rockwall.bmp",
+            "trashedbrick&trim.bmp",
+            "trashedbrick.bmp"
+        };
+        var mistmooreMaterials = new List<WldMaterialFixture>();
+        foreach (var wall in mistmooreStaticWalls)
+        {
+            // Each real atlas has one ordinary diffuse route and one 0x07
+            // passable route. They are independent static materials; putting
+            // several names in one bitmap-info fragment would correctly mark
+            // the fragment as an animation instead.
+            mistmooreMaterials.Add(new WldMaterialFixture([wall], 0x80000001));
+            mistmooreMaterials.Add(new WldMaterialFixture([wall], 0x80000007));
+        }
+
+        mistmooreMaterials.Add(new WldMaterialFixture(
+            ["w1.bmp", "w2.bmp", "w3.bmp", "w4.bmp"],
+            0x80000005));
+        mistmooreMaterials.Add(new WldMaterialFixture(["falls1.bmp"], 0x80000007));
+        mistmooreMaterials.Add(new WldMaterialFixture(["glass.bmp"], 0x80000009));
+        mistmooreMaterials.Add(new WldMaterialFixture(
+            ["bricktrim&window.bmp"],
+            0x80000001));
+        var mistmoore = CreateLegacyWldGraph(mistmooreMaterials);
+        var mistmooreContext = LegacyTranslucentMaterialSafetyPolicy.Analyze(mistmoore);
+        foreach (var wall in mistmooreStaticWalls)
+        {
+            AssertTrue(
+                mistmooreContext.TryGetUsage(wall, out var usage)
+                && usage is
+                {
+                    HasAnimatedReference: false,
+                    HasClassicDiffuseReference: true,
+                    HasBlendedReference: true,
+                    IsStaticDiffusePassableDualUseCandidate: true
+                },
+                $"real Mistmoore static dual-use wall context: {wall}");
+            AssertTrue(
+                LegacyTranslucentMaterialSafetyPolicy
+                    .FindProtectedTextureNames(mistmoore).Contains(wall),
+                $"flat compatibility query remains conservative for {wall}");
+        }
+
+        AssertTrue(
+            mistmooreContext.TryGetUsage("w1.bmp", out var water)
+            && water is
+            {
+                HasAnimatedReference: true,
+                IsStaticDiffusePassableDualUseCandidate: false
+            },
+            "animated Mistmoore water never leaves protection");
+        AssertTrue(
+            mistmooreContext.TryGetUsage("falls1.bmp", out var falls)
+            && falls is
+            {
+                HasClassicDiffuseReference: false,
+                IsStaticDiffusePassableDualUseCandidate: false
+            },
+            "blended-only Mistmoore falls never leave protection");
+        AssertTrue(
+            mistmooreContext.TryGetUsage("bricktrim&window.bmp", out var window)
+            && window is
+            {
+                HasClassicDiffuseReference: true,
+                HasBlendedReference: false
+            },
+            "Mistmoore window carries classic diffuse classification context");
+
+        var malformedNameTail = AddMalformedBitmapNameTail(
+            CreateLegacyWld(["brick&trim.bmp"], 0x80000007));
+        var malformedContext = LegacyTranslucentMaterialSafetyPolicy.Analyze(
+            malformedNameTail);
+        AssertTrue(
+            !malformedContext.IsComplete,
+            "a truncated trailing bitmap-name frame cannot prove static usage");
+
+        var validDualContext = LegacyTranslucentMaterialSafetyPolicy.Analyze(
+            CreateLegacyWldGraph(
+            [
+                new WldMaterialFixture(["brick&trim.bmp"], 0x80000001),
+                new WldMaterialFixture(["brick&trim.bmp"], 0x80000007)
+            ]));
+        var combinedWithInvalidSecondWld =
+            LegacyTranslucentMaterialSafetyPolicy.Combine(
+            [
+                validDualContext,
+                LegacyTranslucentMaterialSafetyPolicy.Analyze("not-a-wld"u8)
+            ]);
+        AssertTrue(
+            !combinedWithInvalidSecondWld.IsComplete
+            && combinedWithInvalidSecondWld.TryGetUsage(
+                "brick&trim.bmp",
+                out var incompleteDual)
+            && incompleteDual?.IsStaticDiffusePassableDualUseCandidate == true,
+            "valid dual-use evidence remains structurally visible but is tainted by an invalid second WLD");
+    }
+
+    private static void TestV11RepairRuleSelection()
+    {
+        var currentRules = TextureProcessingPipeline.GetCurrentRepairRuleIds(
+            AssetScope.SelectedZone,
+            ["mistmoore.s3d"],
+            TexturePreset.Illustrated);
+        AssertTrue(
+            currentRules.Contains(
+                TextureProcessingPipeline.ClassicWldVisibleSurfaceCoverageRuleId,
+                StringComparer.Ordinal),
+            "selected-zone v11 rules include classic WLD visible-surface coverage");
+        var report = new TextureBuildReport(
+            TextureBuildReport.CurrentSchemaVersion,
+            "build-v10-mistmoore",
+            DateTimeOffset.UtcNow,
+            "E:\\EQLegends",
+            "C:\\staging\\build-v10-mistmoore",
+            1,
+            new TextureBuildStatistics(
+                1,
+                0,
+                1,
+                1,
+                0,
+                new Dictionary<string, int> { ["original"] = 1 },
+                []))
+        {
+            TexturePipelineRevision = 10,
+            PaintedProfileRevision = TextureBuildReport.CurrentIllustratedProfileRevision,
+            PaintedRendererOutcome = PaintedRendererOutcome.BuiltInOnly,
+            UsedExternalArtisticWorker = false,
+            AppliedRepairRuleIds = currentRules
+                .Where(rule => !rule.Equals(
+                    TextureProcessingPipeline.ClassicWldVisibleSurfaceCoverageRuleId,
+                    StringComparison.Ordinal))
+                .ToArray()
+        };
+        var missing = TextureProcessingPipeline.GetMissingRepairRuleIds(
+            report,
+            AssetScope.SelectedZone,
+            ["mistmoore.s3d"],
+            TexturePreset.Illustrated);
+        AssertEqual(1, missing.Count, "v10 Mistmoore pack has one focused v11 repair");
+        AssertEqual(
+            TextureProcessingPipeline.ClassicWldVisibleSurfaceCoverageRuleId,
+            missing[0],
+            "v10 Mistmoore repair targets only visible WLD surfaces");
+        AssertTrue(
+            TextureProcessingPipeline.RequiresTargetedSafetyRepair(
+                report,
+                AssetScope.SelectedZone,
+                ["mistmoore.s3d"],
+                TexturePreset.Illustrated),
+            "v10 selected-zone pack can use targeted v11 repair");
+        AssertTrue(
+            !TextureProcessingPipeline.RequiresRepair(
+                report with
+                {
+                    TexturePipelineRevision = TextureProcessingPipeline.CurrentRevision,
+                    AppliedRepairRuleIds = currentRules
+                },
+                AssetScope.SelectedZone,
+                ["mistmoore.s3d"],
+                TexturePreset.Illustrated),
+            "v11 rule record is current");
+    }
+
+    private static async Task TestMistmooreStaticDualUseCoverageRepairAsync(
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-mistmoore-visible-walls-{Guid.NewGuid():N}");
+        var sourcePath = Path.Combine(root, "mistmoore.s3d");
+        var baselinePath = Path.Combine(root, "baseline-mistmoore.s3d");
+        var destinationPath = Path.Combine(root, "repaired-mistmoore.s3d");
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var wld = CreateLegacyWldGraph(
+            [
+                new WldMaterialFixture(["brick&trim.bmp"], 0x80000001),
+                new WldMaterialFixture(["brick&trim.bmp"], 0x80000007),
+                new WldMaterialFixture(["rockwall.bmp"], 0x80000001),
+                new WldMaterialFixture(["rockwall.bmp"], 0x80000007),
+                new WldMaterialFixture(["bricktrim&shield.bmp"], 0x80000001),
+                new WldMaterialFixture(["bricktrim&shield.bmp"], 0x80000007),
+                new WldMaterialFixture(["bricktrim&window.bmp"], 0x80000001),
+                new WldMaterialFixture(["rockwall_mask.bmp"], 0x80000001),
+                new WldMaterialFixture(["w1.bmp", "w2.bmp"], 0x80000005),
+                new WldMaterialFixture(["falls1.bmp"], 0x80000007),
+                new WldMaterialFixture(["glass.bmp"], 0x80000009)
+            ]);
+            var original = CreateDxt1(64, 64, mipCount: 1);
+            var transparentSource = CreateDxt1(
+                64,
+                64,
+                mipCount: 1,
+                transparentTopMip: true);
+            var explicitAlphaSource = CreateDxt1(
+                64,
+                64,
+                mipCount: 1,
+                declareAlpha: true);
+            var archiveItems = new[]
+            {
+                new PfsArchiveItem("mistmoore.wld", wld),
+                // These classic logical BMP names deliberately contain DDS
+                // payloads, matching the real Mistmoore archive layout.
+                new PfsArchiveItem("brick&trim.bmp", original),
+                new PfsArchiveItem("rockwall.bmp", original),
+                new PfsArchiveItem("bricktrim&shield.bmp", transparentSource),
+                new PfsArchiveItem("bricktrim&window.bmp", original),
+                new PfsArchiveItem("rockwall_mask.bmp", explicitAlphaSource),
+                new PfsArchiveItem("w1.bmp", original),
+                new PfsArchiveItem("w2.bmp", original),
+                new PfsArchiveItem("falls1.bmp", original),
+                new PfsArchiveItem("glass.bmp", original)
+            };
+            await WriteArchiveAsync(sourcePath, archiveItems, cancellationToken)
+                .ConfigureAwait(false);
+            await WriteArchiveAsync(baselinePath, archiveItems, cancellationToken)
+                .ConfigureAwait(false);
+            var baselineFingerprint = await FileIntegrity.FingerprintAsync(
+                    baselinePath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            var processedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var opaqueEnhanced = CreateDxt1(256, 256, mipCount: 1);
+            var transparentEnhanced = CreateDxt1(
+                256,
+                256,
+                mipCount: 1,
+                transparentTopMip: true);
+            var counter = new TextureBuildCounter();
+            var builder = new PfsTextureArchiveBuilder(
+                new NativeTextureProcessor(
+                    new ExternalToolPaths(null, null, null, null, null, [])),
+                counter,
+                retryUnchangedEntries: false,
+                rebuildFromReuseArchive: true,
+                requireRequestedVisualProfile: true,
+                allowRequestedVisualProfileRegeneration: true,
+                repairClassicWldVisibleSurfaceCoverage: true,
+                reuseArchivePaths: new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase)
+                {
+                    ["mistmoore.s3d"] = baselinePath
+                },
+                reuseArchiveFingerprints: new Dictionary<string, StagedPackFileFingerprint>(
+                    StringComparer.OrdinalIgnoreCase)
+                {
+                    ["mistmoore.s3d"] = new(
+                        baselineFingerprint.Length,
+                        baselineFingerprint.Sha256)
+                },
+                processBatch: async (requests, token) =>
+                {
+                    AssertEqual(4, requests.Count, "only v11-affected Mistmoore surfaces retry");
+                    var outcomes = new List<NativeTextureProcessOutcome>(requests.Count);
+                    foreach (var request in requests)
+                    {
+                        var logicalName = request.LogicalName
+                            ?? throw new InvalidOperationException(
+                                "Synthetic Mistmoore request lost its logical name.");
+                        processedNames.Add(logicalName);
+                        if (logicalName.Equals(
+                                "bricktrim&window.bmp",
+                                StringComparison.OrdinalIgnoreCase)
+                            || logicalName.Equals(
+                                "rockwall_mask.bmp",
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            AssertEqual(
+                                logicalName.Equals(
+                                    "rockwall_mask.bmp",
+                                    StringComparison.OrdinalIgnoreCase)
+                                        ? TextureKind.Cutout
+                                        : TextureKind.Color,
+                                request.Classification.Kind,
+                                "classic WLD diffuse context restores color/cutout eligibility");
+                            outcomes.Add(new NativeTextureProcessOutcome(
+                                Result: null,
+                                Error: new InvalidDataException(
+                                    "Synthetic window fidelity rejection.")));
+                            continue;
+                        }
+
+                        var output = logicalName.Equals(
+                            "rockwall.bmp",
+                            StringComparison.OrdinalIgnoreCase)
+                                ? transparentEnhanced
+                                : opaqueEnhanced;
+                        await File.WriteAllBytesAsync(
+                                request.DestinationPath,
+                                output,
+                                token)
+                            .ConfigureAwait(false);
+                        outcomes.Add(new NativeTextureProcessOutcome(
+                            new NativeTextureProcessResult(
+                                request.DestinationPath,
+                                UpscaleDimensions.Calculate(64, 64, 256),
+                                "Synthetic illustrated finishing",
+                                TimeSpan.Zero,
+                                ExpectedMipCount: 1,
+                                UsedBuiltInPaintedRenderer: true),
+                            Error: null));
+                    }
+
+                    return outcomes;
+                });
+
+            await builder.BuildAsync(
+                new StagedArtifactBuildContext(
+                    "mistmoore.s3d",
+                    sourcePath,
+                    destinationPath,
+                    Path.Combine(root, "work"),
+                    Path.Combine(root, "previews"),
+                    new UpscaleOptions(
+                        TexturePreset.Illustrated,
+                        AssetScope.SelectedZone,
+                        MaximumDimension: 256,
+                        GenerateMipMaps: false,
+                        InstallAfterBuild: false,
+                        SelectedZone: "mistmoore")),
+                cancellationToken).ConfigureAwait(false);
+
+            AssertTrue(
+                processedNames.SetEquals(
+                    [
+                        "brick&trim.bmp",
+                        "rockwall.bmp",
+                        "bricktrim&window.bmp",
+                        "rockwall_mask.bmp"
+                    ]),
+                "v11 retry is limited to proven wall aliases and corrected WLD window");
+            var statistics = counter.Snapshot();
+            if (statistics.EnhancedTextures != 1)
+            {
+                throw new InvalidOperationException(
+                    "Assertion failed (one valid opaque wall enhancement): expected 1, actual "
+                    + $"{statistics.EnhancedTextures}. "
+                    + string.Join(" | ", statistics.Warnings));
+            }
+            AssertEqual(
+                3,
+                statistics.PreservedReasons.GetValueOrDefault(
+                    PfsTextureArchiveBuilder.RetriedPreservedOriginalReason),
+                "invalid opacity and fidelity rejection keep source-identical originals");
+
+            await using var repaired = await PfsArchive.OpenAsync(
+                destinationPath,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            AssertBytesEqual(
+                opaqueEnhanced,
+                await repaired.ReadEntryAsync("brick&trim.bmp", cancellationToken)
+                    .ConfigureAwait(false),
+                "verified opaque static wall is enhanced");
+            AssertBytesEqual(
+                original,
+                await repaired.ReadEntryAsync("rockwall.bmp", cancellationToken)
+                    .ConfigureAwait(false),
+                "enhanced wall with transparent top mip is rejected");
+            AssertBytesEqual(
+                original,
+                await repaired.ReadEntryAsync("bricktrim&window.bmp", cancellationToken)
+                    .ConfigureAwait(false),
+                "failed corrected window retry keeps verified original");
+            AssertBytesEqual(
+                explicitAlphaSource,
+                await repaired.ReadEntryAsync("rockwall_mask.bmp", cancellationToken)
+                    .ConfigureAwait(false),
+                "failed explicit-alpha cutout retry keeps verified original");
+            AssertBytesEqual(
+                transparentSource,
+                await repaired.ReadEntryAsync("bricktrim&shield.bmp", cancellationToken)
+                    .ConfigureAwait(false),
+                "dual-use source with real top-mip transparency never leaves protection");
+            foreach (var protectedName in new[]
+                     {
+                         "w1.bmp", "w2.bmp", "falls1.bmp", "glass.bmp"
+                     })
+            {
+                AssertBytesEqual(
+                    original,
+                    await repaired.ReadEntryAsync(protectedName, cancellationToken)
+                        .ConfigureAwait(false),
+                    $"animated or blended-only {protectedName} stays original");
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
     }
 
     private static async Task TestLegacyMaterialEnumRepairInvalidatesFalseColorKeyAsync(
@@ -405,7 +812,11 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
                                 ["freporte.s3d"])
                             .Where(rule => !rule.Equals(
                                 TextureProcessingPipeline.LegacyTranslucentMaterialSafetyRuleId,
-                                StringComparison.Ordinal))
+                                StringComparison.Ordinal)
+                                && !rule.Equals(
+                                    TextureProcessingPipeline
+                                        .ClassicWldVisibleSurfaceCoverageRuleId,
+                                    StringComparison.Ordinal))
                             .ToArray()
                     },
                     cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -424,6 +835,21 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
                     TextureProcessingPipeline.LegacyTranslucentMaterialSafetyRuleId,
                     StringComparer.Ordinal),
                 "pack repair records translucent-material rule");
+            AssertTrue(
+                !repairedPack.Report.AppliedRepairRuleIds.Contains(
+                    TextureProcessingPipeline.ClassicWldVisibleSurfaceCoverageRuleId,
+                    StringComparer.Ordinal),
+                "exact-original first pass does not prematurely stamp v11 coverage");
+            AssertTrue(
+                TextureProcessingPipeline.GetMissingRepairRuleIds(
+                        repairedPack.Report,
+                        AssetScope.SelectedZone,
+                        ["freporte.s3d"],
+                        TexturePreset.Faithful)
+                    .Contains(
+                        TextureProcessingPipeline.ClassicWldVisibleSurfaceCoverageRuleId,
+                        StringComparer.Ordinal),
+                "v11 remains available after exact-original first pass");
             await using var packArchive = await PfsArchive.OpenAsync(
                 Path.Combine(
                     repairedPack.StagedBuild.BuildDirectory,
@@ -569,40 +995,56 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
     private static byte[] CreateLegacyWld(
         IReadOnlyList<string> textureNames,
         uint materialParameters = 0x80000007)
+        => CreateLegacyWldGraph(
+            [new WldMaterialFixture(textureNames, materialParameters)]);
+
+    private static byte[] CreateLegacyWldGraph(
+        IReadOnlyList<WldMaterialFixture> materials)
     {
         var fragments = new List<(uint Type, byte[] Data)>();
-        foreach (var textureName in textureNames)
+        foreach (var fixture in materials)
         {
-            fragments.Add((0x03, EncodeBitmapName(textureName)));
-        }
+            var bitmapNameReferences = new uint[fixture.TextureNames.Count];
+            for (var nameIndex = 0; nameIndex < fixture.TextureNames.Count; nameIndex++)
+            {
+                fragments.Add((0x03, EncodeBitmapName(fixture.TextureNames[nameIndex])));
+                bitmapNameReferences[nameIndex] = checked((uint)fragments.Count);
+            }
 
-        var bitmapInfo = new byte[12 + textureNames.Count * sizeof(uint)];
-        BinaryPrimitives.WriteUInt32LittleEndian(bitmapInfo.AsSpan(0, 4), 0x18);
-        BinaryPrimitives.WriteUInt32LittleEndian(bitmapInfo.AsSpan(4, 4), (uint)textureNames.Count);
-        BinaryPrimitives.WriteUInt32LittleEndian(bitmapInfo.AsSpan(8, 4), 200);
-        for (var index = 0; index < textureNames.Count; index++)
-        {
+            var bitmapInfo = new byte[12 + fixture.TextureNames.Count * sizeof(uint)];
+            BinaryPrimitives.WriteUInt32LittleEndian(bitmapInfo.AsSpan(0, 4), 0x18);
             BinaryPrimitives.WriteUInt32LittleEndian(
-                bitmapInfo.AsSpan(12 + index * 4, 4),
-                checked((uint)index + 1));
+                bitmapInfo.AsSpan(4, 4),
+                checked((uint)fixture.TextureNames.Count));
+            BinaryPrimitives.WriteUInt32LittleEndian(bitmapInfo.AsSpan(8, 4), 200);
+            for (var index = 0; index < bitmapNameReferences.Length; index++)
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(
+                    bitmapInfo.AsSpan(12 + index * 4, 4),
+                    bitmapNameReferences[index]);
+            }
+
+            fragments.Add((0x04, bitmapInfo));
+            var bitmapInfoFragmentReference = checked((uint)fragments.Count);
+            var bitmapInfoReference = new byte[8];
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                bitmapInfoReference.AsSpan(0, 4),
+                bitmapInfoFragmentReference);
+            fragments.Add((0x05, bitmapInfoReference));
+            var bitmapInfoReferenceFragment = checked((uint)fragments.Count);
+
+            var material = new byte[32];
+            BinaryPrimitives.WriteUInt32LittleEndian(material.AsSpan(0, 4), 2);
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                material.AsSpan(4, 4),
+                fixture.MaterialParameters);
+            BinaryPrimitives.WriteUInt32LittleEndian(material.AsSpan(8, 4), 0x00010101);
+            BinaryPrimitives.WriteUInt32LittleEndian(material.AsSpan(16, 4), 0x3F800000);
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                material.AsSpan(20, 4),
+                bitmapInfoReferenceFragment);
+            fragments.Add((0x30, material));
         }
-
-        fragments.Add((0x04, bitmapInfo));
-        var bitmapInfoReference = new byte[8];
-        BinaryPrimitives.WriteUInt32LittleEndian(
-            bitmapInfoReference.AsSpan(0, 4),
-            checked((uint)textureNames.Count + 1));
-        fragments.Add((0x05, bitmapInfoReference));
-
-        var material = new byte[32];
-        BinaryPrimitives.WriteUInt32LittleEndian(material.AsSpan(0, 4), 2);
-        BinaryPrimitives.WriteUInt32LittleEndian(material.AsSpan(4, 4), materialParameters);
-        BinaryPrimitives.WriteUInt32LittleEndian(material.AsSpan(8, 4), 0x00010101);
-        BinaryPrimitives.WriteUInt32LittleEndian(material.AsSpan(16, 4), 0x3F800000);
-        BinaryPrimitives.WriteUInt32LittleEndian(
-            material.AsSpan(20, 4),
-            checked((uint)textureNames.Count + 2));
-        fragments.Add((0x30, material));
 
         using var output = new MemoryStream();
         using var writer = new BinaryWriter(output, Encoding.ASCII, leaveOpen: true);
@@ -636,6 +1078,28 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
         }
 
         return data;
+    }
+
+    private static byte[] AddMalformedBitmapNameTail(byte[] wld)
+    {
+        const int firstFragmentOffset = 28;
+        var fragmentSize = BinaryPrimitives.ReadUInt32LittleEndian(
+            wld.AsSpan(firstFragmentOffset, sizeof(uint)));
+        var nextFragmentOffset = checked(
+            firstFragmentOffset + 8 + (int)fragmentSize);
+        var corrupted = new byte[wld.Length + sizeof(ushort)];
+        wld.AsSpan(0, nextFragmentOffset).CopyTo(corrupted);
+        // Announce a four-byte second name but omit the encoded name bytes.
+        // The following fragment header begins immediately after the length.
+        BinaryPrimitives.WriteUInt16LittleEndian(
+            corrupted.AsSpan(nextFragmentOffset, sizeof(ushort)),
+            4);
+        wld.AsSpan(nextFragmentOffset).CopyTo(
+            corrupted.AsSpan(nextFragmentOffset + sizeof(ushort)));
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            corrupted.AsSpan(firstFragmentOffset, sizeof(uint)),
+            checked(fragmentSize + sizeof(ushort)));
+        return corrupted;
     }
 
     private static byte[] CreateIndexedBmp(int width, int height, int seed)
@@ -675,7 +1139,12 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
         return bytes;
     }
 
-    private static byte[] CreateDxt1(int width, int height, int mipCount)
+    private static byte[] CreateDxt1(
+        int width,
+        int height,
+        int mipCount,
+        bool transparentTopMip = false,
+        bool declareAlpha = false)
     {
         var bytes = new byte[128 + CalculateDxt1PayloadBytes(width, height, mipCount)];
         Encoding.ASCII.GetBytes("DDS ").CopyTo(bytes, 0);
@@ -685,15 +1154,35 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
         BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(16, 4), (uint)width);
         BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(28, 4), (uint)mipCount);
         BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(76, 4), 32);
-        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(80, 4), 0x4);
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            bytes.AsSpan(80, 4),
+            declareAlpha ? 0x5u : 0x4u);
         Encoding.ASCII.GetBytes("DXT1").CopyTo(bytes, 84);
         BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(108, 4), mipCount > 1 ? 0x00401008u : 0x1000u);
+        var topMipBytes = Math.Max(1, (width + 3) / 4)
+            * Math.Max(1, (height + 3) / 4)
+            * 8;
         for (var offset = 128; offset < bytes.Length; offset += 8)
         {
-            bytes[offset] = 0x00;
-            bytes[offset + 1] = 0xF8;
-            bytes[offset + 2] = 0xE0;
-            bytes[offset + 3] = 0x07;
+            if (transparentTopMip && offset < 128 + topMipBytes)
+            {
+                // BC1 enters its transparent four-color mode when color0 is
+                // not greater than color1; palette index 3 is then alpha 0.
+                bytes[offset] = 0x00;
+                bytes[offset + 1] = 0x00;
+                bytes[offset + 2] = 0xFF;
+                bytes[offset + 3] = 0xFF;
+                BinaryPrimitives.WriteUInt32LittleEndian(
+                    bytes.AsSpan(offset + 4, 4),
+                    uint.MaxValue);
+            }
+            else
+            {
+                bytes[offset] = 0x00;
+                bytes[offset + 1] = 0xF8;
+                bytes[offset + 2] = 0xE0;
+                bytes[offset + 3] = 0x07;
+            }
         }
 
         return bytes;
@@ -711,6 +1200,10 @@ internal static class LegacyTranslucentMaterialSafetySelfTests
 
         return total;
     }
+
+    private sealed record WldMaterialFixture(
+        IReadOnlyList<string> TextureNames,
+        uint MaterialParameters);
 
     private static async Task WriteArchiveAsync(
         string path,

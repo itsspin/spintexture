@@ -33,6 +33,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
     private readonly bool allowRequestedVisualProfileRegeneration;
     private readonly bool repairLegacyMaterialClassification;
     private readonly bool repairPaintedAtCap;
+    private readonly bool repairClassicWldVisibleSurfaceCoverage;
     private readonly bool requireExternalArtisticWorker;
     private readonly bool allowRequestedProfileFailureToKeepOriginal;
     private readonly IReadOnlyDictionary<string, string> reuseArchivePaths;
@@ -58,6 +59,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         bool allowRequestedVisualProfileRegeneration = false,
         bool repairLegacyMaterialClassification = false,
         bool repairPaintedAtCap = false,
+        bool repairClassicWldVisibleSurfaceCoverage = false,
         bool requireExternalArtisticWorker = false,
         bool allowRequestedProfileFailureToKeepOriginal = false,
         IReadOnlyDictionary<string, string>? reuseArchivePaths = null,
@@ -100,6 +102,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         this.allowRequestedVisualProfileRegeneration = allowRequestedVisualProfileRegeneration;
         this.repairLegacyMaterialClassification = repairLegacyMaterialClassification;
         this.repairPaintedAtCap = repairPaintedAtCap;
+        this.repairClassicWldVisibleSurfaceCoverage =
+            repairClassicWldVisibleSurfaceCoverage;
         this.requireExternalArtisticWorker = requireExternalArtisticWorker;
         this.allowRequestedProfileFailureToKeepOriginal =
             allowRequestedProfileFailureToKeepOriginal;
@@ -205,25 +209,17 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         var replacements = new List<PfsArchiveReplacement>();
         var expectedOutputs = new Dictionary<string, ExpectedTexture>(StringComparer.OrdinalIgnoreCase);
         var pendingTextures = new List<PendingTexture>();
-        var protectedLegacyTranslucentTextures = new HashSet<string>(
-            StringComparer.OrdinalIgnoreCase);
-        var maskedColorKeyTextures = new HashSet<string>(
-            StringComparer.OrdinalIgnoreCase);
-        var legacyMaterialMisclassifiedTextures = new HashSet<string>(
-            StringComparer.OrdinalIgnoreCase);
+        var materialReferenceContexts = new List<LegacyMaterialReferenceContext>();
         foreach (var wldEntry in source.Entries.Where(entry =>
                      entry.Name.EndsWith(".wld", StringComparison.OrdinalIgnoreCase)))
         {
             var wldPayload = await source.ReadEntryAsync(wldEntry.Name, cancellationToken)
                 .ConfigureAwait(false);
-            protectedLegacyTranslucentTextures.UnionWith(
-                LegacyTranslucentMaterialSafetyPolicy.FindProtectedTextureNames(wldPayload));
-            maskedColorKeyTextures.UnionWith(
-                LegacyTranslucentMaterialSafetyPolicy.FindMaskedTextureNames(wldPayload));
-            legacyMaterialMisclassifiedTextures.UnionWith(
-                LegacyTranslucentMaterialSafetyPolicy
-                    .FindLegacyBitRuleMisclassifiedTextureNames(wldPayload));
+            materialReferenceContexts.Add(
+                LegacyTranslucentMaterialSafetyPolicy.Analyze(wldPayload));
         }
+        var materialReferences = LegacyTranslucentMaterialSafetyPolicy.Combine(
+            materialReferenceContexts);
         var textureEntries = source.Entries
             .Where(entry => entry.IsTexture
                 && (rebuildFromReuseArchive
@@ -261,6 +257,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                 var entryAllowed = IsEntryAllowed(
                     context.RelativeInstallPath,
                     entry.Name);
+                materialReferences.TryGetUsage(entry.Name, out var materialUsage);
                 var retriedPreservedOriginal = false;
                 if (entryAllowed)
                 {
@@ -312,7 +309,9 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                     continue;
                 }
 
-                if (protectedLegacyTranslucentTextures.Contains(entry.Name))
+                if (materialUsage?.HasBlendedReference == true
+                    && (!materialReferences.IsComplete
+                        || !materialUsage.IsStaticDiffusePassableDualUseCandidate))
                 {
                     // WLD material flags, animation frames, and bitmap sizes
                     // form one blend contract. Preserve the verified original
@@ -445,7 +444,53 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                     }
                 }
 
-                var classification = classifier.Classify(entry.Name, metadata);
+                var requiresOpaqueTopMip = false;
+                if (materialUsage?.HasBlendedReference == true)
+                {
+                    // A static atlas referenced by both an ordinary diffuse
+                    // material and the exact 0x07 passable variant may be an
+                    // opaque wall duplicated solely for collision semantics.
+                    // It may leave whole-original protection only after the
+                    // stored payload itself proves a reproducible, fully
+                    // opaque top mip. Unknown formats and any real alpha stay
+                    // behind the original blend/animation boundary.
+                    sourcePayload ??= await File.ReadAllBytesAsync(
+                            sourceTexturePath,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    requiresOpaqueTopMip =
+                        materialReferences.IsComplete
+                        && materialUsage.IsStaticDiffusePassableDualUseCandidate
+                        && IsReproducibleFullyOpaqueLegacyDds(
+                            metadata,
+                            sourcePayload);
+                    if (!requiresOpaqueTopMip)
+                    {
+                        counter.Preserve(
+                            LegacyTranslucentMaterialSafetyPolicy.PreservedReason);
+                        var restored = await RestoreOriginalIfBaselineChangedAsync(
+                            reuseArchive,
+                            entry,
+                            sourceTexturePath,
+                            context.WorkingDirectory,
+                            index,
+                            replacements,
+                            enhancedTexturePaths,
+                            cancellationToken).ConfigureAwait(false);
+                        if (!restored)
+                        {
+                            TryDeleteTemporaryFile(sourceTexturePath);
+                        }
+
+                        continue;
+                    }
+                }
+
+                var classification = classifier.Classify(
+                    entry.Name,
+                    metadata,
+                    materialReferences.IsComplete
+                    && materialUsage?.HasClassicDiffuseReference == true);
                 var isPaintedAtCapRepair = repairPaintedAtCap
                     && IsPaintedPreset(context.Options.Preset)
                     && Math.Max(metadata.Width, metadata.Height)
@@ -508,9 +553,27 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
 
                 var isLegacyMaterialClassificationRepair =
                     repairLegacyMaterialClassification
-                    && legacyMaterialMisclassifiedTextures.Contains(entry.Name);
+                    && materialUsage?.WasLegacyBitRuleMisclassified == true;
+                var classificationWithoutWldContext =
+                    repairClassicWldVisibleSurfaceCoverage
+                    && materialReferences.IsComplete
+                    && materialUsage?.HasClassicDiffuseReference == true
+                        ? classifier.Classify(entry.Name, metadata)
+                        : null;
+                var isClassicWldVisibleSurfaceRepair =
+                    repairClassicWldVisibleSurfaceCoverage
+                    && (requiresOpaqueTopMip
+                        || classificationWithoutWldContext is not null
+                            && classification.CanUseColorUpscaler
+                            && classification.Kind is (
+                                TextureKind.Color or TextureKind.Cutout)
+                            && (!classificationWithoutWldContext.CanUseColorUpscaler
+                                || classificationWithoutWldContext.Kind is not (
+                                    TextureKind.Color or TextureKind.Cutout)));
                 var retriesPreviouslyUnchangedOriginal =
-                    isLegacyMaterialClassificationRepair || isPaintedAtCapRepair;
+                    isLegacyMaterialClassificationRepair
+                    || isPaintedAtCapRepair
+                    || isClassicWldVisibleSurfaceRepair;
                 if (!forceReprocess
                     && retriesPreviouslyUnchangedOriginal
                     && reuseArchive is not null
@@ -534,7 +597,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                     TryDeleteTemporaryFile(retryReusedTexturePath);
                     if (baselineStayedOriginal)
                     {
-                        if (!retryUnchangedEntries)
+                        if (!retryUnchangedEntries
+                            && !isClassicWldVisibleSurfaceRepair)
                         {
                             counter.Preserve("Source-identical reusable texture");
                             TryDeleteTemporaryFile(sourceTexturePath);
@@ -553,6 +617,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                 if (!forceReprocess
                     && !isLegacyMaterialClassificationRepair
                     && !isPaintedAtCapRepair
+                    && !isClassicWldVisibleSurfaceRepair
                     && reuseArchive is not null
                     && reuseArchive.TryGetEntry(entry.Name, out var reusedEntry)
                     && reusedEntry is not null)
@@ -577,7 +642,7 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                             metadata,
                             classification,
                             cancellationToken).ConfigureAwait(false);
-                        var isMaskedColorKeyBmp = maskedColorKeyTextures.Contains(entry.Name)
+                        var isMaskedColorKeyBmp = materialUsage?.HasMaskedReference == true
                             && metadata.FileFormat == TextureFileFormat.Bmp
                             && metadata.BitsPerPixel == 8;
                         try
@@ -742,15 +807,16 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                             classification,
                             clampArchiveNames.Contains(
                                 Path.GetFileName(context.RelativeInstallPath))),
-                        HasMaskedColorKey: maskedColorKeyTextures.Contains(entry.Name)
+                        HasMaskedColorKey: materialUsage?.HasMaskedReference == true
                             && metadata.FileFormat == TextureFileFormat.Bmp
                             && metadata.BitsPerPixel == 8,
                         LogicalName: entry.Name,
                         SuppressIndexedColorKeyHeuristic:
-                            legacyMaterialMisclassifiedTextures.Contains(entry.Name)
-                            && !maskedColorKeyTextures.Contains(entry.Name)),
+                            materialUsage?.WasLegacyBitRuleMisclassified == true
+                            && materialUsage.HasMaskedReference == false),
                     RetriedPreservedOriginal: retriedPreservedOriginal
-                        || allowRequestedProfileFailureToKeepOriginal));
+                        || allowRequestedProfileFailureToKeepOriginal,
+                    RequireOpaqueTopMip: requiresOpaqueTopMip));
             }
 
             await ProcessPendingTexturesAsync(
@@ -985,6 +1051,21 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                         item.Metadata.FileFormat,
                         processResult,
                         context.Options.GenerateMipMaps));
+                if (item.RequireOpaqueTopMip)
+                {
+                    var enhancedPayload = await File.ReadAllBytesAsync(
+                            item.EnhancedTexturePath,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (enhancedMetadata is null
+                        || TextureAlphaInspector.ClassifyTopMipAlpha(
+                            enhancedPayload,
+                            enhancedMetadata) != TextureTopMipAlphaKind.Opaque)
+                    {
+                        throw new InvalidDataException(
+                            $"Enhanced output for {item.Entry.Name} no longer has a fully opaque top mip required by its shared diffuse/passable WLD material contract.");
+                    }
+                }
 
                 var enhancedLength = new FileInfo(item.EnhancedTexturePath).Length;
                 replacements.Add(PfsArchiveReplacement.FromFile(item.Entry.Name, item.EnhancedTexturePath));
@@ -1434,6 +1515,17 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
 
     private static bool IsPaintedPreset(TexturePreset preset) =>
         preset is TexturePreset.Illustrated or TexturePreset.RusticPainted;
+
+    internal static bool IsReproducibleFullyOpaqueLegacyDds(
+        TextureMetadata metadata,
+        ReadOnlySpan<byte> payload) =>
+        metadata.IsSimpleTwoDimensionalTexture
+        && metadata.FileFormat == TextureFileFormat.Dds
+        && !metadata.UsesDx10Header
+        && metadata.TexconvFormat is { } format
+        && SafeLegacyDdsFormats.Contains(format)
+        && TextureAlphaInspector.ClassifyTopMipAlpha(payload, metadata)
+            == TextureTopMipAlphaKind.Opaque;
 
     private void ValidateEnhancedPayload(
         string logicalName,
@@ -1948,5 +2040,10 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
         // under widened eligibility. Keeping it original on failure is the
         // status quo, not a style mix, so such entries never abort a
         // strict painted repair.
-        bool RetriedPreservedOriginal = false);
+        bool RetriedPreservedOriginal = false,
+        // Static diffuse+0x07 WLD aliases may be reconstructed only while
+        // their encoded legacy DDS top mip stays fully opaque. Validation is
+        // performed on the final bytes, after the original container/codec
+        // checks, so an encoder cannot silently introduce a cutout.
+        bool RequireOpaqueTopMip = false);
 }

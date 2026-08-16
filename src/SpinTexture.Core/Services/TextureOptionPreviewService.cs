@@ -601,7 +601,7 @@ public sealed class TextureOptionPreviewService
                     source.Path,
                     cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
-            var protectedTranslucent = await ReadProtectedTranslucentNamesAsync(
+            var materialReferences = await ReadMaterialReferenceContextAsync(
                     archive,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -615,7 +615,7 @@ public sealed class TextureOptionPreviewService
                     && IsPlausibleBeforeExtraction(
                         relativePath,
                         entry,
-                        protectedTranslucent,
+                        materialReferences,
                         options.MaximumDimension))
                 .Select(entry => new PreliminaryCandidate(
                     entry,
@@ -645,14 +645,22 @@ public sealed class TextureOptionPreviewService
                     continue;
                 }
 
-                var classification = classifier.Classify(preliminary.Entry.Name, metadata);
-                if (!IsSafeOpaqueCandidate(
+                materialReferences.TryGetUsage(
+                    preliminary.Entry.Name,
+                    out var materialUsage);
+                var classification = classifier.Classify(
+                    preliminary.Entry.Name,
+                    metadata,
+                    materialReferences.IsComplete
+                    && materialUsage?.HasClassicDiffuseReference == true);
+                if (!IsSafeOpaqueCandidateCore(
                     relativePath,
                     preliminary.Entry.Name,
                     metadata,
                     classification,
                     payload,
-                    protectedTranslucent,
+                    protectedTranslucentNames: null,
+                    materialReferences,
                     options.MaximumDimension))
                 {
                     continue;
@@ -738,11 +746,12 @@ public sealed class TextureOptionPreviewService
             .ToArray();
     }
 
-    private static async Task<IReadOnlySet<string>> ReadProtectedTranslucentNamesAsync(
+    private static async Task<LegacyMaterialReferenceContext>
+        ReadMaterialReferenceContextAsync(
         PfsArchive archive,
         CancellationToken cancellationToken)
     {
-        var protectedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var contexts = new List<LegacyMaterialReferenceContext>();
         foreach (var entry in archive.Entries
                      .Where(item => item.Name.EndsWith(".wld", StringComparison.OrdinalIgnoreCase))
                      .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
@@ -750,11 +759,10 @@ public sealed class TextureOptionPreviewService
             cancellationToken.ThrowIfCancellationRequested();
             var payload = await archive.ReadEntryAsync(entry.Name, cancellationToken)
                 .ConfigureAwait(false);
-            protectedNames.UnionWith(
-                LegacyTranslucentMaterialSafetyPolicy.FindProtectedTextureNames(payload));
+            contexts.Add(LegacyTranslucentMaterialSafetyPolicy.Analyze(payload));
         }
 
-        return protectedNames;
+        return LegacyTranslucentMaterialSafetyPolicy.Combine(contexts);
     }
 
     internal static bool IsSafeOpaqueCandidate(
@@ -764,6 +772,25 @@ public sealed class TextureOptionPreviewService
         TextureClassification classification,
         ReadOnlySpan<byte> payload,
         IReadOnlySet<string>? protectedTranslucentNames,
+        int maximumDimension) =>
+        IsSafeOpaqueCandidateCore(
+            containerRelativePath,
+            logicalName,
+            metadata,
+            classification,
+            payload,
+            protectedTranslucentNames,
+            materialReferences: null,
+            maximumDimension);
+
+    private static bool IsSafeOpaqueCandidateCore(
+        string containerRelativePath,
+        string logicalName,
+        TextureMetadata metadata,
+        TextureClassification classification,
+        ReadOnlySpan<byte> payload,
+        IReadOnlySet<string>? protectedTranslucentNames,
+        LegacyMaterialReferenceContext? materialReferences,
         int maximumDimension)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(containerRelativePath);
@@ -771,10 +798,19 @@ public sealed class TextureOptionPreviewService
         ArgumentNullException.ThrowIfNull(metadata);
         ArgumentNullException.ThrowIfNull(classification);
 
+        LegacyMaterialTextureUsage? materialUsage = null;
+        materialReferences?.TryGetUsage(logicalName, out materialUsage);
+        var protectedByMaterial = materialUsage?.HasBlendedReference == true
+            && (materialReferences?.IsComplete != true
+                || !materialUsage.IsStaticDiffusePassableDualUseCandidate
+                || !PfsTextureArchiveBuilder.IsReproducibleFullyOpaqueLegacyDds(
+                    metadata,
+                    payload));
         if (CelestialTextureSafetyPolicy.GetPreservedReason(
                 containerRelativePath,
                 logicalName) is not null
             || protectedTranslucentNames?.Contains(logicalName) == true
+            || protectedByMaterial
             || metadata.Width < MinimumRepresentativeDimension
             || metadata.Height < MinimumRepresentativeDimension
             || metadata.FileFormat == TextureFileFormat.Bmp && metadata.BitsPerPixel == 8
@@ -847,9 +883,10 @@ public sealed class TextureOptionPreviewService
     private static bool IsPlausibleBeforeExtraction(
         string relativePath,
         PfsArchiveEntry entry,
-        IReadOnlySet<string> protectedTranslucent,
+        LegacyMaterialReferenceContext materialReferences,
         int maximumDimension)
     {
+        materialReferences.TryGetUsage(entry.Name, out var materialUsage);
         if (!entry.IsTexture
             || entry.Content.Kind is not (PfsContentKind.Dds
                 or PfsContentKind.Bitmap
@@ -859,7 +896,9 @@ public sealed class TextureOptionPreviewService
             || Math.Max(entry.Content.Width, entry.Content.Height) >= maximumDimension
             || (double)Math.Max(entry.Content.Width, entry.Content.Height)
                 / Math.Min(entry.Content.Width, entry.Content.Height) > 8
-            || protectedTranslucent.Contains(entry.Name)
+            || materialUsage?.HasBlendedReference == true
+                && (!materialReferences.IsComplete
+                    || !materialUsage.IsStaticDiffusePassableDualUseCandidate)
             || CelestialTextureSafetyPolicy.GetPreservedReason(relativePath, entry.Name) is not null
             || HasUnsafeNameToken(entry.Name)
             || PfsTextureArchiveBuilder.IsLikelyAnimatedEffectName(entry.Name))

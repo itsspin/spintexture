@@ -18,6 +18,7 @@ namespace SpinTexture.App;
 public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChanged, IDisposable
 {
     private const double CompactLayoutBreakpoint = 1320;
+    private const double ShortLayoutBreakpoint = 760;
     private readonly ProjectPaths paths;
     private readonly StagedPackCatalogService catalog = new();
     private readonly StagedPackDeletionService deletionService = new();
@@ -29,6 +30,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
     private bool isBusy;
     private bool closeRequested;
     private bool isCompactLayout;
+    private bool isShortLayout;
     private bool isInstallAcknowledged;
     private string selectedCategoryFilter = "All packs";
     private string statusText = "Loading completed staged builds...";
@@ -85,6 +87,12 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
     {
         get => isCompactLayout;
         private set => SetField(ref isCompactLayout, value);
+    }
+
+    public bool IsShortLayout
+    {
+        get => isShortLayout;
+        private set => SetField(ref isShortLayout, value);
     }
 
     public StagedPackRow? SelectedPack
@@ -212,6 +220,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         && SelectedPack?.PreviewManifestPath is not null;
     public bool CanDeleteMarked => !IsBusy
         && Packs.Any(pack => pack.IsMarkedForDeletion);
+    public bool HasDeletionSelection => Packs.Any(pack => pack.IsMarkedForDeletion);
     public bool CanSelectSafeOldPacks => !IsBusy
         && Packs.Any(pack =>
             pack.IsRecommendedForDeletion
@@ -237,8 +246,11 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
     public event EventHandler<PackPreviewRequestedEventArgs>? PreviewRequested;
     public bool CanNavigateAway => !IsBusy;
 
-    private void OnLayoutSizeChanged(object sender, SizeChangedEventArgs e) =>
+    private void OnLayoutSizeChanged(object sender, SizeChangedEventArgs e)
+    {
         IsCompactLayout = e.NewSize.Width < CompactLayoutBreakpoint;
+        IsShortLayout = e.NewSize.Height < ShortLayoutBreakpoint;
+    }
 
     private async void Refresh_Click(object sender, RoutedEventArgs e)
     {
@@ -1496,6 +1508,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         OnPropertyChanged(nameof(CanSelectSafeOldPacks));
         OnPropertyChanged(nameof(CanSelectAllForDeletion));
         OnPropertyChanged(nameof(CanClearDeletionSelection));
+        OnPropertyChanged(nameof(HasDeletionSelection));
         OnPropertyChanged(nameof(DeleteButtonText));
     }
 

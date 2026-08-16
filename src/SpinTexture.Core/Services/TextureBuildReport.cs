@@ -32,10 +32,15 @@ namespace SpinTexture.Core.Services;
 /// of copying them unchanged. Older packs can advance through these
 /// independent safety rules without rerunning unaffected successfully
 /// enhanced textures.
+/// Revision 11 retains complete WLD reference context so static, fully opaque
+/// wall atlases shared by ordinary diffuse and 0x07 passable materials can be
+/// reconstructed without weakening protection for animated water, glass, or
+/// other blended-only resources. It also carries proven classic diffuse
+/// context into semantic classification for logical BMP names stored as DDS.
 /// </summary>
 public static class TextureProcessingPipeline
 {
-    public const int CurrentRevision = 10;
+    public const int CurrentRevision = 11;
     // Preservation reason recorded when a repair retried a previously
     // preserved member and safely kept its original bytes; shared so repair
     // summaries in the workflow and app can count these outcomes.
@@ -59,6 +64,8 @@ public static class TextureProcessingPipeline
         "legacy-material-classification-v10";
     public const string PaintedAtCapRepaintRuleId =
         "painted-at-cap-repaint-v10";
+    public const string ClassicWldVisibleSurfaceCoverageRuleId =
+        "classic-wld-visible-surface-coverage-v11";
 
     public static bool RequiresRepair(
         TextureBuildReport? report,
@@ -259,7 +266,7 @@ public static class TextureProcessingPipeline
         IEnumerable<string>? artifactPaths,
         bool includePaintedAtCap)
     {
-        var rules = new List<string>(8);
+        var rules = new List<string>(9);
         if (revision >= 1
             && scope is AssetScope.CharactersAndEquipmentOnly
                 or AssetScope.WorldCharactersAndEquipment)
@@ -305,6 +312,14 @@ public static class TextureProcessingPipeline
             {
                 rules.Add(PaintedAtCapRepaintRuleId);
             }
+        }
+
+        if (revision >= 11
+            && scope is AssetScope.WorldCharactersAndEquipment
+                or AssetScope.WorldOnly
+                or AssetScope.SelectedZone)
+        {
+            rules.Add(ClassicWldVisibleSurfaceCoverageRuleId);
         }
 
         var paths = artifactPaths?.ToArray();

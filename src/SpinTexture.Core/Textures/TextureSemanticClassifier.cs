@@ -68,7 +68,10 @@ public sealed class TextureSemanticClassifier
         "atlas", "palette", "tilemap", "tileset"
     };
 
-    public TextureClassification Classify(string logicalName, TextureMetadata metadata)
+    public TextureClassification Classify(
+        string logicalName,
+        TextureMetadata metadata,
+        bool isClassicWldDiffuse = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(logicalName);
         ArgumentNullException.ThrowIfNull(metadata);
@@ -78,12 +81,15 @@ public sealed class TextureSemanticClassifier
 
         // Pre-shader-era payloads (8-bit indexed bitmaps) cannot be normal,
         // roughness, or other scalar material maps: that authoring pipeline
-        // did not exist when this art was made. Classic zone art also reuses
-        // the words modern suffix conventions rely on ("metal1" doors and
-        // bars, "window2" walls), so applying the modern token rules to them
-        // wrongly retires large amounts of world masonry, trim, and doors.
+        // did not exist when this art was made. Some supported clients retain
+        // the classic WLD material graph and logical *.bmp name while replacing
+        // the payload with BC1 DDS bytes, so the caller may also provide the
+        // stronger fact that the WLD proves this member is a diffuse material.
+        // Classic zone art reuses modern suffix vocabulary ("metal1" doors,
+        // "window2" walls), and those two proven contexts must not retire it.
         var isClassicIndexedBitmap = metadata.FileFormat == TextureFileFormat.Bmp
             && metadata.BitsPerPixel == 8;
+        var hasClassicDiffuseSemantics = isClassicIndexedBitmap || isClassicWldDiffuse;
 
         if (!metadata.IsSimpleTwoDimensionalTexture)
         {
@@ -97,7 +103,7 @@ public sealed class TextureSemanticClassifier
             return Result(TextureKind.Unsupported, ClassificationConfidence.High, false, metadata.HasAlpha, true, reasons);
         }
 
-        if (!isClassicIndexedBitmap
+        if (!hasClassicDiffuseSemantics
             && (tokens.Overlaps(NormalWordTokens)
                 || TokenizeDelimitedOnly(logicalName).Overlaps(NormalSuffixTokens)))
         {
@@ -106,7 +112,7 @@ public sealed class TextureSemanticClassifier
             return Result(TextureKind.Normal, ClassificationConfidence.High, false, false, false, reasons);
         }
 
-        if (!isClassicIndexedBitmap && tokens.Overlaps(MaskTokens))
+        if (!hasClassicDiffuseSemantics && tokens.Overlaps(MaskTokens))
         {
             reasons.Add("The logical name contains a scalar or packed-mask token.");
             return Result(TextureKind.Mask, ClassificationConfidence.High, false, metadata.HasAlpha, false, reasons);
@@ -133,7 +139,7 @@ public sealed class TextureSemanticClassifier
         }
 
         if (tokens.Any(token => UserInterfaceTokens.Contains(token)
-                && !(isClassicIndexedBitmap
+                && !(hasClassicDiffuseSemantics
                     && WorldAmbiguousUserInterfaceTokens.Contains(token))))
         {
             reasons.Add("The logical name contains a user-interface or glyph token.");
