@@ -76,6 +76,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private string _installHealthText = "No enhanced pack is active";
     private string? _previewManifestPath;
     private InstallHealthReport? _installHealth;
+    private LauncherUpdateRefreshAssessment? _launcherUpdateRefresh;
     private readonly DispatcherTimer _buildProgressTimer;
     private readonly Stopwatch _buildStopwatch = new();
     private bool _isStagedBuildOperation;
@@ -905,6 +906,25 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _installHealthText, value);
     }
 
+    public string InstallPackActionText => _launcherUpdateRefresh?.State switch
+    {
+        LauncherUpdateRefreshState.ResumeRequired => "Resume Refresh + Reinstall",
+        LauncherUpdateRefreshState.Ready => "Refresh + Reinstall After Update",
+        LauncherUpdateRefreshState.FreshBuildRequired => "Accept Update + Build Fresh",
+        _ => "Install Staged Pack"
+    };
+
+    public string InstallPackActionHint => _launcherUpdateRefresh?.State switch
+    {
+        LauncherUpdateRefreshState.ResumeRequired =>
+            "Resumes the verified update receipt, then safely reinstalls the focused refreshed pack",
+        LauncherUpdateRefreshState.Ready =>
+            $"Reuses unaffected staged work and rebuilds only {_launcherUpdateRefresh.UpdatedArtifactCount:N0} LaunchPad-updated archive(s)",
+        LauncherUpdateRefreshState.FreshBuildRequired =>
+            "Preserves the official update, retires stale output, then requires Analyze + a fresh build",
+        _ => "One-time archive install - no second AI build"
+    };
+
     public string ArchiveCountText => _scanSummary is null ? "—" : _scanSummary.ArchiveCount.ToString("N0");
     public string PackedTextureCountText => _scanSummary is null ? "—" : _scanSummary.PackedTextureCount.ToString("N0");
     public string LooseTextureCountText => _scanSummary is null ? "—" : _scanSummary.LooseTextureCount.ToString("N0");
@@ -1211,26 +1231,101 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task InstallLatestPackAsync(CancellationToken cancellationToken)
     {
-        if (!_dialogs.ConfirmApplyLatest())
-        {
-            AddLog("INFO", "Install Staged Pack canceled at the safety gate.");
-            return;
-        }
-
-        BeginOperation("INSTALL PACK", "Verifying the staged pack and original client files");
-        await OptionPreview.WaitForIdleAsync().ConfigureAwait(true);
+        // Acquire the shared UI operation gate before the potentially long
+        // exact health/update assessment. Otherwise another install, Restore,
+        // or Pack Library operation could begin while this preflight is still
+        // hashing the active transaction.
+        BeginOperation(
+            "INSTALL PREFLIGHT",
+            "Checking the active pack and completed game-update state");
         try
         {
             await RefreshInstallHealthAsync(cancellationToken).ConfigureAwait(true);
-            if (_installHealth?.State == InstallHealthState.RevertedToOriginal)
+            var refreshingLauncherUpdate = _launcherUpdateRefresh?.CanRefresh == true;
+            var reconcilingForFreshBuild =
+                _launcherUpdateRefresh?.CanReconcileForFreshBuild == true;
+            var confirmed = refreshingLauncherUpdate
+                ? _dialogs.ConfirmLauncherUpdateRefresh(
+                    _launcherUpdateRefresh!.UpdatedArtifactCount)
+                : reconcilingForFreshBuild
+                    ? _dialogs.ConfirmLauncherUpdateReconcileForFreshBuild(
+                        _launcherUpdateRefresh!.UpdatedArtifactCount)
+                    : _dialogs.ConfirmApplyLatest();
+            if (!confirmed)
             {
-                AddLog("REPAIR", "LaunchPad restored the previous pack. Reusing the verified staged output without rerunning the AI upscaler.");
+                AddLog(
+                    "INFO",
+                    refreshingLauncherUpdate || reconcilingForFreshBuild
+                        ? "Game-update texture refresh canceled at the safety gate."
+                        : "Install Staged Pack canceled at the safety gate.");
+                return;
             }
 
-            await _workflow.ApplyLatestStagedPackAsync(
-                InstallPath,
-                new Progress<ProgressUpdate>(HandleProgress),
-                cancellationToken).ConfigureAwait(true);
+            BeginOperation(
+                refreshingLauncherUpdate
+                    ? "REFRESH UPDATE"
+                    : reconcilingForFreshBuild
+                        ? "ACCEPT UPDATE"
+                        : "INSTALL PACK",
+                refreshingLauncherUpdate
+                    ? "Verifying LaunchPad's completed update and locating only changed source archives"
+                    : reconcilingForFreshBuild
+                        ? "Verifying the completed update before retiring stale staged output"
+                        : "Verifying the staged pack and original client files");
+            await OptionPreview.WaitForIdleAsync().ConfigureAwait(true);
+
+            if (reconcilingForFreshBuild)
+            {
+                var reconciled = await _workflow
+                    .ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
+                        InstallPath,
+                        new Progress<ProgressUpdate>(HandleProgress),
+                        cancellationToken)
+                    .ConfigureAwait(true);
+                AddLog(
+                    "UPDATE",
+                    $"Accepted the completed game update and reconciled {reconciled.ReconciledArtifacts:N0} managed file(s). The stale pack was not reinstalled.");
+                _launcherUpdateRefresh = null;
+                ClearAnalysis();
+                await RefreshInstallHealthAsync(cancellationToken).ConfigureAwait(true);
+                HasManagedBackup = _workflow.HasRestorableBackup(InstallPath);
+                HasStagedPack = false;
+                AddLog(
+                    "NEXT",
+                    "Click Analyze, review the detected updated client, then Build Staged Pack. SpinTexture will create the replacement from the new official files.");
+                StatusText = "Game update accepted • Analyze and build a fresh texture pack";
+                CurrentStage = "UPDATE ACCEPTED";
+                CurrentItem = "Old pack retired safely • Analyze is the next step";
+                return;
+            }
+
+            if (!refreshingLauncherUpdate)
+            {
+                await RefreshInstallHealthAsync(cancellationToken).ConfigureAwait(true);
+                if (_installHealth?.State == InstallHealthState.RevertedToOriginal)
+                {
+                    AddLog("REPAIR", "LaunchPad restored the previous pack. Reusing the verified staged output without rerunning the AI upscaler.");
+                }
+
+                await _workflow.ApplyLatestStagedPackAsync(
+                    InstallPath,
+                    new Progress<ProgressUpdate>(HandleProgress),
+                    cancellationToken).ConfigureAwait(true);
+            }
+            else
+            {
+                var refreshed = await _workflow
+                    .RefreshAndApplyActivePackAfterLauncherUpdateAsync(
+                        InstallPath,
+                        new Progress<ProgressUpdate>(HandleProgress),
+                        cancellationToken)
+                    .ConfigureAwait(true);
+                AddLog(
+                    "UPDATE",
+                    $"Preserved the completed game update, rebuilt {refreshed.UpdatedArtifactCount:N0} changed archive(s), and reused {refreshed.ReusedPackCount:N0} unaffected source pack(s).");
+                HasStagedPack = true;
+            }
+
             await RefreshInstallHealthAsync(cancellationToken).ConfigureAwait(true);
             if (_installHealth?.State != InstallHealthState.EnhancedActive)
             {
@@ -1249,7 +1344,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 AddLog("WARN", $"The pack is installed, but the desktop shortcut could not be created: {shortcutFailure.Message}");
             }
 
-            AddLog("DONE", "Enhanced archives are active and SHA-256 verified. The AI upscaler does not need to run again.");
+            AddLog(
+                "DONE",
+                refreshingLauncherUpdate
+                    ? "The LaunchPad-updated originals are safely backed up and the refreshed enhanced archives are active and SHA-256 verified."
+                    : "Enhanced archives are active and SHA-256 verified. The AI upscaler does not need to run again.");
             AddLog("SAFE", "For normal play, use Play Enhanced EQ or the SpinTexture desktop shortcut. LaunchPad is only needed for real game updates.");
             StatusText = "Enhanced textures ACTIVE • use the SpinTexture play shortcut";
             CurrentStage = "INSTALLED";
@@ -1284,17 +1383,29 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             await RefreshInstallHealthAsync(cancellationToken, fast: true).ConfigureAwait(true);
             if (_installHealth?.State != InstallHealthState.EnhancedActive)
             {
+                if (_launcherUpdateRefresh is { } launcherUpdate
+                    && (launcherUpdate.CanRefresh
+                        || launcherUpdate.CanReconcileForFreshBuild))
+                {
+                    throw new InvalidOperationException(
+                        launcherUpdate.CanReconcileForFreshBuild
+                            ? "LaunchPad completed a verified game update that requires fresh source analysis. Use Accept Update + Build Fresh on the main screen; SpinTexture will preserve the official files and retire the stale pack before you rebuild."
+                            : "LaunchPad completed a verified game update. Use Refresh + Reinstall After Update on the main screen; SpinTexture will rebuild only changed source archives and reuse the unaffected staged work.");
+                }
+
                 throw new InvalidOperationException(_installHealth?.State switch
                 {
                     InstallHealthState.RevertedToOriginal =>
                         "LaunchPad restored the original archives. Close LaunchPad and reinstall the staged pack; the AI upscaler will not run again.",
                     InstallHealthState.MixedOrModified when _installHealth.Entries.Any(entry =>
                         entry.State == InstalledArtifactHealthState.ModifiedOrMissing) =>
-                        "Game archives changed outside SpinTexture. Finish the LaunchPad update, then Analyze and rebuild against the patched client.",
+                        _launcherUpdateRefresh?.Summary
+                        ?? "Game archives changed outside SpinTexture. Open the official launcher and let verification finish, then return to SpinTexture so it can safely assess the update.",
                     InstallHealthState.MixedOrModified =>
                         "The pack is partly enhanced and partly original. Use SpinTexture's verified Restore action before installing again.",
                     InstallHealthState.RecoveryRequired =>
-                        "The previous install needs recovery. Use Restore before playing.",
+                        _launcherUpdateRefresh?.Summary
+                        ?? "The previous install needs recovery. Open the main SpinTexture screen for the exact recovery action before playing.",
                     _ =>
                         "No active enhanced pack was found. Install the staged pack before playing."
                 });
@@ -1325,16 +1436,35 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task RestoreAsync(CancellationToken cancellationToken)
     {
-        if (!_dialogs.ConfirmRestore())
-        {
-            AddLog("INFO", "Restore canceled at the confirmation gate.");
-            return;
-        }
-
-        BeginOperation("RESTORE", "Verifying managed backup");
-        await OptionPreview.WaitForIdleAsync().ConfigureAwait(true);
+        BeginOperation(
+            "RESTORE PREFLIGHT",
+            "Checking whether Restore or game-update refresh is the safe action");
         try
         {
+            await RefreshInstallHealthAsync(cancellationToken).ConfigureAwait(true);
+            if (_launcherUpdateRefresh is { } launcherUpdate
+                && (launcherUpdate.CanRefresh
+                    || launcherUpdate.CanReconcileForFreshBuild))
+            {
+                _dialogs.ShowLauncherUpdateRefreshRequired(
+                    launcherUpdate.Summary);
+                AddLog(
+                    "UPDATE",
+                    "Restore was redirected because replacing a LaunchPad-updated file with its pre-update backup would discard official game changes. Use the game-update action shown on the main screen.");
+                StatusText = launcherUpdate.CanReconcileForFreshBuild
+                    ? "Game update detected • accept it, then Analyze and build fresh"
+                    : "Game update detected • use Refresh + Reinstall After Update";
+                return;
+            }
+
+            if (!_dialogs.ConfirmRestore())
+            {
+                AddLog("INFO", "Restore canceled at the confirmation gate.");
+                return;
+            }
+
+            BeginOperation("RESTORE", "Verifying managed backup");
+            await OptionPreview.WaitForIdleAsync().ConfigureAwait(true);
             await _workflow.RestoreAsync(InstallPath, new Progress<ProgressUpdate>(HandleProgress), cancellationToken);
             HasManagedBackup = _workflow.HasRestorableBackup(InstallPath);
             await RefreshInstallHealthAsync(cancellationToken).ConfigureAwait(true);
@@ -1765,7 +1895,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         && (!IsWorldExpansionSelectionVisible || HasCompleteWorldExpansionSelection);
 
     private bool CanInstallLatestPack() =>
-        !IsBusy && HasStagedPack && IsLegalAcknowledged && Directory.Exists(InstallPath);
+        !IsBusy
+        && (HasStagedPack
+            || _launcherUpdateRefresh?.CanReconcileForFreshBuild == true)
+        && IsLegalAcknowledged
+        && Directory.Exists(InstallPath);
 
     private bool CanPlayEnhanced() =>
         !IsBusy
@@ -1800,6 +1934,21 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     ? _workflow.AuditInstallHealthFastAsync(InstallPath, cancellationToken)
                     : _workflow.AuditInstallHealthAsync(InstallPath, cancellationToken))
                 .ConfigureAwait(true);
+            _launcherUpdateRefresh = (_installHealth.State == InstallHealthState.MixedOrModified
+                    && _installHealth.Entries.Any(entry =>
+                        entry.State == InstalledArtifactHealthState.ModifiedOrMissing))
+                || (_installHealth.State == InstallHealthState.RecoveryRequired
+                    && _installHealth.TransactionState
+                        == InstallTransactionState.RecoveryRequired)
+                ? await _workflow
+                    .AssessLauncherUpdateRefreshAsync(
+                        InstallPath,
+                        _installHealth,
+                        cancellationToken)
+                    .ConfigureAwait(true)
+                : null;
+            OnPropertyChanged(nameof(InstallPackActionText));
+            OnPropertyChanged(nameof(InstallPackActionHint));
             InstallHealthText = _installHealth.State switch
             {
                 InstallHealthState.None => HasStagedPack
@@ -1811,10 +1960,20 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 InstallHealthState.RevertedToOriginal =>
                     $"LaunchPad restored {_installHealth.Entries.Count:N0} archive(s) • reinstall staged pack (no AI rebuild)",
                 InstallHealthState.MixedOrModified when _installHealth.Entries.Any(entry =>
+                    entry.State == InstalledArtifactHealthState.ModifiedOrMissing)
+                    && (_launcherUpdateRefresh?.CanRefresh == true
+                        || _launcherUpdateRefresh?.CanReconcileForFreshBuild == true) =>
+                    _launcherUpdateRefresh.Summary,
+                InstallHealthState.MixedOrModified when _installHealth.Entries.Any(entry =>
                     entry.State == InstalledArtifactHealthState.ModifiedOrMissing) =>
-                    "Game archives changed outside SpinTexture - finish updating, then Analyze and rebuild",
+                    _launcherUpdateRefresh?.Summary
+                    ?? "Game archives changed outside SpinTexture - refresh could not be verified safely",
                 InstallHealthState.MixedOrModified =>
                     "Pack is partly enhanced and partly original - use verified Restore",
+                InstallHealthState.RecoveryRequired when
+                    _launcherUpdateRefresh?.CanRefresh == true
+                    || _launcherUpdateRefresh?.CanReconcileForFreshBuild == true =>
+                    _launcherUpdateRefresh.Summary,
                 InstallHealthState.RecoveryRequired =>
                     "Install recovery is required before playing",
                 _ => _installHealth.Summary
@@ -1837,6 +1996,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         catch (Exception exception)
         {
             _installHealth = null;
+            _launcherUpdateRefresh = null;
+            OnPropertyChanged(nameof(InstallPackActionText));
+            OnPropertyChanged(nameof(InstallPackActionHint));
             InstallHealthText = "Install health could not be verified";
             AddLog("WARN", $"Could not verify the installed pack: {exception.Message}");
             RefreshCommands();

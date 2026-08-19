@@ -20,6 +20,12 @@ public sealed class ManifestStore
         CancellationToken cancellationToken = default) =>
         WriteAsync(path, manifest, cancellationToken);
 
+    public Task WriteLauncherUpdateReconciliationReceiptAsync(
+        string path,
+        LauncherUpdateReconciliationReceipt receipt,
+        CancellationToken cancellationToken = default) =>
+        WriteAsync(path, receipt, cancellationToken);
+
     public async Task<BuildManifest> ReadBuildManifestAsync(
         string path,
         CancellationToken cancellationToken = default)
@@ -60,6 +66,24 @@ public sealed class ManifestStore
         }
 
         return manifest;
+    }
+
+    public async Task<LauncherUpdateReconciliationReceipt>
+        ReadLauncherUpdateReconciliationReceiptAsync(
+            string path,
+            CancellationToken cancellationToken = default)
+    {
+        var receipt = await ReadAsync<LauncherUpdateReconciliationReceipt>(
+                path,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (receipt.SchemaVersion != LauncherUpdateReconciliationReceipt.CurrentSchemaVersion)
+        {
+            throw new InvalidDataException(
+                $"Unsupported launcher-update reconciliation schema {receipt.SchemaVersion}.");
+        }
+
+        return receipt;
     }
 
     private static async Task WriteAsync<T>(string path, T value, CancellationToken cancellationToken)

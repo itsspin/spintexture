@@ -5,6 +5,9 @@ namespace SpinTexture.Core.Pipeline;
 
 public sealed class InstallTransactionService
 {
+    public const string LauncherUpdateReconciliationReceiptFileName =
+        "launcher-update-reconciliation.json";
+
     private readonly ManifestStore _manifestStore;
     private readonly IAtomicFileOperations _atomicFileOperations;
     private readonly Action<string> _ensureGameStopped;
@@ -342,6 +345,312 @@ public sealed class InstallTransactionService
 
         TryDeleteRestoreSafetyDirectory(backupDirectory, restoreSafetyDirectory);
         return new RestoreResult(install.ApplyId, prepared.Count, DateTimeOffset.UtcNow);
+    }
+
+    /// <summary>
+    /// Retires an applied pack after a caller-verified launcher update without
+    /// ever treating unknown bytes as an old managed original. Still-enhanced
+    /// files are restored from their verified backups; old originals and exact
+    /// caller-authorized update snapshots are left untouched. The ordinary
+    /// restore path intentionally remains strict.
+    /// </summary>
+    public async Task<LauncherUpdateReconciliationResult>
+        RestoreAfterVerifiedLauncherUpdateAsync(
+            ProjectPaths paths,
+            string installManifestPath,
+            IReadOnlyList<AdoptedOriginalArtifact> authorizedChanges,
+            IProgress<ProgressUpdate>? progress = null,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentException.ThrowIfNullOrWhiteSpace(installManifestPath);
+        ArgumentNullException.ThrowIfNull(authorizedChanges);
+        _ensureGameStopped("reconcile a completed launcher update");
+        paths.EnsureWorkspaceDirectories();
+        using var transactionLock = TransactionLock.Acquire(paths.WorkspacePath);
+
+        var safeManifestPath = PathGuard.EnsurePathUnderRoot(
+            paths.BackupPath,
+            installManifestPath);
+        var install = await _manifestStore
+            .ReadInstallManifestAsync(safeManifestPath, cancellationToken)
+            .ConfigureAwait(false);
+        ValidateInstallRoot(paths, install.InstallPath);
+        ValidateUniquePaths(install.Entries.Select(entry => entry.RelativeInstallPath));
+        var authorizations = ValidateLauncherUpdateAuthorizations(
+            paths,
+            install,
+            authorizedChanges);
+        var backupDirectory = Path.GetDirectoryName(safeManifestPath)!;
+        var receiptPath = Path.Combine(
+            backupDirectory,
+            LauncherUpdateReconciliationReceiptFileName);
+
+        if (File.Exists(receiptPath))
+        {
+            var existingReceipt = await _manifestStore
+                .ReadLauncherUpdateReconciliationReceiptAsync(
+                    receiptPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            ValidateLauncherUpdateReceipt(
+                paths,
+                install,
+                existingReceipt,
+                authorizations,
+                requireAuthorizationMatch:
+                    existingReceipt.State != LauncherUpdateReconciliationState.RolledBack);
+            if (existingReceipt.State == LauncherUpdateReconciliationState.Completed)
+            {
+                await EnsureReconciledStateMatchesAsync(
+                        paths,
+                        existingReceipt.Entries,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (install.State != InstallTransactionState.Restored)
+                {
+                    _ensureGameStopped(
+                        "retire the completed launcher-update reconciliation");
+                    install = install with { State = InstallTransactionState.Restored };
+                    await _manifestStore.WriteInstallManifestAsync(
+                            safeManifestPath,
+                            install,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                TryDeleteReceiptSafetyDirectory(backupDirectory, existingReceipt);
+                return CreateLauncherUpdateResult(receiptPath, existingReceipt);
+            }
+
+            if (existingReceipt.State == LauncherUpdateReconciliationState.Preparing)
+            {
+                if (install.State is not (InstallTransactionState.Applied
+                    or InstallTransactionState.RecoveryRequired))
+                {
+                    throw new InvalidOperationException(
+                        $"An interrupted launcher-update reconciliation cannot resume from install state {install.State}.");
+                }
+
+                return await ResumeLauncherUpdateReconciliationAsync(
+                        paths,
+                        safeManifestPath,
+                        install,
+                        receiptPath,
+                        existingReceipt,
+                        progress,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            // RolledBack is a closed journal, not a pending authorization. A
+            // later legitimate LaunchPad session may produce different exact
+            // bytes for the same path. Its new caller snapshots must be judged
+            // by a fresh preflight rather than compared with stale adopted
+            // snapshots from the completed rollback attempt.
+            if (install.State == InstallTransactionState.RecoveryRequired)
+            {
+                // Older/interrupted reconciliation code could durably close the
+                // rollback journal before restoring the install-state marker.
+                // A structurally valid RolledBack receipt proves that its live
+                // rollback completed. Restore only metadata here; the fresh
+                // preflight below still exact-verifies every live artifact and
+                // the caller's current launcher snapshots before any write.
+                _ensureGameStopped(
+                    "finalize a successfully rolled-back launcher-update reconciliation");
+                install = install with { State = InstallTransactionState.Applied };
+                await _manifestStore.WriteInstallManifestAsync(
+                        safeManifestPath,
+                        install,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            TryDeleteReceiptSafetyDirectory(backupDirectory, existingReceipt);
+        }
+
+        if (install.State != InstallTransactionState.Applied)
+        {
+            throw new InvalidOperationException(
+                $"Only an applied pack can be reconciled after a launcher update; current state is {install.State}.");
+        }
+
+        var authorizationPaths = new HashSet<string>(
+            authorizations.Keys,
+            StringComparer.OrdinalIgnoreCase);
+        var prepared = new List<PreparedLauncherUpdateArtifact>(install.Entries.Count);
+        progress?.Report(new ProgressUpdate(
+            "Update reconciliation preflight",
+            "Exact-verifying the launcher-updated client and managed originals before any write.",
+            0,
+            install.Entries.Count));
+
+        for (var index = 0; index < install.Entries.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var entry = install.Entries[index];
+            ValidateInstalledArtifactForReconciliation(entry);
+            var targetPath = PathGuard.ResolveUnderRoot(
+                paths.InstallPath,
+                entry.RelativeInstallPath);
+            var canonicalRelativePath = Path.GetRelativePath(
+                paths.InstallPath,
+                targetPath);
+            var observed = await FingerprintOptionalAsync(targetPath, cancellationToken)
+                .ConfigureAwait(false);
+            var matchesEnhanced = SnapshotMatches(
+                observed,
+                exists: true,
+                entry.InstalledLength,
+                entry.InstalledSha256);
+            var matchesOriginal = entry.OriginalExisted
+                ? SnapshotMatches(
+                    observed,
+                    exists: true,
+                    entry.OriginalLength,
+                    entry.OriginalSha256)
+                : observed is null;
+
+            LauncherUpdateOriginalArtifact reconciled;
+            string? originalBackupPath = null;
+            var needsRestore = false;
+            if (matchesOriginal)
+            {
+                reconciled = CreateManagedOriginalSnapshot(
+                    entry,
+                    LauncherUpdateOriginalDisposition.AlreadyManagedOriginal);
+            }
+            else if (matchesEnhanced)
+            {
+                needsRestore = true;
+                if (entry.OriginalExisted)
+                {
+                    originalBackupPath = ResolveAndValidateOriginalBackupPath(
+                        backupDirectory,
+                        entry);
+                    await FileIntegrity.EnsureMatchesAsync(
+                            originalBackupPath,
+                            entry.OriginalLength,
+                            entry.OriginalSha256!,
+                            "Original backup used for launcher-update reconciliation",
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                reconciled = CreateManagedOriginalSnapshot(
+                    entry,
+                    LauncherUpdateOriginalDisposition.RestoredManagedOriginal);
+            }
+            else if (authorizations.TryGetValue(canonicalRelativePath, out var authorization)
+                     && AuthorizationMatches(authorization, observed))
+            {
+                authorizationPaths.Remove(canonicalRelativePath);
+                reconciled = new LauncherUpdateOriginalArtifact(
+                    canonicalRelativePath,
+                    authorization.Exists,
+                    authorization.Length,
+                    authorization.Sha256,
+                    authorization.Exists
+                        ? LauncherUpdateOriginalDisposition.AdoptedUpdatedFile
+                        : LauncherUpdateOriginalDisposition.AdoptedRemovedFile);
+            }
+            else
+            {
+                throw new InvalidOperationException(
+                    $"The current client state for {canonicalRelativePath} is neither the managed enhanced file, the managed original, nor an exact caller-authorized launcher-update snapshot. No client files were changed.");
+            }
+
+            prepared.Add(new PreparedLauncherUpdateArtifact(
+                entry,
+                targetPath,
+                originalBackupPath,
+                reconciled,
+                needsRestore));
+            progress?.Report(new ProgressUpdate(
+                "Update reconciliation preflight",
+                needsRestore
+                    ? "Managed enhanced artifact will be restored from its verified original."
+                    : reconciled.Disposition is LauncherUpdateOriginalDisposition.AdoptedUpdatedFile
+                        or LauncherUpdateOriginalDisposition.AdoptedRemovedFile
+                            ? "Exact launcher-update snapshot authorized and preserved."
+                            : "Artifact is already the managed original and will remain untouched.",
+                index + 1,
+                install.Entries.Count,
+                canonicalRelativePath));
+        }
+
+        if (authorizationPaths.Count != 0)
+        {
+            throw new InvalidOperationException(
+                $"One or more launcher-update authorizations were stale or unnecessary: {string.Join(", ", authorizationPaths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase))}. No client files were changed.");
+        }
+
+        var safetyDirectory = Path.Combine(
+            backupDirectory,
+            $"restore-safety-launcher-update-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(safetyDirectory);
+        LauncherUpdateReconciliationReceipt receipt;
+        var receiptWritten = false;
+        try
+        {
+            foreach (var artifact in prepared.Where(item => item.NeedsRestore))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                artifact.SafetyPath = PathGuard.ResolveUnderRoot(
+                    safetyDirectory,
+                    artifact.Entry.RelativeInstallPath);
+                await _atomicFileOperations.CopyAndReplaceAsync(
+                        artifact.TargetPath,
+                        artifact.SafetyPath,
+                        artifact.Entry.InstalledLength,
+                        artifact.Entry.InstalledSha256,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            // Safety copies may be large. Recheck every changed or writable
+            // preflight snapshot as one barrier immediately before the first
+            // live write so a launcher or user race cannot be silently adopted.
+            await EnsureInitialReconciliationStateMatchesAsync(prepared, cancellationToken)
+                .ConfigureAwait(false);
+
+            receipt = new LauncherUpdateReconciliationReceipt(
+                LauncherUpdateReconciliationReceipt.CurrentSchemaVersion,
+                install.ApplyId,
+                install.AppliedUtc,
+                DateTimeOffset.UtcNow,
+                ReconciledUtc: null,
+                Path.GetFullPath(paths.InstallPath),
+                LauncherUpdateReconciliationState.Preparing,
+                Path.GetFileName(safetyDirectory),
+                prepared.Select(item => item.Reconciled).ToArray());
+            await _manifestStore.WriteLauncherUpdateReconciliationReceiptAsync(
+                    receiptPath,
+                    receipt,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            receiptWritten = true;
+        }
+        catch
+        {
+            if (!receiptWritten)
+            {
+                TryDeleteRestoreSafetyDirectory(backupDirectory, safetyDirectory);
+            }
+
+            throw;
+        }
+
+        return await ExecuteLauncherUpdateReconciliationAsync(
+                paths,
+                safeManifestPath,
+                install,
+                receiptPath,
+                receipt,
+                prepared,
+                progress,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
@@ -784,6 +1093,812 @@ public sealed class InstallTransactionService
         return prepared;
     }
 
+    private async Task<LauncherUpdateReconciliationResult>
+        ResumeLauncherUpdateReconciliationAsync(
+            ProjectPaths paths,
+            string installManifestPath,
+            InstallManifest install,
+            string receiptPath,
+            LauncherUpdateReconciliationReceipt receipt,
+            IProgress<ProgressUpdate>? progress,
+            CancellationToken cancellationToken)
+    {
+        var backupDirectory = Path.GetDirectoryName(installManifestPath)!;
+        var safetyDirectory = ResolveReceiptSafetyDirectory(backupDirectory, receipt);
+        var installedByPath = install.Entries.ToDictionary(
+            entry => Path.GetRelativePath(
+                paths.InstallPath,
+                PathGuard.ResolveUnderRoot(paths.InstallPath, entry.RelativeInstallPath)),
+            StringComparer.OrdinalIgnoreCase);
+        var prepared = new List<PreparedLauncherUpdateArtifact>(receipt.Entries.Count);
+
+        for (var index = 0; index < receipt.Entries.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var reconciled = receipt.Entries[index];
+            var entry = installedByPath[reconciled.RelativeInstallPath];
+            var targetPath = PathGuard.ResolveUnderRoot(
+                paths.InstallPath,
+                reconciled.RelativeInstallPath);
+            var observed = await FingerprintOptionalAsync(targetPath, cancellationToken)
+                .ConfigureAwait(false);
+            var isFinal = SnapshotMatches(
+                observed,
+                reconciled.Exists,
+                reconciled.Length,
+                reconciled.Sha256);
+            var isEnhanced = SnapshotMatches(
+                observed,
+                exists: true,
+                entry.InstalledLength,
+                entry.InstalledSha256);
+            var restoredDisposition = reconciled.Disposition
+                == LauncherUpdateOriginalDisposition.RestoredManagedOriginal;
+            if (!isFinal && (!restoredDisposition || !isEnhanced))
+            {
+                throw new InvalidOperationException(
+                    $"Interrupted launcher-update reconciliation cannot resume because {reconciled.RelativeInstallPath} changed after its durable receipt was written. No unverified bytes were overwritten.");
+            }
+
+            string? backupPath = null;
+            string? safetyPath = null;
+            if (restoredDisposition)
+            {
+                safetyPath = PathGuard.ResolveUnderRoot(
+                    safetyDirectory,
+                    reconciled.RelativeInstallPath);
+                await FileIntegrity.EnsureMatchesAsync(
+                        safetyPath,
+                        entry.InstalledLength,
+                        entry.InstalledSha256,
+                        "Launcher-update reconciliation safety artifact",
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (entry.OriginalExisted)
+                {
+                    backupPath = ResolveAndValidateOriginalBackupPath(
+                        backupDirectory,
+                        entry);
+                    await FileIntegrity.EnsureMatchesAsync(
+                            backupPath,
+                            entry.OriginalLength,
+                            entry.OriginalSha256!,
+                            "Original backup used to resume launcher-update reconciliation",
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+
+            prepared.Add(new PreparedLauncherUpdateArtifact(
+                entry,
+                targetPath,
+                backupPath,
+                reconciled,
+                needsRestore: restoredDisposition && !isFinal)
+            {
+                SafetyPath = safetyPath,
+                ReconciledBeforeResume = restoredDisposition && isFinal
+            });
+            progress?.Report(new ProgressUpdate(
+                "Resume update reconciliation",
+                isFinal
+                    ? "Previously reconciled artifact verified."
+                    : "Managed enhanced artifact still requires its verified original.",
+                index + 1,
+                receipt.Entries.Count,
+                reconciled.RelativeInstallPath));
+        }
+
+        await EnsureInitialReconciliationStateMatchesAsync(prepared, cancellationToken)
+            .ConfigureAwait(false);
+        return await ExecuteLauncherUpdateReconciliationAsync(
+                paths,
+                installManifestPath,
+                install,
+                receiptPath,
+                receipt,
+                prepared,
+                progress,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<LauncherUpdateReconciliationResult>
+        ExecuteLauncherUpdateReconciliationAsync(
+            ProjectPaths paths,
+            string installManifestPath,
+            InstallManifest install,
+            string receiptPath,
+            LauncherUpdateReconciliationReceipt receipt,
+            IReadOnlyList<PreparedLauncherUpdateArtifact> prepared,
+            IProgress<ProgressUpdate>? progress,
+            CancellationToken cancellationToken)
+    {
+        var reconciledRestores = prepared
+            .Where(artifact => artifact.ReconciledBeforeResume)
+            .ToList();
+        try
+        {
+            var restoreItems = prepared.Where(artifact => artifact.NeedsRestore).ToArray();
+            for (var index = 0; index < restoreItems.Length; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var artifact = restoreItems[index];
+                await FileIntegrity.EnsureMatchesAsync(
+                        artifact.TargetPath,
+                        artifact.Entry.InstalledLength,
+                        artifact.Entry.InstalledSha256,
+                        "Enhanced artifact immediately before launcher-update reconciliation",
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                _ensureGameStopped("restore enhanced files after a launcher update");
+                if (artifact.Entry.OriginalExisted)
+                {
+                    await _atomicFileOperations.CopyAndReplaceAsync(
+                            artifact.OriginalBackupPath!,
+                            artifact.TargetPath,
+                            artifact.Entry.OriginalLength,
+                            artifact.Entry.OriginalSha256!,
+                            cancellationToken,
+                            onCommitted: () => reconciledRestores.Add(artifact))
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    File.Delete(artifact.TargetPath);
+                    if (File.Exists(artifact.TargetPath))
+                    {
+                        throw new IOException(
+                            $"Could not remove an enhanced artifact while reconciling the launcher update: {artifact.TargetPath}");
+                    }
+
+                    reconciledRestores.Add(artifact);
+                }
+
+                progress?.Report(new ProgressUpdate(
+                    "Update reconciliation",
+                    "Managed enhanced artifact restored; launcher-updated files remain untouched.",
+                    index + 1,
+                    restoreItems.Length,
+                    artifact.Reconciled.RelativeInstallPath));
+            }
+
+            await EnsureCriticalReconciledStateMatchesAsync(
+                    prepared,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            _ensureGameStopped("retire the reconciled launcher-update transaction");
+        }
+        catch (Exception transactionFailure)
+        {
+            var rollbackFailures = await RollBackLauncherUpdateReconciliationAsync(
+                    reconciledRestores,
+                    progress)
+                .ConfigureAwait(false);
+            if (rollbackFailures.Count == 0)
+            {
+                try
+                {
+                    // Keep the Preparing receipt and safety files intact until
+                    // the successfully rolled-back live state is durably marked
+                    // Applied. Either side of a crash is then resumable:
+                    // RecoveryRequired/Preparing resumes with safety, while
+                    // Applied/Preparing may safely retry the reconciliation.
+                    if (install.State != InstallTransactionState.Applied)
+                    {
+                        _ensureGameStopped(
+                            "finalize a successfully rolled-back launcher-update reconciliation");
+                        install = install with { State = InstallTransactionState.Applied };
+                        await _manifestStore.WriteInstallManifestAsync(
+                                installManifestPath,
+                                install,
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
+                    }
+
+                    receipt = receipt with
+                    {
+                        State = LauncherUpdateReconciliationState.RolledBack,
+                        ReconciledUtc = null
+                    };
+                    await _manifestStore.WriteLauncherUpdateReconciliationReceiptAsync(
+                            receiptPath,
+                            receipt,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    TryDeleteReceiptSafetyDirectory(
+                        Path.GetDirectoryName(installManifestPath)!,
+                        receipt);
+                }
+                catch (Exception journalFailure)
+                {
+                    // Live bytes were reinstated successfully. Do not overwrite
+                    // a possibly committed Applied marker with RecoveryRequired:
+                    // the still-Preparing (or atomically committed RolledBack)
+                    // receipt remains a safe retry point with its safety data.
+                    throw new InstallTransactionException(
+                        "Launcher-update reconciliation failed, and its live files were safely reinstated, but the rollback journal could not be finalized. Retry the reconciliation to resume safely.",
+                        transactionFailure,
+                        [journalFailure]);
+                }
+
+                throw;
+            }
+
+            try
+            {
+                await _manifestStore.WriteInstallManifestAsync(
+                        installManifestPath,
+                        install with { State = InstallTransactionState.RecoveryRequired },
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception manifestFailure)
+            {
+                rollbackFailures.Add(manifestFailure);
+            }
+
+            throw new InstallTransactionException(
+                "Launcher-update reconciliation failed and one or more managed enhanced files could not be reinstated safely. Authorized updated files were not overwritten.",
+                transactionFailure,
+                rollbackFailures);
+        }
+
+        // The completed receipt is the durable commit point. It accounts for
+        // every reconciled original and is written before retiring the source
+        // install manifest. If the following manifest write fails, a retry can
+        // exact-verify this receipt and finish metadata retirement without
+        // rewriting live client files.
+        var reconciledUtc = DateTimeOffset.UtcNow;
+        receipt = receipt with
+        {
+            State = LauncherUpdateReconciliationState.Completed,
+            ReconciledUtc = reconciledUtc
+        };
+        await _manifestStore.WriteLauncherUpdateReconciliationReceiptAsync(
+                receiptPath,
+                receipt,
+                cancellationToken)
+            .ConfigureAwait(false);
+        install = install with { State = InstallTransactionState.Restored };
+        await _manifestStore.WriteInstallManifestAsync(
+                installManifestPath,
+                install,
+                cancellationToken)
+            .ConfigureAwait(false);
+        TryDeleteReceiptSafetyDirectory(
+            Path.GetDirectoryName(installManifestPath)!,
+            receipt);
+        return CreateLauncherUpdateResult(receiptPath, receipt);
+    }
+
+    private async Task<List<Exception>> RollBackLauncherUpdateReconciliationAsync(
+        IReadOnlyList<PreparedLauncherUpdateArtifact> reconciled,
+        IProgress<ProgressUpdate>? progress)
+    {
+        var failures = new List<Exception>();
+        for (var index = reconciled.Count - 1; index >= 0; index--)
+        {
+            var artifact = reconciled[index];
+            try
+            {
+                // Never overwrite a launcher or user change that raced rollback.
+                // The target must still be the exact managed original committed
+                // by this reconciliation (or still absent) before enhanced bytes
+                // may be reinstated from the safety copy.
+                var observed = await FingerprintOptionalAsync(
+                        artifact.TargetPath,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                if (!SnapshotMatches(
+                        observed,
+                        artifact.Reconciled.Exists,
+                        artifact.Reconciled.Length,
+                        artifact.Reconciled.Sha256))
+                {
+                    throw new InvalidDataException(
+                        $"Reconciliation rollback refused to overwrite externally changed bytes: {artifact.TargetPath}");
+                }
+
+                _ensureGameStopped("roll back launcher-update reconciliation");
+                await _atomicFileOperations.CopyAndReplaceAsync(
+                        artifact.SafetyPath!,
+                        artifact.TargetPath,
+                        artifact.Entry.InstalledLength,
+                        artifact.Entry.InstalledSha256,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                progress?.Report(new ProgressUpdate(
+                    "Update reconciliation rollback",
+                    "Managed enhanced artifact reinstated after reconciliation failure.",
+                    reconciled.Count - index,
+                    reconciled.Count,
+                    artifact.Reconciled.RelativeInstallPath));
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
+        }
+
+        return failures;
+    }
+
+    private static async Task EnsureInitialReconciliationStateMatchesAsync(
+        IReadOnlyList<PreparedLauncherUpdateArtifact> prepared,
+        CancellationToken cancellationToken)
+    {
+        foreach (var artifact in prepared)
+        {
+            if (!artifact.NeedsRestore
+                && artifact.Reconciled.Disposition
+                    == LauncherUpdateOriginalDisposition.AlreadyManagedOriginal)
+            {
+                // Exact preflight already established this untouched old
+                // original. Rehashing thousands of no-write entries at every
+                // barrier would multiply full-pack reconciliation time; the
+                // subsequent refreshed build/apply exact-verifies its sources.
+                continue;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var observed = await FingerprintOptionalAsync(
+                    artifact.TargetPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var matches = artifact.NeedsRestore
+                ? SnapshotMatches(
+                    observed,
+                    exists: true,
+                    artifact.Entry.InstalledLength,
+                    artifact.Entry.InstalledSha256)
+                : SnapshotMatches(
+                    observed,
+                    artifact.Reconciled.Exists,
+                    artifact.Reconciled.Length,
+                    artifact.Reconciled.Sha256);
+            if (!matches)
+            {
+                throw new InvalidOperationException(
+                    $"The live client changed during launcher-update reconciliation preflight: {artifact.Reconciled.RelativeInstallPath}. No client files were changed.");
+            }
+        }
+    }
+
+    private static async Task EnsureCriticalReconciledStateMatchesAsync(
+        IReadOnlyList<PreparedLauncherUpdateArtifact> prepared,
+        CancellationToken cancellationToken)
+    {
+        foreach (var artifact in prepared.Where(item =>
+                     item.Reconciled.Disposition
+                         != LauncherUpdateOriginalDisposition.AlreadyManagedOriginal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var observed = await FingerprintOptionalAsync(
+                    artifact.TargetPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!SnapshotMatches(
+                    observed,
+                    artifact.Reconciled.Exists,
+                    artifact.Reconciled.Length,
+                    artifact.Reconciled.Sha256))
+            {
+                throw new InvalidOperationException(
+                    $"A restored or adopted client artifact changed before transaction retirement: {artifact.Reconciled.RelativeInstallPath}.");
+            }
+        }
+    }
+
+    private static async Task EnsureReconciledStateMatchesAsync(
+        ProjectPaths paths,
+        IReadOnlyList<LauncherUpdateOriginalArtifact> entries,
+        CancellationToken cancellationToken)
+    {
+        foreach (var entry in entries)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var livePath = PathGuard.ResolveUnderRoot(
+                paths.InstallPath,
+                entry.RelativeInstallPath);
+            var observed = await FingerprintOptionalAsync(livePath, cancellationToken)
+                .ConfigureAwait(false);
+            if (!SnapshotMatches(observed, entry.Exists, entry.Length, entry.Sha256))
+            {
+                throw new InvalidOperationException(
+                    $"The reconciled client artifact changed before transaction retirement: {entry.RelativeInstallPath}.");
+            }
+        }
+    }
+
+    private static async Task<FileFingerprint?> FingerprintOptionalAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                throw new InvalidDataException(
+                    $"An install artifact path resolves to a directory instead of a file: {path}");
+            }
+
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidDataException(
+                    $"An install artifact path is a reparse point and cannot be reconciled safely: {path}");
+            }
+
+            return await FileIntegrity.FingerprintAsync(path, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return null;
+        }
+    }
+
+    private static bool SnapshotMatches(
+        FileFingerprint? observed,
+        bool exists,
+        long length,
+        string? sha256) =>
+        exists
+            ? observed is not null
+              && observed.Length == length
+              && sha256 is not null
+              && observed.Sha256.Equals(sha256, StringComparison.OrdinalIgnoreCase)
+            : observed is null;
+
+    private static bool AuthorizationMatches(
+        AdoptedOriginalArtifact authorization,
+        FileFingerprint? observed) =>
+        SnapshotMatches(
+            observed,
+            authorization.Exists,
+            authorization.Length,
+            authorization.Sha256);
+
+    private static LauncherUpdateOriginalArtifact CreateManagedOriginalSnapshot(
+        InstalledArtifact entry,
+        LauncherUpdateOriginalDisposition disposition) =>
+        entry.OriginalExisted
+            ? new LauncherUpdateOriginalArtifact(
+                entry.RelativeInstallPath,
+                Exists: true,
+                entry.OriginalLength,
+                entry.OriginalSha256,
+                disposition)
+            : new LauncherUpdateOriginalArtifact(
+                entry.RelativeInstallPath,
+                Exists: false,
+                Length: 0,
+                Sha256: null,
+                disposition);
+
+    private static string ResolveAndValidateOriginalBackupPath(
+        string backupDirectory,
+        InstalledArtifact entry)
+    {
+        if (!entry.OriginalExisted
+            || string.IsNullOrWhiteSpace(entry.BackupRelativePath)
+            || string.IsNullOrWhiteSpace(entry.OriginalSha256))
+        {
+            throw new InvalidDataException(
+                $"The install manifest does not identify an original backup for {entry.RelativeInstallPath}.");
+        }
+
+        return PathGuard.ResolveUnderRoot(backupDirectory, entry.BackupRelativePath);
+    }
+
+    private static IReadOnlyDictionary<string, AdoptedOriginalArtifact>
+        ValidateLauncherUpdateAuthorizations(
+            ProjectPaths paths,
+            InstallManifest install,
+            IReadOnlyList<AdoptedOriginalArtifact> authorizations)
+    {
+        var installedPaths = install.Entries
+            .Select(entry => Path.GetRelativePath(
+                paths.InstallPath,
+                PathGuard.ResolveUnderRoot(paths.InstallPath, entry.RelativeInstallPath)))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, AdoptedOriginalArtifact>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var authorization in authorizations)
+        {
+            ArgumentNullException.ThrowIfNull(authorization);
+            if (string.IsNullOrWhiteSpace(authorization.RelativeInstallPath))
+            {
+                throw new InvalidDataException(
+                    "A launcher-update authorization has no relative install path.");
+            }
+
+            var livePath = PathGuard.ResolveUnderRoot(
+                paths.InstallPath,
+                authorization.RelativeInstallPath);
+            var canonicalPath = Path.GetRelativePath(paths.InstallPath, livePath);
+            if (!installedPaths.Contains(canonicalPath))
+            {
+                throw new InvalidDataException(
+                    $"A launcher-update authorization does not belong to the active install: {canonicalPath}");
+            }
+
+            if (authorization.Exists)
+            {
+                if (authorization.Length < 0 || authorization.Sha256 is null)
+                {
+                    throw new InvalidDataException(
+                        $"The launcher-update authorization for {canonicalPath} has an invalid existing-file snapshot.");
+                }
+
+                ValidateHash(authorization.Sha256);
+            }
+            else if (authorization.Length != 0 || authorization.Sha256 is not null)
+            {
+                throw new InvalidDataException(
+                    $"An authorized removal must use Exists=false, Length=0, and no SHA-256: {canonicalPath}");
+            }
+
+            if (!result.TryAdd(
+                    canonicalPath,
+                    authorization with { RelativeInstallPath = canonicalPath }))
+            {
+                throw new InvalidDataException(
+                    $"Duplicate launcher-update authorization: {canonicalPath}");
+            }
+        }
+
+        return result;
+    }
+
+    private static void ValidateLauncherUpdateReceipt(
+        ProjectPaths paths,
+        InstallManifest install,
+        LauncherUpdateReconciliationReceipt receipt,
+        IReadOnlyDictionary<string, AdoptedOriginalArtifact> authorizations,
+        bool requireAuthorizationMatch)
+    {
+        if (receipt.SchemaVersion != LauncherUpdateReconciliationReceipt.CurrentSchemaVersion
+            || !receipt.ApplyId.Equals(install.ApplyId, StringComparison.OrdinalIgnoreCase)
+            || receipt.AppliedUtc != install.AppliedUtc
+            || !PathGuard.SamePath(receipt.InstallPath, paths.InstallPath)
+            || receipt.Entries is null
+            || receipt.Entries.Count != install.Entries.Count
+            || !Enum.IsDefined(receipt.State))
+        {
+            throw new InvalidDataException(
+                "The launcher-update reconciliation receipt does not match the source install transaction.");
+        }
+
+        if (receipt.State == LauncherUpdateReconciliationState.Completed
+            && receipt.ReconciledUtc is null)
+        {
+            throw new InvalidDataException(
+                "A completed launcher-update reconciliation receipt has no completion time.");
+        }
+
+        if (receipt.State == LauncherUpdateReconciliationState.RolledBack
+            && receipt.ReconciledUtc is not null)
+        {
+            throw new InvalidDataException(
+                "A rolled-back launcher-update reconciliation receipt cannot have a completion time.");
+        }
+
+        if (receipt.State == LauncherUpdateReconciliationState.Preparing
+            && string.IsNullOrWhiteSpace(receipt.SafetyDirectoryName))
+        {
+            throw new InvalidDataException(
+                "An in-progress launcher-update reconciliation has no safety directory.");
+        }
+
+        var installedByPath = install.Entries.ToDictionary(
+            entry => Path.GetRelativePath(
+                paths.InstallPath,
+                PathGuard.ResolveUnderRoot(paths.InstallPath, entry.RelativeInstallPath)),
+            StringComparer.OrdinalIgnoreCase);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var usedAuthorizations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var reconciled in receipt.Entries)
+        {
+            var livePath = PathGuard.ResolveUnderRoot(
+                paths.InstallPath,
+                reconciled.RelativeInstallPath);
+            var canonicalPath = Path.GetRelativePath(paths.InstallPath, livePath);
+            if (!seen.Add(canonicalPath)
+                || !installedByPath.TryGetValue(canonicalPath, out var installed)
+                || !Enum.IsDefined(reconciled.Disposition))
+            {
+                throw new InvalidDataException(
+                    "The launcher-update reconciliation receipt has an unsafe or duplicate artifact.");
+            }
+
+            if (reconciled.Exists)
+            {
+                if (reconciled.Length < 0 || reconciled.Sha256 is null)
+                {
+                    throw new InvalidDataException(
+                        $"The reconciliation receipt has an invalid existing-file snapshot: {canonicalPath}");
+                }
+
+                ValidateHash(reconciled.Sha256);
+            }
+            else if (reconciled.Length != 0 || reconciled.Sha256 is not null)
+            {
+                throw new InvalidDataException(
+                    $"The reconciliation receipt has an invalid missing-file snapshot: {canonicalPath}");
+            }
+
+            if (reconciled.Disposition is LauncherUpdateOriginalDisposition.AdoptedUpdatedFile
+                or LauncherUpdateOriginalDisposition.AdoptedRemovedFile)
+            {
+                if ((reconciled.Disposition
+                        == LauncherUpdateOriginalDisposition.AdoptedUpdatedFile)
+                    != reconciled.Exists)
+                {
+                    throw new InvalidDataException(
+                        $"The adopted disposition does not match the recorded file state for {canonicalPath}.");
+                }
+
+                if (requireAuthorizationMatch
+                    && (!authorizations.TryGetValue(canonicalPath, out var authorization)
+                        || authorization.Exists != reconciled.Exists
+                        || authorization.Length != reconciled.Length
+                        || !string.Equals(
+                            authorization.Sha256,
+                            reconciled.Sha256,
+                            StringComparison.OrdinalIgnoreCase)))
+                {
+                    throw new InvalidDataException(
+                        $"The caller authorization does not match the durable reconciliation receipt for {canonicalPath}.");
+                }
+
+                if (requireAuthorizationMatch)
+                {
+                    usedAuthorizations.Add(canonicalPath);
+                }
+            }
+            else
+            {
+                var expected = CreateManagedOriginalSnapshot(
+                    installed,
+                    reconciled.Disposition);
+                if (expected.Exists != reconciled.Exists
+                    || expected.Length != reconciled.Length
+                    || !string.Equals(
+                        expected.Sha256,
+                        reconciled.Sha256,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        $"The managed-original snapshot in the reconciliation receipt is invalid: {canonicalPath}");
+                }
+            }
+        }
+
+        if (requireAuthorizationMatch
+            && usedAuthorizations.Count != authorizations.Count)
+        {
+            throw new InvalidDataException(
+                "The caller's launcher-update authorizations do not exactly match the durable reconciliation receipt.");
+        }
+    }
+
+    private static string ResolveReceiptSafetyDirectory(
+        string backupDirectory,
+        LauncherUpdateReconciliationReceipt receipt)
+    {
+        if (string.IsNullOrWhiteSpace(receipt.SafetyDirectoryName)
+            || Path.GetFileName(receipt.SafetyDirectoryName) != receipt.SafetyDirectoryName
+            || !receipt.SafetyDirectoryName.StartsWith(
+                "restore-safety-launcher-update-",
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "The launcher-update reconciliation receipt has an unsafe safety directory.");
+        }
+
+        var directory = PathGuard.ResolveUnderRoot(
+            backupDirectory,
+            receipt.SafetyDirectoryName);
+        if (!Directory.Exists(directory)
+            || (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException(
+                "The launcher-update reconciliation safety directory is missing or unsafe.");
+        }
+
+        return directory;
+    }
+
+    private static void ValidateInstalledArtifactForReconciliation(InstalledArtifact entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        if (string.IsNullOrWhiteSpace(entry.RelativeInstallPath)
+            || entry.OriginalLength < 0
+            || entry.InstalledLength < 0)
+        {
+            throw new InvalidDataException(
+                "The active install manifest contains invalid artifact metadata.");
+        }
+
+        ValidateHash(entry.InstalledSha256);
+        if (entry.OriginalExisted)
+        {
+            if (entry.OriginalSha256 is null
+                || string.IsNullOrWhiteSpace(entry.BackupRelativePath))
+            {
+                throw new InvalidDataException(
+                    $"The active install has no original metadata for {entry.RelativeInstallPath}.");
+            }
+
+            ValidateHash(entry.OriginalSha256);
+        }
+        else if (entry.OriginalSha256 is not null || entry.BackupRelativePath is not null)
+        {
+            throw new InvalidDataException(
+                $"The active install has inconsistent absent-original metadata for {entry.RelativeInstallPath}.");
+        }
+    }
+
+    private static LauncherUpdateReconciliationResult CreateLauncherUpdateResult(
+        string receiptPath,
+        LauncherUpdateReconciliationReceipt receipt)
+    {
+        if (receipt.State != LauncherUpdateReconciliationState.Completed
+            || receipt.ReconciledUtc is null)
+        {
+            throw new InvalidOperationException(
+                "A launcher-update reconciliation result requires a completed receipt.");
+        }
+
+        return new LauncherUpdateReconciliationResult(
+            receipt.ApplyId,
+            receiptPath,
+            receipt.Entries.Count,
+            receipt.Entries.Count(entry => entry.Disposition
+                == LauncherUpdateOriginalDisposition.RestoredManagedOriginal),
+            receipt.Entries.Count(entry => entry.Disposition is
+                LauncherUpdateOriginalDisposition.AdoptedUpdatedFile or
+                LauncherUpdateOriginalDisposition.AdoptedRemovedFile),
+            receipt.ReconciledUtc.Value);
+    }
+
+    private static void TryDeleteReceiptSafetyDirectory(
+        string backupDirectory,
+        LauncherUpdateReconciliationReceipt receipt)
+    {
+        if (string.IsNullOrWhiteSpace(receipt.SafetyDirectoryName))
+        {
+            return;
+        }
+
+        try
+        {
+            var safetyDirectory = PathGuard.ResolveUnderRoot(
+                backupDirectory,
+                receipt.SafetyDirectoryName);
+            TryDeleteRestoreSafetyDirectory(backupDirectory, safetyDirectory);
+        }
+        catch (Exception exception) when (exception is IOException
+                                           or UnauthorizedAccessException
+                                           or InvalidDataException
+                                           or ArgumentException
+                                           or NotSupportedException)
+        {
+            // Reconciliation is already committed or rolled back. A retained
+            // verified safety copy is harmless and remains visibly owned.
+        }
+    }
+
     private async Task<List<Exception>> RollBackApplyAsync(
         string backupDirectory,
         IReadOnlyList<PreparedBuildArtifact> applied,
@@ -1101,6 +2216,34 @@ public sealed class InstallTransactionService
                 return;
             }
 
+            // Directory.Delete(recursive: true) can follow a junction or
+            // symbolic-link directory nested below the owned safety root. Walk
+            // one level at a time and inspect attributes before descending so a
+            // reparse point that appeared after snapshot creation makes cleanup
+            // fail closed without touching its external target.
+            var pending = new Queue<string>();
+            pending.Enqueue(target);
+            while (pending.Count != 0)
+            {
+                var directory = pending.Dequeue();
+                foreach (var child in Directory.EnumerateFileSystemEntries(
+                             directory,
+                             "*",
+                             SearchOption.TopDirectoryOnly))
+                {
+                    var attributes = File.GetAttributes(child);
+                    if ((attributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        return;
+                    }
+
+                    if ((attributes & FileAttributes.Directory) != 0)
+                    {
+                        pending.Enqueue(child);
+                    }
+                }
+            }
+
             Directory.Delete(target, recursive: true);
         }
         catch (Exception exception) when (exception is IOException
@@ -1143,6 +2286,31 @@ public sealed class InstallTransactionService
         public string? OriginalBackupPath { get; }
         public ObservedInstallState ObservedState { get; }
         public string? SafetyPath { get; set; }
+    }
+
+    private sealed class PreparedLauncherUpdateArtifact
+    {
+        public PreparedLauncherUpdateArtifact(
+            InstalledArtifact entry,
+            string targetPath,
+            string? originalBackupPath,
+            LauncherUpdateOriginalArtifact reconciled,
+            bool needsRestore)
+        {
+            Entry = entry;
+            TargetPath = targetPath;
+            OriginalBackupPath = originalBackupPath;
+            Reconciled = reconciled;
+            NeedsRestore = needsRestore;
+        }
+
+        public InstalledArtifact Entry { get; }
+        public string TargetPath { get; }
+        public string? OriginalBackupPath { get; }
+        public LauncherUpdateOriginalArtifact Reconciled { get; }
+        public bool NeedsRestore { get; }
+        public string? SafetyPath { get; set; }
+        public bool ReconciledBeforeResume { get; set; }
     }
 
     private enum ObservedInstallState

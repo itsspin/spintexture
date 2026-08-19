@@ -238,11 +238,11 @@ public partial class App : Application
                     "LaunchPad restored the original game archives. Open SpinTexture and choose Install Staged Pack; the AI upscaler will not run again.",
                 InstallHealthState.MixedOrModified when health.Entries.Any(entry =>
                     entry.State == InstalledArtifactHealthState.ModifiedOrMissing) =>
-                    "One or more game archives changed outside SpinTexture. Do not force an old staged pack over a game update. Finish updating through LaunchPad, then Analyze and rebuild the affected pack.",
+                    "One or more game archives changed after the texture pack was installed. Open SpinTexture after LaunchPad finishes: the main screen will verify the completed update and offer Refresh + Reinstall After Update, or safely request a fresh build only when required. Do not force an old staged pack over the updated client.",
                 InstallHealthState.MixedOrModified =>
                     "The installed pack is partly enhanced and partly original. Open SpinTexture and use its verified Restore action before installing again.",
                 InstallHealthState.RecoveryRequired =>
-                    "The previous install needs recovery. Open SpinTexture and use Restore before playing.",
+                    "The previous install needs recovery. Open SpinTexture and use the recovery action shown on its main screen; an interrupted game-update refresh may need Resume Refresh + Reinstall instead of Restore.",
                 _ =>
                     "No active enhanced pack was found. Open SpinTexture, build or select a staged pack, and install it once before playing."
             });

@@ -71,3 +71,72 @@ public sealed record RestoreResult(
     string ApplyId,
     int RestoredArtifacts,
     DateTimeOffset RestoredUtc);
+
+/// <summary>
+/// An exact live-client snapshot that the caller has independently authorized as
+/// the result of a completed launcher update. Missing files are never inferred:
+/// changed files that disappeared must be represented explicitly with
+/// <see cref="Exists"/> set to false. Do not authorize an unchanged missing path
+/// whose managed original already did not exist; it is an ordinary managed
+/// original state rather than a launcher change.
+/// </summary>
+public sealed record AdoptedOriginalArtifact(
+    string RelativeInstallPath,
+    bool Exists,
+    long Length,
+    string? Sha256);
+
+public enum LauncherUpdateReconciliationState
+{
+    Preparing,
+    Completed,
+    RolledBack
+}
+
+public enum LauncherUpdateOriginalDisposition
+{
+    AlreadyManagedOriginal,
+    RestoredManagedOriginal,
+    AdoptedUpdatedFile,
+    AdoptedRemovedFile
+}
+
+/// <summary>
+/// The complete post-reconciliation original-client state for one artifact.
+/// This is intentionally broader than the caller's changed-file authorization:
+/// a completed receipt accounts for every artifact in the retired install.
+/// </summary>
+public sealed record LauncherUpdateOriginalArtifact(
+    string RelativeInstallPath,
+    bool Exists,
+    long Length,
+    string? Sha256,
+    LauncherUpdateOriginalDisposition Disposition);
+
+/// <summary>
+/// Durable journal and completion receipt for retiring an install after a
+/// verified launcher update. Preparing receipts make an interrupted restore of
+/// still-enhanced files resumable; Completed receipts are written before the
+/// source install manifest is retired.
+/// </summary>
+public sealed record LauncherUpdateReconciliationReceipt(
+    int SchemaVersion,
+    string ApplyId,
+    DateTimeOffset AppliedUtc,
+    DateTimeOffset StartedUtc,
+    DateTimeOffset? ReconciledUtc,
+    string InstallPath,
+    LauncherUpdateReconciliationState State,
+    string? SafetyDirectoryName,
+    IReadOnlyList<LauncherUpdateOriginalArtifact> Entries)
+{
+    public const int CurrentSchemaVersion = 1;
+}
+
+public sealed record LauncherUpdateReconciliationResult(
+    string ApplyId,
+    string ReceiptPath,
+    int ReconciledArtifacts,
+    int RestoredEnhancedArtifacts,
+    int AdoptedArtifacts,
+    DateTimeOffset ReconciledUtc);
