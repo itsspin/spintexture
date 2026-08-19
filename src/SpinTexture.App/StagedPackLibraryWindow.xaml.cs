@@ -928,7 +928,8 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         var answer = MessageBox.Show(
             Window.GetWindow(this),
             $"Install {selected.Length:N0} checked pack(s)?\n\n"
-            + "SpinTexture verifies every selected pack. When the selection only adds packs, already-active archives stay untouched and only the new archives are backed up and installed. Selections that remove or replace archives use the verified restore-and-switch path. No AI upscaling is rerun.",
+            + "SpinTexture verifies every selected pack. When the selection only adds packs, already-active archives stay untouched and only the new archives are backed up and installed. Selections that remove or replace archives use the verified restore-and-switch path. No AI upscaling is normally rerun.\n\n"
+            + "If LaunchPad updated an active source, this action stops before creating a combination or changing game files and returns you to the main screen for the focused update refresh.",
             "Install checked packs",
             MessageBoxButton.OKCancel,
             MessageBoxImage.Information);
@@ -1366,6 +1367,19 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             await RefreshAsync(selectManifest, checkedManifestPaths, deleteMarkedManifestPaths)
                 .ConfigureAwait(true);
             StatusText = successMessage;
+        }
+        catch (LauncherUpdateActionRequiredException exception)
+        {
+            StatusText = exception.Message;
+            MessageBox.Show(
+                Window.GetWindow(this),
+                exception.Message
+                + "\n\nNo pack combination was created and no game files were changed. SpinTexture will return to the main Build screen now.",
+                "Game update action required",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            IsBusy = false;
+            CloseRequested?.Invoke(this, EventArgs.Empty);
         }
         catch (OperationCanceledException)
         {

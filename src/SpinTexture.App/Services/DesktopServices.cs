@@ -17,7 +17,10 @@ public interface IFolderPickerService
 public interface IUserDialogService
 {
     bool ConfirmApplyLatest();
+    bool ConfirmLauncherUpdateRefresh(int updatedArchiveCount);
+    bool ConfirmLauncherUpdateReconcileForFreshBuild(int updatedFileCount);
     bool ConfirmRestore();
+    void ShowLauncherUpdateRefreshRequired(string summary);
     bool ConfirmArtisticWorkerSetup(long totalDownloadBytes, IReadOnlyList<string> componentSummaries);
     bool ConfirmArtisticWorkerRemove();
     void ShowArtisticWorkerNotice(string message, bool isError);
@@ -302,6 +305,38 @@ public sealed class UserDialogService : IUserDialogService
             MessageBoxResult.No) == MessageBoxResult.Yes;
     }
 
+    public bool ConfirmLauncherUpdateRefresh(int updatedArchiveCount)
+    {
+        var message =
+            $"LaunchPad completed a game update and changed {updatedArchiveCount:N0} archive(s) used by the active texture pack.\n\n"
+            + "SpinTexture will preserve the updated game files, reuse every unaffected staged archive, and rebuild only the changed source archive(s) with the pack's exact recorded quality, style, theme, and painted-renderer identity. This focused rebuild may use the GPU, but it avoids rebuilding the whole pack.\n\n"
+            + "After the replacement is fully staged and verified, SpinTexture will retire the old install transaction and reinstall the refreshed pack. If staging fails or is canceled, the live client is not changed. EverQuest and LaunchPad must remain closed.\n\n"
+            + "Refresh and reinstall the active pack now?";
+
+        return MessageBox.Show(
+            message,
+            "Refresh textures after game update",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question,
+            MessageBoxResult.No) == MessageBoxResult.Yes;
+    }
+
+    public bool ConfirmLauncherUpdateReconcileForFreshBuild(int updatedFileCount)
+    {
+        var message =
+            $"LaunchPad completed a game update and changed {updatedFileCount:N0} file(s) used by the active texture pack. This update includes content that cannot safely reuse the old staged output.\n\n"
+            + "SpinTexture will exact-verify the completed LaunchPad session, preserve every updated official file, restore any remaining enhanced files from verified backups, and retire the old install transaction. It will not install the stale pack.\n\n"
+            + "Afterward, run Analyze and Build Staged Pack against the updated client. EverQuest and LaunchPad must remain closed.\n\n"
+            + "Accept the verified game update and prepare for a fresh build now?";
+
+        return MessageBox.Show(
+            message,
+            "Accept game update and build fresh",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question,
+            MessageBoxResult.No) == MessageBoxResult.Yes;
+    }
+
     public bool ConfirmRestore()
     {
         const string message =
@@ -314,6 +349,17 @@ public sealed class UserDialogService : IUserDialogService
             MessageBoxButton.YesNo,
             MessageBoxImage.Question,
             MessageBoxResult.No) == MessageBoxResult.Yes;
+    }
+
+    public void ShowLauncherUpdateRefreshRequired(string summary)
+    {
+        MessageBox.Show(
+            "LaunchPad completed a game update, so the old Restore action cannot safely replace its new archives with pre-update backups.\n\n"
+            + summary
+            + "\n\nUse the game-update action shown on the main screen. SpinTexture will preserve the updated originals and either stage a focused replacement or safely prepare for a fresh build.",
+            "Refresh the pack after the game update",
+            MessageBoxButton.OK,
+            MessageBoxImage.Information);
     }
 
     public bool ConfirmArtisticWorkerSetup(long totalDownloadBytes, IReadOnlyList<string> componentSummaries)

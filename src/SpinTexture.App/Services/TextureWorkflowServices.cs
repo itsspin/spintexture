@@ -43,6 +43,22 @@ public interface ITextureWorkflowService
         string installPath,
         CancellationToken cancellationToken);
 
+    Task<LauncherUpdateRefreshAssessment> AssessLauncherUpdateRefreshAsync(
+        string installPath,
+        InstallHealthReport? verifiedHealth,
+        CancellationToken cancellationToken);
+
+    Task<LauncherUpdateRefreshResult> RefreshAndApplyActivePackAfterLauncherUpdateAsync(
+        string installPath,
+        IProgress<ProgressUpdate> progress,
+        CancellationToken cancellationToken);
+
+    Task<LauncherUpdateReconciliationResult>
+        ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
+            string installPath,
+            IProgress<ProgressUpdate> progress,
+            CancellationToken cancellationToken);
+
     Task<ApplyResult> ApplyLatestStagedPackAsync(
         string installPath,
         IProgress<ProgressUpdate> progress,
@@ -145,6 +161,41 @@ public sealed class TextureWorkflowService : ITextureWorkflowService
         CancellationToken cancellationToken) =>
         workflow.AuditInstallHealthFastAsync(
             WorkspaceLocator.ForInstall(installPath, workspaceRoot),
+            cancellationToken);
+
+    public Task<LauncherUpdateRefreshAssessment> AssessLauncherUpdateRefreshAsync(
+        string installPath,
+        InstallHealthReport? verifiedHealth,
+        CancellationToken cancellationToken) =>
+        workflow.AssessLauncherUpdateRefreshAsync(
+            WorkspaceLocator.ForInstall(installPath, workspaceRoot),
+            verifiedHealth,
+            cancellationToken);
+
+    public async Task<LauncherUpdateRefreshResult>
+        RefreshAndApplyActivePackAfterLauncherUpdateAsync(
+            string installPath,
+            IProgress<ProgressUpdate> progress,
+            CancellationToken cancellationToken)
+    {
+        var result = await workflow
+            .RefreshAndApplyActivePackAfterLauncherUpdateAsync(
+                WorkspaceLocator.ForInstall(installPath, workspaceRoot),
+                progress,
+                cancellationToken)
+            .ConfigureAwait(false);
+        LastBuildDirectory = result.RebuiltPacks.LastOrDefault()?.StagedBuild.BuildDirectory;
+        return result;
+    }
+
+    public Task<LauncherUpdateReconciliationResult>
+        ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
+            string installPath,
+            IProgress<ProgressUpdate> progress,
+            CancellationToken cancellationToken) =>
+        workflow.ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
+            WorkspaceLocator.ForInstall(installPath, workspaceRoot),
+            progress,
             cancellationToken);
 
     public Task<ApplyResult> ApplyLatestStagedPackAsync(

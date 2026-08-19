@@ -73,8 +73,18 @@ public static class TexturePipelineSelfTests
             .ConfigureAwait(false);
         await InstallHealthSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Installed-pack health audit tests passed.").ConfigureAwait(false);
+        await LaunchPadUpdateEvidenceSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
+        await output.WriteLineAsync("Completed LaunchPad update-evidence tests passed.")
+            .ConfigureAwait(false);
+        await LauncherUpdateWorkflowSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
+        await output.WriteLineAsync("Focused post-LaunchPad refresh and reinstall tests passed.")
+            .ConfigureAwait(false);
         await StagedPackReinstallSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Staged-pack launcher-repair reinstall tests passed.")
+            .ConfigureAwait(false);
+        await LauncherUpdateReconciliationSelfTests.RunAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await output.WriteLineAsync("Launcher-update reconciliation transaction tests passed.")
             .ConfigureAwait(false);
         await StagedPackCompositionSelfTests.RunAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Staged-pack catalog and composition tests passed.")
@@ -1304,10 +1314,20 @@ public static class TexturePipelineSelfTests
             backupDirectory,
             "nested",
             "restore-safety-not-an-immediate-child");
+        var guardedDirectory = Path.Combine(
+            backupDirectory,
+            "restore-safety-nested-reparse");
+        var outsideDirectory = Path.Combine(root, "outside-reparse-target");
+        var outsideMarker = Path.Combine(outsideDirectory, "must-survive.txt");
+        var nestedLink = Path.Combine(guardedDirectory, "nested", "unsafe-link");
         Directory.CreateDirectory(ownedDirectory);
         Directory.CreateDirectory(unrelatedDirectory);
         Directory.CreateDirectory(nestedDirectory);
+        Directory.CreateDirectory(Path.GetDirectoryName(nestedLink)!);
+        Directory.CreateDirectory(outsideDirectory);
         File.WriteAllText(Path.Combine(ownedDirectory, "snapshot.bin"), "owned");
+        File.WriteAllText(outsideMarker, "keep");
+        var linkCreated = false;
 
         try
         {
@@ -1324,9 +1344,39 @@ public static class TexturePipelineSelfTests
                 backupDirectory,
                 ownedDirectory);
             Assert(!Directory.Exists(ownedDirectory), "cleanup should remove an exact owned safety directory");
+
+            try
+            {
+                Directory.CreateSymbolicLink(nestedLink, outsideDirectory);
+                linkCreated = true;
+            }
+            catch (Exception exception) when (exception is
+                UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+            {
+                // Reparse creation can be unavailable on locked-down Windows
+                // hosts; the production guard still runs on every cleanup.
+            }
+
+            if (linkCreated)
+            {
+                InstallTransactionService.TryDeleteRestoreSafetyDirectory(
+                    backupDirectory,
+                    guardedDirectory);
+                Assert(
+                    Directory.Exists(guardedDirectory),
+                    "cleanup must retain a safety tree containing a nested reparse point");
+                Assert(
+                    File.Exists(outsideMarker),
+                    "nested-reparse cleanup guard must preserve the external target");
+            }
         }
         finally
         {
+            if (linkCreated && Directory.Exists(nestedLink))
+            {
+                Directory.Delete(nestedLink);
+            }
+
             if (Directory.Exists(root))
             {
                 DeleteTree(root);

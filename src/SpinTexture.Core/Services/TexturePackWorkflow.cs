@@ -33,6 +33,13 @@ internal sealed record SourceRepairPaintedRendererProvenance(
     string? ArtisticWorkerPreset,
     PaintedRendererOutcome RendererOutcome);
 
+internal sealed record SourceRepairVisualCompatibility(
+    TextureBuildReport? BaselineReport,
+    SourceRepairPaintedRendererProvenance RendererProvenance,
+    ArtisticWorkerIdentity? CurrentArtisticIdentity,
+    bool IsPaintedBaseline,
+    bool HasReproduciblePaintedProfile);
+
 public sealed class TexturePackWorkflow
 {
     public static string FreshBuildResumeOperationKey =>
@@ -168,6 +175,57 @@ public sealed class TexturePackWorkflow
             outcome);
     }
 
+    private async Task<SourceRepairVisualCompatibility>
+        ResolveSourceRepairVisualCompatibilityAsync(
+            ProjectPaths paths,
+            StagedPackInfo baselineInfo,
+            ExternalToolPaths? tools,
+            CancellationToken cancellationToken)
+    {
+        var baseline = baselineInfo.Manifest
+            ?? throw new InvalidDataException(
+                "The source-repair baseline has no verified manifest.");
+        var baselineReport = await TryReadTextureBuildReportAsync(
+                baselineInfo.BuildDirectory,
+                baseline.BuildId,
+                paths.InstallPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var currentArtisticIdentity = baseline.Options.Preset
+                == TexturePreset.Illustrated
+            && tools is not null
+            ? await ArtisticWorkerIdentityProvider.ResolveAsync(
+                    tools,
+                    cancellationToken)
+                .ConfigureAwait(false)
+            : null;
+        var rendererProvenance = ResolveSourceRepairPaintedRendererProvenance(
+            baseline.Options,
+            baselineReport,
+            enforceCurrentRoute: tools is not null,
+            currentWorkerAvailable: tools?.HasArtisticWorker == true,
+            currentArtisticIdentity?.Fingerprint);
+        var isPaintedBaseline = baseline.Options.Preset is
+            TexturePreset.Illustrated or TexturePreset.RusticPainted;
+        var hasReproduciblePaintedProfile = !isPaintedBaseline
+            || (baselineReport?.PaintedProfileRevision ?? 0)
+                == GetFreshPaintedProfileRevision(baseline.Options.Preset);
+        if (tools is not null
+            && isPaintedBaseline
+            && !hasReproduciblePaintedProfile)
+        {
+            throw new InvalidOperationException(
+                "This painted pack uses an older or unknown art-profile revision. Focused source repair cannot reproduce changed archives without mixing painted algorithms; build the complete pack fresh instead.");
+        }
+
+        return new SourceRepairVisualCompatibility(
+            baselineReport,
+            rendererProvenance,
+            currentArtisticIdentity,
+            isPaintedBaseline,
+            hasReproduciblePaintedProfile);
+    }
+
     private async Task EnsureArtisticWorkerIdentityUnchangedAsync(
         ProjectPaths paths,
         ArtisticWorkerIdentity? expectedIdentity,
@@ -207,6 +265,7 @@ public sealed class TexturePackWorkflow
     private readonly InstallTransactionService installTransactionService;
     private readonly ManifestStore manifestStore;
     private readonly InstallHealthService installHealthService;
+    private readonly LaunchPadUpdateEvidenceService launchPadUpdateEvidenceService;
     private readonly StagedPackCatalogService stagedPackCatalogService;
     private readonly StagedPackComposer stagedPackComposer;
     private readonly Action clientClosedGuard;
@@ -219,7 +278,8 @@ public sealed class TexturePackWorkflow
         ManifestStore? manifestStore = null,
         InstallHealthService? installHealthService = null,
         StagedPackCatalogService? stagedPackCatalogService = null,
-        StagedPackComposer? stagedPackComposer = null)
+        StagedPackComposer? stagedPackComposer = null,
+        LaunchPadUpdateEvidenceService? launchPadUpdateEvidenceService = null)
     {
         this.scanner = scanner ?? new EverQuestTextureScanner();
         this.toolchainDiscovery = toolchainDiscovery ?? new ToolchainDiscovery();
@@ -227,6 +287,8 @@ public sealed class TexturePackWorkflow
         this.installTransactionService = installTransactionService ?? new InstallTransactionService();
         this.manifestStore = manifestStore ?? new ManifestStore();
         this.installHealthService = installHealthService ?? new InstallHealthService(this.manifestStore);
+        this.launchPadUpdateEvidenceService = launchPadUpdateEvidenceService
+            ?? new LaunchPadUpdateEvidenceService();
         this.stagedPackCatalogService = stagedPackCatalogService
             ?? new StagedPackCatalogService(this.manifestStore);
         this.stagedPackComposer = stagedPackComposer
@@ -243,7 +305,8 @@ public sealed class TexturePackWorkflow
         ManifestStore? manifestStore = null,
         InstallHealthService? installHealthService = null,
         StagedPackCatalogService? stagedPackCatalogService = null,
-        StagedPackComposer? stagedPackComposer = null)
+        StagedPackComposer? stagedPackComposer = null,
+        LaunchPadUpdateEvidenceService? launchPadUpdateEvidenceService = null)
         : this(
             scanner,
             toolchainDiscovery,
@@ -252,7 +315,8 @@ public sealed class TexturePackWorkflow
             manifestStore,
             installHealthService,
             stagedPackCatalogService,
-            stagedPackComposer)
+            stagedPackComposer,
+            launchPadUpdateEvidenceService)
     {
         this.clientClosedGuard = clientClosedGuard
             ?? throw new ArgumentNullException(nameof(clientClosedGuard));
@@ -1737,6 +1801,7 @@ public sealed class TexturePackWorkflow
             rebuildBuilderOverride: null,
             targetedSafetyBuilderOverride: null,
             forceTargetedSafetyRepair: null,
+            launcherUpdatePlan: null,
             progress,
             cancellationToken);
 
@@ -1752,6 +1817,7 @@ public sealed class TexturePackWorkflow
             rebuildBuilder ?? throw new ArgumentNullException(nameof(rebuildBuilder)),
             targetedSafetyBuilderOverride: null,
             forceTargetedSafetyRepair: false,
+            launcherUpdatePlan: null,
             progress,
             cancellationToken);
 
@@ -1769,6 +1835,7 @@ public sealed class TexturePackWorkflow
             targetedSafetyBuilder
                 ?? throw new ArgumentNullException(nameof(targetedSafetyBuilder)),
             forceTargetedSafetyRepair: true,
+            launcherUpdatePlan: null,
             progress,
             cancellationToken);
 
@@ -1778,6 +1845,7 @@ public sealed class TexturePackWorkflow
         IStagedArtifactBuilder? rebuildBuilderOverride,
         IStagedArtifactBuilder? targetedSafetyBuilderOverride,
         bool? forceTargetedSafetyRepair,
+        LauncherUpdateSourceRepairPlan? launcherUpdatePlan,
         IProgress<ProgressUpdate>? progress,
         CancellationToken cancellationToken)
     {
@@ -1829,30 +1897,19 @@ public sealed class TexturePackWorkflow
                     mayUseArtisticWorker: baseline.Options.Preset == TexturePreset.Illustrated,
                     cancellationToken)
                 .ConfigureAwait(false);
-        var baselineReport = await TryReadTextureBuildReportAsync(
-                baselineInfo.BuildDirectory,
-                baseline.BuildId,
-                paths.InstallPath,
+        var visualCompatibility = await ResolveSourceRepairVisualCompatibilityAsync(
+                paths,
+                baselineInfo,
+                tools,
                 cancellationToken)
             .ConfigureAwait(false);
-        var currentArtisticIdentity = baseline.Options.Preset == TexturePreset.Illustrated
-            && tools is not null
-            ? await ArtisticWorkerIdentityProvider.ResolveAsync(tools, cancellationToken)
-                .ConfigureAwait(false)
-            : null;
-        var rendererProvenance = ResolveSourceRepairPaintedRendererProvenance(
-            baseline.Options,
-            baselineReport,
-            enforceCurrentRoute: tools is not null,
-            currentWorkerAvailable: tools?.HasArtisticWorker == true,
-            currentArtisticIdentity?.Fingerprint);
-        var isPaintedBaseline = baseline.Options.Preset is
-            TexturePreset.Illustrated or TexturePreset.RusticPainted;
-        var currentPaintedProfileRevision =
-            GetFreshPaintedProfileRevision(baseline.Options.Preset);
-        var hasReproduciblePaintedProfile = !isPaintedBaseline
-            || (baselineReport?.PaintedProfileRevision ?? 0)
-                == currentPaintedProfileRevision;
+        var baselineReport = visualCompatibility.BaselineReport;
+        var rendererProvenance = visualCompatibility.RendererProvenance;
+        var currentArtisticIdentity =
+            visualCompatibility.CurrentArtisticIdentity;
+        var isPaintedBaseline = visualCompatibility.IsPaintedBaseline;
+        var hasReproduciblePaintedProfile =
+            visualCompatibility.HasReproduciblePaintedProfile;
         // Production source repair can advance a stale, provenance-capable pack
         // through the current targeted safety rules in the same immutable
         // replacement. Tests may inject a non-PFS rebuild builder, so that seam
@@ -1891,8 +1948,9 @@ public sealed class TexturePackWorkflow
                     StringComparer.Ordinal)
                 || sourceRepairNeedsLegacyMaterialClassification
                 || sourceRepairNeedsPaintedAtCap);
-        var originalSources = await PrepareBuildOriginalSourcesAsync(paths, cancellationToken)
-            .ConfigureAwait(false);
+        var originalSources = launcherUpdatePlan?.OriginalSources
+            ?? await PrepareBuildOriginalSourcesAsync(paths, cancellationToken)
+                .ConfigureAwait(false);
         var provenance = await LoadManagedInstallProvenanceAsync(paths, cancellationToken)
             .ConfigureAwait(false);
         var archiveScopes = DiscoverArchiveScopes(paths.InstallPath);
@@ -2020,6 +2078,35 @@ public sealed class TexturePackWorkflow
                 continue;
             }
 
+            if (launcherUpdatePlan?.UpdatedSources.TryGetValue(
+                    relativePath,
+                    out var authorizedUpdate) == true)
+            {
+                if (currentSource.Length != authorizedUpdate.Length
+                    || !currentSource.Sha256.Equals(
+                        authorizedUpdate.Sha256,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        $"The LaunchPad-updated source for {relativePath} changed after verification. The completed baseline remains unchanged; close the launcher and refresh again.");
+                }
+
+                // This exact live fingerprint was named by a completed
+                // post-install LaunchPad receipt. Rebuild the whole archive
+                // from the patched original; carrying the prior archive would
+                // silently discard official non-texture or texture changes.
+                items.Add(new StagedBuildItem(
+                    relativePath,
+                    rebuildBuilder,
+                    PathGuard.SamePath(sourcePath, livePath) ? null : sourcePath,
+                    currentSource.Length,
+                    currentSource.Sha256,
+                    AllowSourceIdenticalOmission: applyTargetedSafetyRepair
+                        && CanOmitSourceIdenticalSafetyArtifact(relativePath)));
+                rebuiltCount++;
+                continue;
+            }
+
             if (!provenance.TryGetValue(
                     CreateManagedInstalledKey(
                         relativePath,
@@ -2120,7 +2207,9 @@ public sealed class TexturePackWorkflow
                 cancellationToken,
                 async (finalizing, metadataCancellationToken) =>
                 {
-                    counter.Warn(applyTargetedSafetyRepair
+                    counter.Warn(launcherUpdatePlan is not null
+                        ? $"Completed game-update refresh reused {reusedCount:N0} unaffected archive(s), rebuilt {rebuiltCount:N0} LaunchPad-updated archive(s) from their exact new originals, and safety-upgraded {safetyUpgradedCount:N0} archive(s)."
+                        : applyTargetedSafetyRepair
                         ? $"Source and safety repair upgraded {safetyUpgradedCount:N0} clean archive(s) from their exact staged baselines and rebuilt {rebuiltCount:N0} contaminated archive(s) from verified originals."
                         : $"Source repair reused {reusedCount:N0} complete staged archive(s) and rebuilt {rebuiltCount:N0} contaminated archive(s) from verified originals.");
                     var statistics = counter.Snapshot();
@@ -2748,6 +2837,1012 @@ public sealed class TexturePackWorkflow
         CancellationToken cancellationToken = default) =>
         installHealthService.AuditLatestFastAsync(paths, cancellationToken);
 
+    public async Task<LauncherUpdateRefreshAssessment> AssessLauncherUpdateRefreshAsync(
+        ProjectPaths paths,
+        InstallHealthReport? verifiedHealth = null,
+        CancellationToken cancellationToken = default)
+    {
+        var context = await TryCreateLauncherUpdateRefreshContextAsync(
+                paths,
+                verifiedHealth,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return context.Assessment;
+    }
+
+    private async Task<LauncherUpdateRefreshContext>
+        TryCreateLauncherUpdateRefreshContextAsync(
+            ProjectPaths paths,
+            InstallHealthReport? verifiedHealth,
+            CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        var canReuseHealth = verifiedHealth is not null
+            && verifiedHealth.Entries.All(entry =>
+                entry.State == InstalledArtifactHealthState.ModifiedOrMissing
+                    ? entry.ObservedSha256 is { Length: 64 }
+                        || entry.ObservedLength is null
+                    : entry.ObservedSha256 is { Length: 64 });
+        var health = canReuseHealth
+            ? verifiedHealth!
+            : await installHealthService
+                .AuditLatestAsync(paths, cancellationToken)
+                .ConfigureAwait(false);
+        var isOrdinaryLauncherUpdate = health.State == InstallHealthState.MixedOrModified
+            && health.Entries.Any(entry =>
+                entry.State == InstalledArtifactHealthState.ModifiedOrMissing);
+        var isInterruptedReconciliation = health.State == InstallHealthState.RecoveryRequired
+            && health.TransactionState == InstallTransactionState.RecoveryRequired;
+        if (!isOrdinaryLauncherUpdate && !isInterruptedReconciliation)
+        {
+            return LauncherUpdateRefreshContext.Blocked(new LauncherUpdateRefreshAssessment(
+                LauncherUpdateRefreshState.NotApplicable,
+                "No completed game update needs texture-pack refresh.",
+                health.InstallManifestPath,
+                ActiveBuildManifestPath: null,
+                UpdatedArtifactCount: 0,
+                UpdatedRelativePaths: []));
+        }
+
+        if (string.IsNullOrWhiteSpace(health.InstallManifestPath))
+        {
+            return LauncherUpdateRefreshContext.Blocked(new LauncherUpdateRefreshAssessment(
+                LauncherUpdateRefreshState.UnverifiedChanges,
+                "The mixed installation has no verified SpinTexture transaction manifest. No game files were changed.",
+                ActiveInstallManifestPath: null,
+                ActiveBuildManifestPath: null,
+                UpdatedArtifactCount: 0,
+                UpdatedRelativePaths: []));
+        }
+
+        var safeInstallManifestPath = PathGuard.EnsurePathUnderRoot(
+            paths.BackupPath,
+            health.InstallManifestPath);
+        var install = await manifestStore
+            .ReadInstallManifestAsync(safeInstallManifestPath, cancellationToken)
+            .ConfigureAwait(false);
+        if (install.State is not (InstallTransactionState.Applied
+                or InstallTransactionState.RecoveryRequired)
+            || !PathGuard.SamePath(install.InstallPath, paths.InstallPath))
+        {
+            return LauncherUpdateRefreshContext.Blocked(new LauncherUpdateRefreshAssessment(
+                LauncherUpdateRefreshState.UnverifiedChanges,
+                "The active transaction is not an applied pack for this installation. No game files were changed.",
+                safeInstallManifestPath,
+                install.BuildManifestPath,
+                UpdatedArtifactCount: 0,
+                UpdatedRelativePaths: []));
+        }
+
+        LauncherUpdateReconciliationReceipt? interruptedReceipt = null;
+        if (install.State == InstallTransactionState.RecoveryRequired)
+        {
+            var receiptPath = Path.Combine(
+                Path.GetDirectoryName(safeInstallManifestPath)!,
+                InstallTransactionService.LauncherUpdateReconciliationReceiptFileName);
+            if (!File.Exists(receiptPath))
+            {
+                return LauncherUpdateRefreshContext.Blocked(new LauncherUpdateRefreshAssessment(
+                    LauncherUpdateRefreshState.UnverifiedChanges,
+                    "The interrupted install has no durable launcher-update receipt. Use the normal recovery guidance; no updated originals were trusted.",
+                    safeInstallManifestPath,
+                    install.BuildManifestPath,
+                    UpdatedArtifactCount: 0,
+                    UpdatedRelativePaths: []));
+            }
+
+            try
+            {
+                interruptedReceipt = await manifestStore
+                    .ReadLauncherUpdateReconciliationReceiptAsync(
+                        receiptPath,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is
+                IOException or
+                UnauthorizedAccessException or
+                InvalidDataException or
+                JsonException)
+            {
+                return LauncherUpdateRefreshContext.Blocked(new LauncherUpdateRefreshAssessment(
+                    LauncherUpdateRefreshState.UnverifiedChanges,
+                    $"SpinTexture could not validate the interrupted launcher-update receipt: {exception.Message}",
+                    safeInstallManifestPath,
+                    install.BuildManifestPath,
+                    UpdatedArtifactCount: 0,
+                    UpdatedRelativePaths: []));
+            }
+
+            if (interruptedReceipt.State is not (
+                    LauncherUpdateReconciliationState.Preparing
+                    or LauncherUpdateReconciliationState.Completed)
+                || interruptedReceipt.State
+                        == LauncherUpdateReconciliationState.Completed
+                    && interruptedReceipt.ReconciledUtc is null
+                || interruptedReceipt.State
+                        == LauncherUpdateReconciliationState.Preparing
+                    && string.IsNullOrWhiteSpace(
+                        interruptedReceipt.SafetyDirectoryName)
+                || !interruptedReceipt.ApplyId.Equals(
+                    install.ApplyId,
+                    StringComparison.OrdinalIgnoreCase)
+                || interruptedReceipt.AppliedUtc != install.AppliedUtc
+                || !PathGuard.SamePath(interruptedReceipt.InstallPath, paths.InstallPath)
+                || interruptedReceipt.Entries.Count != install.Entries.Count)
+            {
+                return LauncherUpdateRefreshContext.Blocked(new LauncherUpdateRefreshAssessment(
+                    LauncherUpdateRefreshState.UnverifiedChanges,
+                    "The interrupted launcher-update receipt does not match the active install transaction. SpinTexture will not guess how to resume or finalize it.",
+                    safeInstallManifestPath,
+                    install.BuildManifestPath,
+                    UpdatedArtifactCount: 0,
+                    UpdatedRelativePaths: []));
+            }
+        }
+
+        var evidence = await launchPadUpdateEvidenceService
+            .InspectAsync(paths, install.AppliedUtc, cancellationToken)
+            .ConfigureAwait(false);
+        if (!evidence.IsCompleted)
+        {
+            return LauncherUpdateRefreshContext.Blocked(new LauncherUpdateRefreshAssessment(
+                LauncherUpdateRefreshState.LauncherIncomplete,
+                evidence.Summary,
+                safeInstallManifestPath,
+                install.BuildManifestPath,
+                UpdatedArtifactCount: 0,
+                UpdatedRelativePaths: []));
+        }
+
+        var updated = new List<AuthorizedLauncherUpdateSource>();
+        var unauthorized = new List<string>();
+        var removed = new List<string>();
+        var unreadableArchives = new List<string>();
+        var authorizationSnapshots = new List<AdoptedOriginalArtifact>();
+        if (interruptedReceipt is not null)
+        {
+            var healthByPath = health.Entries.ToDictionary(
+                entry => entry.RelativeInstallPath,
+                StringComparer.OrdinalIgnoreCase);
+            var receiptChanges = interruptedReceipt.Entries
+                .Where(entry => entry.Disposition is
+                    LauncherUpdateOriginalDisposition.AdoptedUpdatedFile or
+                    LauncherUpdateOriginalDisposition.AdoptedRemovedFile)
+                .ToArray();
+            if (receiptChanges.Length == 0
+                || receiptChanges.Select(entry => entry.RelativeInstallPath)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Count() != receiptChanges.Length)
+            {
+                return LauncherUpdateRefreshContext.Blocked(new LauncherUpdateRefreshAssessment(
+                    LauncherUpdateRefreshState.UnverifiedChanges,
+                    "The interrupted launcher-update receipt has no unique adopted update snapshots. SpinTexture will not guess how to resume it.",
+                    safeInstallManifestPath,
+                    install.BuildManifestPath,
+                    UpdatedArtifactCount: 0,
+                    UpdatedRelativePaths: []));
+            }
+
+            var receiptPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var receiptChange in receiptChanges)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!evidence.TryGetChangedFile(
+                        receiptChange.RelativeInstallPath,
+                        out var loggedChange)
+                    || loggedChange is null
+                    || (receiptChange.Exists
+                        ? loggedChange.Action == LaunchPadFileAction.Removed
+                        : loggedChange.Action != LaunchPadFileAction.Removed)
+                    || !healthByPath.TryGetValue(
+                        receiptChange.RelativeInstallPath,
+                        out var observed))
+                {
+                    unauthorized.Add(receiptChange.RelativeInstallPath);
+                    continue;
+                }
+
+                var livePath = PathGuard.ResolveUnderRoot(
+                    paths.InstallPath,
+                    receiptChange.RelativeInstallPath);
+                var matchesReceipt = receiptChange.Exists
+                    ? File.Exists(livePath)
+                        && observed.ObservedLength == receiptChange.Length
+                        && string.Equals(
+                            observed.ObservedSha256,
+                            receiptChange.Sha256,
+                            StringComparison.OrdinalIgnoreCase)
+                    : !File.Exists(livePath)
+                        && observed.ObservedLength is null
+                        && observed.ObservedSha256 is null;
+                if (!matchesReceipt)
+                {
+                    unauthorized.Add(receiptChange.RelativeInstallPath);
+                    continue;
+                }
+
+                receiptPaths.Add(receiptChange.RelativeInstallPath);
+                authorizationSnapshots.Add(new AdoptedOriginalArtifact(
+                    receiptChange.RelativeInstallPath,
+                    receiptChange.Exists,
+                    receiptChange.Length,
+                    receiptChange.Sha256));
+                if (!receiptChange.Exists)
+                {
+                    removed.Add(receiptChange.RelativeInstallPath);
+                }
+                else
+                {
+                    updated.Add(new AuthorizedLauncherUpdateSource(
+                        receiptChange.RelativeInstallPath,
+                        livePath,
+                        receiptChange.Length,
+                        receiptChange.Sha256!));
+                }
+            }
+
+            foreach (var unknown in health.Entries.Where(entry =>
+                         entry.State == InstalledArtifactHealthState.ModifiedOrMissing
+                         && !receiptPaths.Contains(entry.RelativeInstallPath)))
+            {
+                unauthorized.Add(unknown.RelativeInstallPath);
+            }
+        }
+        else
+        {
+            foreach (var entry in health.Entries.Where(candidate =>
+                         candidate.State == InstalledArtifactHealthState.ModifiedOrMissing))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!evidence.TryGetChangedFile(entry.RelativeInstallPath, out var changed)
+                    || changed is null)
+                {
+                    unauthorized.Add(entry.RelativeInstallPath);
+                    continue;
+                }
+
+                var livePath = PathGuard.ResolveUnderRoot(
+                    paths.InstallPath,
+                    entry.RelativeInstallPath);
+                if (changed.Action == LaunchPadFileAction.Removed)
+                {
+                    if (File.Exists(livePath))
+                    {
+                        unauthorized.Add(entry.RelativeInstallPath);
+                    }
+                    else
+                    {
+                        removed.Add(entry.RelativeInstallPath);
+                        authorizationSnapshots.Add(new AdoptedOriginalArtifact(
+                            entry.RelativeInstallPath,
+                            Exists: false,
+                            Length: 0,
+                            Sha256: null));
+                    }
+
+                    continue;
+                }
+
+                if (entry.ObservedLength is null
+                    || entry.ObservedSha256 is not { Length: 64 }
+                    || !File.Exists(livePath))
+                {
+                    unauthorized.Add(entry.RelativeInstallPath);
+                    continue;
+                }
+
+                updated.Add(new AuthorizedLauncherUpdateSource(
+                    entry.RelativeInstallPath,
+                    livePath,
+                    entry.ObservedLength.Value,
+                    entry.ObservedSha256));
+                authorizationSnapshots.Add(new AdoptedOriginalArtifact(
+                    entry.RelativeInstallPath,
+                    Exists: true,
+                    entry.ObservedLength.Value,
+                    entry.ObservedSha256));
+            }
+        }
+
+        foreach (var source in updated.Where(source =>
+                     EverQuestInstall.IsPfsArchiveExtension(
+                         Path.GetExtension(source.RelativeInstallPath))))
+        {
+            try
+            {
+                await using var archive = await PfsArchive.OpenAsync(
+                        source.LivePath,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                if (archive.Entries.Count == 0)
+                {
+                    unreadableArchives.Add(source.RelativeInstallPath);
+                }
+            }
+            catch (Exception exception) when (exception is
+                IOException or
+                InvalidDataException or
+                PfsArchiveException or
+                NotSupportedException)
+            {
+                unreadableArchives.Add(source.RelativeInstallPath);
+            }
+        }
+
+        if (unauthorized.Count != 0)
+        {
+            return LauncherUpdateRefreshContext.Blocked(new LauncherUpdateRefreshAssessment(
+                LauncherUpdateRefreshState.UnverifiedChanges,
+                $"{unauthorized.Count:N0} changed archive(s) were not explicitly recorded by a completed post-install LaunchPad session. SpinTexture will not adopt them: {string.Join(", ", unauthorized.Take(3))}",
+                safeInstallManifestPath,
+                install.BuildManifestPath,
+                UpdatedArtifactCount: updated.Count,
+                UpdatedRelativePaths: updated.Select(item => item.RelativeInstallPath).ToArray()));
+        }
+
+        if (unreadableArchives.Count != 0)
+        {
+            return LauncherUpdateRefreshContext.Blocked(new LauncherUpdateRefreshAssessment(
+                LauncherUpdateRefreshState.UnverifiedChanges,
+                $"LaunchPad named {unreadableArchives.Count:N0} changed archive(s), but they do not parse as complete EverQuest archives. Reopen LaunchPad and let verification finish; no game files were changed.",
+                safeInstallManifestPath,
+                install.BuildManifestPath,
+                UpdatedArtifactCount: updated.Count,
+                UpdatedRelativePaths: updated.Select(item => item.RelativeInstallPath).ToArray()));
+        }
+
+        if (removed.Count != 0)
+        {
+            var freshBuildAssessment = new LauncherUpdateRefreshAssessment(
+                LauncherUpdateRefreshState.FreshBuildRequired,
+                $"Game update detected — LaunchPad removed {removed.Count:N0} file(s) used by the active pack. SpinTexture can accept the verified update safely, then this selection must be analyzed and built fresh instead of silently dropping content.",
+                safeInstallManifestPath,
+                install.BuildManifestPath,
+                UpdatedArtifactCount: authorizationSnapshots.Count,
+                UpdatedRelativePaths: authorizationSnapshots
+                    .Select(item => item.RelativeInstallPath)
+                    .ToArray());
+            return new LauncherUpdateRefreshContext(
+                freshBuildAssessment,
+                health,
+                install,
+                evidence,
+                updated.AsReadOnly(),
+                authorizationSnapshots.AsReadOnly(),
+                IsReconciliationResume: interruptedReceipt is not null,
+                SelectionLeaves: []);
+        }
+
+        if (updated.Any(item => !EverQuestInstall.IsPfsArchiveExtension(
+                Path.GetExtension(item.RelativeInstallPath))))
+        {
+            var freshBuildAssessment = new LauncherUpdateRefreshAssessment(
+                LauncherUpdateRefreshState.FreshBuildRequired,
+                "Game update detected — LaunchPad changed one or more loose files used by this pack. SpinTexture can accept the verified update safely, then Analyze and build fresh so no stale loose output is mixed with the updated client.",
+                safeInstallManifestPath,
+                install.BuildManifestPath,
+                UpdatedArtifactCount: authorizationSnapshots.Count,
+                UpdatedRelativePaths: authorizationSnapshots
+                    .Select(item => item.RelativeInstallPath)
+                    .ToArray());
+            return new LauncherUpdateRefreshContext(
+                freshBuildAssessment,
+                health,
+                install,
+                evidence,
+                updated.AsReadOnly(),
+                authorizationSnapshots.AsReadOnly(),
+                IsReconciliationResume: interruptedReceipt is not null,
+                SelectionLeaves: []);
+        }
+
+        var assessment = new LauncherUpdateRefreshAssessment(
+            interruptedReceipt is null
+                ? LauncherUpdateRefreshState.Ready
+                : LauncherUpdateRefreshState.ResumeRequired,
+            interruptedReceipt is null
+                ? $"Game update detected — {updated.Count:N0} archive(s) changed after LaunchPad completed. SpinTexture can reuse unaffected staged work, rebuild only updated sources, and reinstall safely."
+                : $"Game-update recovery is ready — SpinTexture verified the durable interrupted receipt and all {updated.Count:N0} LaunchPad-updated archive snapshot(s). Refresh + Reinstall will safely resume from that receipt.",
+            safeInstallManifestPath,
+            install.BuildManifestPath,
+            updated.Count,
+            updated.Select(item => item.RelativeInstallPath).ToArray());
+        var candidateContext = new LauncherUpdateRefreshContext(
+            assessment,
+            health,
+            install,
+            evidence,
+            updated.AsReadOnly(),
+            authorizationSnapshots.AsReadOnly(),
+            IsReconciliationResume: interruptedReceipt is not null,
+            SelectionLeaves: []);
+        LauncherUpdateSelectionPreflight selectionPreflight;
+        try
+        {
+            var sourcePlan = CreateLauncherUpdateSourceRepairPlan(
+                paths,
+                candidateContext);
+            selectionPreflight = await PreflightLauncherUpdateSelectionAsync(
+                    paths,
+                    install.BuildManifestPath,
+                    install,
+                    sourcePlan,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is
+            IOException or
+            UnauthorizedAccessException or
+            InvalidDataException or
+            InvalidOperationException or
+            JsonException or
+            System.Security.SecurityException or
+            NotSupportedException)
+        {
+            selectionPreflight = new LauncherUpdateSelectionPreflight(
+                CanFocusedRefresh: false,
+                $"The active staged selection could not be verified for focused refresh: {exception.Message}",
+                Leaves: []);
+        }
+
+        if (!selectionPreflight.CanFocusedRefresh)
+        {
+            return candidateContext with
+            {
+                Assessment = new LauncherUpdateRefreshAssessment(
+                    LauncherUpdateRefreshState.FreshBuildRequired,
+                    $"Game update detected — {selectionPreflight.Summary} SpinTexture can still accept the verified official update safely; then Analyze and build a fresh pack.",
+                    safeInstallManifestPath,
+                    install.BuildManifestPath,
+                    authorizationSnapshots.Count,
+                    authorizationSnapshots
+                        .Select(item => item.RelativeInstallPath)
+                        .ToArray()),
+                SelectionLeaves = []
+            };
+        }
+
+        return candidateContext with
+        {
+            SelectionLeaves = selectionPreflight.Leaves
+        };
+    }
+
+    public async Task<LauncherUpdateRefreshResult>
+        RefreshAndApplyActivePackAfterLauncherUpdateAsync(
+            ProjectPaths paths,
+            IProgress<ProgressUpdate>? progress = null,
+            CancellationToken cancellationToken = default) =>
+        await RefreshAndApplyActivePackAfterLauncherUpdateCoreAsync(
+                paths,
+                rebuildBuilderOverride: null,
+                progress,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+    internal async Task<LauncherUpdateRefreshResult>
+        RefreshAndApplyActivePackAfterLauncherUpdateAsync(
+            ProjectPaths paths,
+            IStagedArtifactBuilder rebuildBuilder,
+            IProgress<ProgressUpdate>? progress = null,
+            CancellationToken cancellationToken = default) =>
+        await RefreshAndApplyActivePackAfterLauncherUpdateCoreAsync(
+                paths,
+                rebuildBuilder
+                    ?? throw new ArgumentNullException(nameof(rebuildBuilder)),
+                progress,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+    /// <summary>
+    /// Accepts an exact, completed LaunchPad update that cannot safely reuse the
+    /// active staged selection (for example a removed archive or changed loose
+    /// file). This retires only the old install transaction; it never applies
+    /// stale staged output. The caller can then Analyze and create a fresh pack.
+    /// </summary>
+    public async Task<LauncherUpdateReconciliationResult>
+        ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
+            ProjectPaths paths,
+            IProgress<ProgressUpdate>? progress = null,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        clientClosedGuard();
+        var context = await TryCreateLauncherUpdateRefreshContextAsync(
+                paths,
+                verifiedHealth: null,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!context.Assessment.CanReconcileForFreshBuild
+            || context.Assessment.ActiveInstallManifestPath is null
+            || context.InstallManifest is null
+            || context.AuthorizedChanges.Count == 0)
+        {
+            throw new InvalidOperationException(context.Assessment.Summary);
+        }
+
+        var reconciliation = await installTransactionService
+            .RestoreAfterVerifiedLauncherUpdateAsync(
+                paths,
+                context.Assessment.ActiveInstallManifestPath,
+                context.AuthorizedChanges,
+                progress,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await WriteRestoreCompletionMarkerAsync(
+                context.Assessment.ActiveInstallManifestPath,
+                reconciliation.ApplyId,
+                reconciliation.ReconciledArtifacts,
+                cancellationToken,
+                reconciliation.ReconciledUtc)
+            .ConfigureAwait(false);
+        return reconciliation;
+    }
+
+    private async Task<LauncherUpdateRefreshResult>
+        RefreshAndApplyActivePackAfterLauncherUpdateCoreAsync(
+            ProjectPaths paths,
+            IStagedArtifactBuilder? rebuildBuilderOverride,
+            IProgress<ProgressUpdate>? progress,
+            CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        // Fail before reading sources or creating immutable replacement work
+        // when EverQuest/LaunchPad is still open. The transaction repeats this
+        // gate immediately around each live write.
+        clientClosedGuard();
+        var context = await TryCreateLauncherUpdateRefreshContextAsync(
+                paths,
+                verifiedHealth: null,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!context.Assessment.CanRefresh
+            || context.Health is null
+            || context.InstallManifest is null
+            || context.Assessment.ActiveInstallManifestPath is null
+            || context.Assessment.ActiveBuildManifestPath is null)
+        {
+            throw new InvalidOperationException(context.Assessment.Summary);
+        }
+
+        var sourcePlan = CreateLauncherUpdateSourceRepairPlan(paths, context);
+        var selectedLeafPlans = context.SelectionLeaves;
+        if (selectedLeafPlans.Count == 0)
+        {
+            throw new InvalidDataException(
+                "The active pack selection has no reusable source manifests. No game files were changed.");
+        }
+
+        var refreshedSelection = new List<string>(selectedLeafPlans.Count);
+        var repairs = new List<TexturePackBuildResult>();
+        var reusedPackCount = 0;
+        for (var index = 0; index < selectedLeafPlans.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var leafPlan = selectedLeafPlans[index];
+            var manifestPath = leafPlan.ManifestPath;
+            progress?.Report(new ProgressUpdate(
+                "Refresh game update",
+                "Checking whether this staged pack uses an archive changed by LaunchPad.",
+                index,
+                selectedLeafPlans.Count,
+                Path.GetFileName(Path.GetDirectoryName(manifestPath))));
+            if (!leafPlan.RequiresRefresh)
+            {
+                refreshedSelection.Add(manifestPath);
+                reusedPackCount++;
+                continue;
+            }
+
+            var repaired = await RepairStagedPackSourceMismatchCoreAsync(
+                    paths,
+                    manifestPath,
+                    rebuildBuilderOverride,
+                    targetedSafetyBuilderOverride: null,
+                    // A launcher refresh is deliberately narrow: whole-reuse
+                    // every unaffected archive and rebuild only an exact
+                    // official changed source. Normal safety repair remains a
+                    // separate user action and must not turn patch recovery
+                    // into an unexpected whole-library upgrade.
+                    forceTargetedSafetyRepair: false,
+                    sourcePlan,
+                    progress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            repairs.Add(repaired);
+            refreshedSelection.Add(repaired.StagedBuild.ManifestPath);
+        }
+
+        string refreshedManifestPath;
+        if (refreshedSelection.Count == 1)
+        {
+            refreshedManifestPath = refreshedSelection[0];
+        }
+        else
+        {
+            var composition = await stagedPackComposer.ComposeAsync(
+                    paths,
+                    refreshedSelection,
+                    progress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            refreshedManifestPath = composition.ManifestPath;
+        }
+
+        // No live write occurs until every changed archive has a completed,
+        // exact replacement. The transaction primitive rechecks these hashes,
+        // restores only any still-enhanced files, and leaves the authorized
+        // patched originals untouched.
+        var reconciliation = await installTransactionService
+            .RestoreAfterVerifiedLauncherUpdateAsync(
+                paths,
+                context.Assessment.ActiveInstallManifestPath,
+                context.AuthorizedChanges,
+                progress,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await WriteRestoreCompletionMarkerAsync(
+                context.Assessment.ActiveInstallManifestPath,
+                reconciliation.ApplyId,
+                reconciliation.ReconciledArtifacts,
+                cancellationToken,
+                reconciliation.ReconciledUtc)
+            .ConfigureAwait(false);
+
+        progress?.Report(new ProgressUpdate(
+            "Refresh game update",
+            "The completed LaunchPad update is reconciled. Installing the refreshed staged selection.",
+            selectedLeafPlans.Count,
+            selectedLeafPlans.Count));
+        var apply = await installTransactionService.ApplyAsync(
+                paths,
+                refreshedManifestPath,
+                progress,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return new LauncherUpdateRefreshResult(
+            repairs.AsReadOnly(),
+            refreshedManifestPath,
+            apply,
+            context.UpdatedSources.Count,
+            reusedPackCount);
+    }
+
+    private LauncherUpdateSourceRepairPlan CreateLauncherUpdateSourceRepairPlan(
+        ProjectPaths paths,
+        LauncherUpdateRefreshContext context)
+    {
+        var health = context.Health
+            ?? throw new InvalidDataException("Launcher-update health context is missing.");
+        var install = context.InstallManifest
+            ?? throw new InvalidDataException("Launcher-update install context is missing.");
+        var installManifestPath = context.Assessment.ActiveInstallManifestPath
+            ?? throw new InvalidDataException("Launcher-update manifest path is missing.");
+        var backupDirectory = Path.GetDirectoryName(installManifestPath)!;
+        var healthByPath = health.Entries.ToDictionary(
+            entry => entry.RelativeInstallPath,
+            StringComparer.OrdinalIgnoreCase);
+        var references = new Dictionary<string, ManagedOriginalSource>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var artifact in install.Entries)
+        {
+            if (!healthByPath.TryGetValue(artifact.RelativeInstallPath, out var observed)
+                || observed.State != InstalledArtifactHealthState.Enhanced)
+            {
+                continue;
+            }
+
+            if (!artifact.OriginalExisted
+                || artifact.OriginalSha256 is not { Length: 64 }
+                || string.IsNullOrWhiteSpace(artifact.BackupRelativePath))
+            {
+                throw new InvalidDataException(
+                    $"The still-enhanced archive {artifact.RelativeInstallPath} has no verified original backup for game-update refresh.");
+            }
+
+            references.Add(
+                artifact.RelativeInstallPath,
+                new ManagedOriginalSource(
+                    PathGuard.ResolveUnderRoot(
+                        backupDirectory,
+                        artifact.BackupRelativePath),
+                    artifact.OriginalLength,
+                    artifact.OriginalSha256));
+        }
+
+        return new LauncherUpdateSourceRepairPlan(
+            new BuildOriginalSourceResolver(references),
+            context.UpdatedSources.ToDictionary(
+                source => source.RelativeInstallPath,
+                StringComparer.OrdinalIgnoreCase));
+    }
+
+    private async Task<LauncherUpdateSelectionPreflight>
+        PreflightLauncherUpdateSelectionAsync(
+        ProjectPaths paths,
+        string rootManifestPath,
+        InstallManifest activeInstall,
+        LauncherUpdateSourceRepairPlan plan,
+        CancellationToken cancellationToken)
+    {
+        var rootInfo = await stagedPackCatalogService
+            .InspectAsync(
+                paths,
+                rootManifestPath,
+                StagedPackVerificationMode.Exact,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!rootInfo.IsReady)
+        {
+            return new LauncherUpdateSelectionPreflight(
+                CanFocusedRefresh: false,
+                $"The active staged manifest or payload is unavailable or invalid ({rootInfo.Summary}).",
+                Leaves: []);
+        }
+
+        var leafManifestPaths = await ExpandRefreshSelectionManifestsAsync(
+                paths,
+                rootInfo.ManifestPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (leafManifestPaths.Count == 0)
+        {
+            return new LauncherUpdateSelectionPreflight(
+                CanFocusedRefresh: false,
+                "The active staged selection contains no completed source packs.",
+                Leaves: []);
+        }
+
+        if (File.Exists(Path.Combine(rootInfo.BuildDirectory, "composition.json"))
+            && !await SelectionMatchesActiveCompositionAsync(
+                    paths,
+                    activeInstall,
+                    leafManifestPaths,
+                    cancellationToken)
+                .ConfigureAwait(false))
+        {
+            return new LauncherUpdateSelectionPreflight(
+                CanFocusedRefresh: false,
+                "The active composition provenance does not exactly reconstruct the installed selection.",
+                Leaves: []);
+        }
+
+        var leaves = new List<LauncherUpdateLeafPlan>(leafManifestPaths.Count);
+        var mappedUpdates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var leafManifestPath in leafManifestPaths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var info = PathGuard.SamePath(rootInfo.ManifestPath, leafManifestPath)
+                ? rootInfo
+                : await stagedPackCatalogService
+                    .InspectAsync(
+                        paths,
+                        leafManifestPath,
+                        StagedPackVerificationMode.Exact,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            if (!info.IsReady)
+            {
+                return new LauncherUpdateSelectionPreflight(
+                    CanFocusedRefresh: false,
+                    $"An active component pack is unavailable or invalid ({info.Summary}).",
+                    Leaves: []);
+            }
+
+            var requiresRefresh = false;
+            foreach (var artifact in info.Artifacts)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var relativePath = artifact.CanonicalRelativeInstallPath;
+                var livePath = PathGuard.ResolveUnderRoot(
+                    paths.InstallPath,
+                    relativePath);
+                var resolved = await plan.OriginalSources
+                    .ResolveAsync(relativePath, livePath, cancellationToken)
+                    .ConfigureAwait(false);
+                var fingerprint = await FileIntegrity
+                    .FingerprintAsync(resolved.Path, cancellationToken)
+                    .ConfigureAwait(false);
+                var matchesStagedSource = fingerprint.Length
+                        == artifact.Entry.SourceLength
+                    && fingerprint.Sha256.Equals(
+                        artifact.Entry.SourceSha256,
+                        StringComparison.OrdinalIgnoreCase);
+                if (plan.UpdatedSources.TryGetValue(relativePath, out var update))
+                {
+                    if (fingerprint.Length != update.Length
+                        || !fingerprint.Sha256.Equals(
+                            update.Sha256,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return new LauncherUpdateSelectionPreflight(
+                            CanFocusedRefresh: false,
+                            $"The current source for {relativePath} no longer matches the exact completed LaunchPad update snapshot.",
+                            Leaves: []);
+                    }
+
+                    mappedUpdates.Add(relativePath);
+                }
+
+                if (matchesStagedSource)
+                {
+                    continue;
+                }
+
+                if (!plan.UpdatedSources.ContainsKey(relativePath))
+                {
+                    return new LauncherUpdateSelectionPreflight(
+                        CanFocusedRefresh: false,
+                        $"{relativePath} differs from its staged source but was not changed by the verified LaunchPad session.",
+                        Leaves: []);
+                }
+
+                requiresRefresh = true;
+            }
+
+            if (requiresRefresh && !IsSourceMismatchRepairEligible(info))
+            {
+                return new LauncherUpdateSelectionPreflight(
+                    CanFocusedRefresh: false,
+                    "A LaunchPad-changed component cannot be source-repaired safely with its recorded scope or artifact type.",
+                    Leaves: []);
+            }
+
+            if (requiresRefresh)
+            {
+                await EnsureProductionSourceRepairCompatibilityAsync(
+                        paths,
+                        info,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            leaves.Add(new LauncherUpdateLeafPlan(
+                info.ManifestPath,
+                requiresRefresh));
+        }
+
+        var unmappedUpdates = plan.UpdatedSources.Keys
+            .Where(path => !mappedUpdates.Contains(path))
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (unmappedUpdates.Length != 0)
+        {
+            return new LauncherUpdateSelectionPreflight(
+                CanFocusedRefresh: false,
+                $"The active staged selection does not contain {unmappedUpdates.Length:N0} LaunchPad-changed archive(s), including {unmappedUpdates[0]}.",
+                Leaves: []);
+        }
+
+        return new LauncherUpdateSelectionPreflight(
+            CanFocusedRefresh: true,
+            "The complete active staged selection and all source mappings passed exact verification.",
+            leaves.AsReadOnly());
+    }
+
+    private async Task EnsureProductionSourceRepairCompatibilityAsync(
+        ProjectPaths paths,
+        StagedPackInfo baselineInfo,
+        CancellationToken cancellationToken)
+    {
+        var tools = toolchainDiscovery.Discover(paths);
+        if (!tools.IsReady)
+        {
+            throw new FileNotFoundException(
+                "SpinTexture's bundled processing tools are incomplete. "
+                + string.Join(" ", tools.Diagnostics));
+        }
+
+        var preset = baselineInfo.Manifest?.Options.Preset
+            ?? throw new InvalidDataException(
+                "The changed source-repair component has no verified options.");
+        await using var artisticWorkerLease =
+            await ArtisticWorkerDirectoryLock.AcquireManagedSharedAsync(
+                    paths,
+                    tools,
+                    mayUseArtisticWorker: preset == TexturePreset.Illustrated,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        _ = await ResolveSourceRepairVisualCompatibilityAsync(
+                paths,
+                baselineInfo,
+                tools,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<string>> ExpandRefreshSelectionManifestsAsync(
+        ProjectPaths paths,
+        string rootManifestPath,
+        CancellationToken cancellationToken)
+    {
+        var leaves = new List<string>();
+        var expanded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var stack = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        async Task ExpandAsync(string requestedPath)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var safePath = PathGuard.EnsurePathUnderRoot(paths.StagingPath, requestedPath);
+            if (!stack.Add(safePath))
+            {
+                throw new InvalidDataException(
+                    "The active staged-pack composition contains a dependency cycle.");
+            }
+
+            try
+            {
+                if (!expanded.Add(safePath))
+                {
+                    return;
+                }
+
+                var buildDirectory = Path.GetDirectoryName(safePath)!;
+                var compositionPath = Path.Combine(buildDirectory, "composition.json");
+                if (!File.Exists(compositionPath))
+                {
+                    leaves.Add(safePath);
+                    return;
+                }
+
+                StagedPackCompositionDocument document;
+                await using (var stream = new FileStream(
+                                 compositionPath,
+                                 FileMode.Open,
+                                 FileAccess.Read,
+                                 FileShare.Read,
+                                 64 * 1024,
+                                 FileOptions.Asynchronous | FileOptions.SequentialScan))
+                {
+                    document = await JsonSerializer
+                        .DeserializeAsync<StagedPackCompositionDocument>(
+                            stream,
+                            CompositionJsonOptions,
+                            cancellationToken)
+                        .ConfigureAwait(false)
+                        ?? throw new InvalidDataException(
+                            "The active staged-pack composition document is empty.");
+                }
+
+                if (document.SchemaVersion
+                        != StagedPackCompositionDocument.CurrentSchemaVersion
+                    || !PathGuard.SamePath(document.InstallPath, paths.InstallPath)
+                    || document.Components is not { Count: > 0 })
+                {
+                    throw new InvalidDataException(
+                        "The active staged-pack composition is invalid for this installation.");
+                }
+
+                foreach (var component in document.Components)
+                {
+                    var componentPath = PathGuard.ResolveUnderRoot(
+                        paths.StagingPath,
+                        component.ManifestRelativePath);
+                    await FileIntegrity.EnsureMatchesAsync(
+                            componentPath,
+                            component.ManifestLength,
+                            component.ManifestSha256,
+                            "Active game-update composition component manifest",
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    await ExpandAsync(componentPath).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                stack.Remove(safePath);
+            }
+        }
+
+        await ExpandAsync(rootManifestPath).ConfigureAwait(false);
+        return leaves.AsReadOnly();
+    }
+
     public async Task<ApplyResult> ApplyLatestStagedPackAsync(
         ProjectPaths paths,
         IProgress<ProgressUpdate>? progress = null,
@@ -2828,13 +3923,56 @@ public sealed class TexturePackWorkflow
         }
 
         clientClosedGuard();
+        // This state-changing entry point uses an exact audit and resolves any
+        // launcher-update gate before touching the selected manifests. In
+        // particular, a multi-pack selection must not create a large, unusable
+        // composition while the active official update still needs refresh or
+        // reconciliation on the main Build screen.
+        var health = await installHealthService
+            .AuditLatestAsync(paths, cancellationToken)
+            .ConfigureAwait(false);
+        var hasUnknownUpdatedArtifact = health.State == InstallHealthState.MixedOrModified
+            && health.Entries.Any(entry =>
+                entry.State == InstalledArtifactHealthState.ModifiedOrMissing);
+        var hasLauncherReconciliationReceipt = health.State
+                == InstallHealthState.RecoveryRequired
+            && !string.IsNullOrWhiteSpace(health.InstallManifestPath)
+            && File.Exists(Path.Combine(
+                Path.GetDirectoryName(health.InstallManifestPath)!,
+                InstallTransactionService.LauncherUpdateReconciliationReceiptFileName));
+        if (hasUnknownUpdatedArtifact || hasLauncherReconciliationReceipt)
+        {
+            var assessment = await AssessLauncherUpdateRefreshAsync(
+                    paths,
+                    health,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (assessment.State != LauncherUpdateRefreshState.NotApplicable)
+            {
+                throw new LauncherUpdateActionRequiredException(assessment);
+            }
+        }
+
+        // Other mixed/recovery states are also resolved before any checked
+        // manifests are inspected or composed. They are not verified launcher
+        // updates, but creating an unusable composition first would still waste
+        // pack-library space and obscure the actual recovery action.
+        if (health.State == InstallHealthState.MixedOrModified)
+        {
+            throw new InvalidOperationException(
+                "The current installation is partly enhanced and partly original. Use the verified Restore action before switching pack selections.");
+        }
+
+        if (health.State == InstallHealthState.RecoveryRequired)
+        {
+            throw new InvalidOperationException(
+                $"The previous install requires recovery before packs can be switched. {health.Summary}");
+        }
+
         var distinctManifestPaths = manifestPaths
             .Select(Path.GetFullPath)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        var health = await installHealthService
-            .AuditLatestFastAsync(paths, cancellationToken)
-            .ConfigureAwait(false);
         string? activeManifestPath = null;
         InstallManifest? activeManifest = null;
         if (health.State == InstallHealthState.EnhancedActive)
@@ -3612,6 +4750,47 @@ public sealed class TexturePackWorkflow
         string BackupPath,
         long Length,
         string Sha256);
+
+    private sealed record AuthorizedLauncherUpdateSource(
+        string RelativeInstallPath,
+        string LivePath,
+        long Length,
+        string Sha256);
+
+    private sealed record LauncherUpdateRefreshContext(
+        LauncherUpdateRefreshAssessment Assessment,
+        InstallHealthReport? Health,
+        InstallManifest? InstallManifest,
+        LaunchPadUpdateEvidence? Evidence,
+        IReadOnlyList<AuthorizedLauncherUpdateSource> UpdatedSources,
+        IReadOnlyList<AdoptedOriginalArtifact> AuthorizedChanges,
+        bool IsReconciliationResume,
+        IReadOnlyList<LauncherUpdateLeafPlan> SelectionLeaves)
+    {
+        public static LauncherUpdateRefreshContext Blocked(
+            LauncherUpdateRefreshAssessment assessment) => new(
+                assessment,
+                Health: null,
+                InstallManifest: null,
+                Evidence: null,
+                UpdatedSources: [],
+                AuthorizedChanges: [],
+                IsReconciliationResume: false,
+                SelectionLeaves: []);
+    }
+
+    private sealed record LauncherUpdateLeafPlan(
+        string ManifestPath,
+        bool RequiresRefresh);
+
+    private sealed record LauncherUpdateSelectionPreflight(
+        bool CanFocusedRefresh,
+        string Summary,
+        IReadOnlyList<LauncherUpdateLeafPlan> Leaves);
+
+    private sealed record LauncherUpdateSourceRepairPlan(
+        BuildOriginalSourceResolver OriginalSources,
+        IReadOnlyDictionary<string, AuthorizedLauncherUpdateSource> UpdatedSources);
 
     internal sealed record ResolvedBuildSource(
         string Path,

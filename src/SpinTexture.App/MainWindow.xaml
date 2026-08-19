@@ -1634,10 +1634,10 @@
                             <Button Command="{Binding InstallLatestPackCommand}" Style="{StaticResource PrimaryButtonStyle}" Margin="0,14,0,0" HorizontalContentAlignment="Center">
                                 <StackPanel Orientation="Horizontal">
                                     <TextBlock Text="&#xE896;" FontFamily="Segoe Fluent Icons" Margin="0,0,8,0" />
-                                    <TextBlock Text="Install Staged Pack" />
+                                    <TextBlock Text="{Binding InstallPackActionText}" />
                                 </StackPanel>
                             </Button>
-                            <TextBlock Text="One-time archive install - no second AI build" FontSize="10" Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" Margin="0,6,0,0" />
+                            <TextBlock Text="{Binding InstallPackActionHint}" TextWrapping="Wrap" TextAlignment="Center" FontSize="10" Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Center" Margin="0,6,0,0" />
 
                             <Button Command="{Binding PlayEnhancedCommand}" Style="{StaticResource SafeButtonStyle}" Margin="0,14,0,0" HorizontalContentAlignment="Center">
                                 <StackPanel Orientation="Horizontal">
