@@ -229,6 +229,9 @@
                         <DataTrigger Binding="{Binding IsShortLayout}" Value="True">
                             <Setter Property="Visibility" Value="Collapsed" />
                         </DataTrigger>
+                        <DataTrigger Binding="{Binding HasLauncherUpdateNotice}" Value="True">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                        </DataTrigger>
                     </Style.Triggers>
                 </Style>
             </Border.Style>
@@ -257,6 +260,36 @@
                     </TextBlock>
                 </StackPanel>
             </Grid>
+        </Border>
+
+        <Border Grid.Row="1"
+                Background="#171D28" BorderBrush="#E5783C"
+                BorderThickness="1" CornerRadius="8" Margin="0,12,0,12"
+                Padding="12,9"
+                Visibility="{Binding HasLauncherUpdateNotice, Converter={StaticResource BoolToVisibility}}">
+            <DockPanel LastChildFill="True">
+                <Button DockPanel.Dock="Right"
+                        Content="{Binding LauncherUpdateActionText}"
+                        Click="LauncherUpdateAction_Click"
+                        IsEnabled="{Binding CanRunLauncherUpdateAction}"
+                        Visibility="{Binding HasLauncherUpdateAction, Converter={StaticResource BoolToVisibility}}"
+                        Background="#9B3B16" BorderBrush="#F1793D" Foreground="White"
+                        Padding="12,8" Margin="14,0,0,0"
+                        VerticalAlignment="Center"
+                        ToolTip="Acts only on the active installed pack and completed LaunchPad update; green checked packs are ignored." />
+                <Border DockPanel.Dock="Left" Background="#3A2119" BorderBrush="#9B4B29"
+                        BorderThickness="1" CornerRadius="5" Padding="8,5"
+                        Margin="0,0,12,0" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding LauncherUpdateTitle}" Foreground="#FFB386"
+                               FontSize="10" FontWeight="Bold" />
+                </Border>
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock Text="{Binding LauncherUpdateSummary}" Foreground="#FFF4ED"
+                               FontWeight="SemiBold" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding LauncherUpdateGuidance}" Foreground="#C8CEDA"
+                               FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap" />
+                </StackPanel>
+            </DockPanel>
         </Border>
 
         <Grid Grid.Row="2">

@@ -2837,6 +2837,76 @@ public sealed class TexturePackWorkflow
         CancellationToken cancellationToken = default) =>
         installHealthService.AuditLatestFastAsync(paths, cancellationToken);
 
+    /// <summary>
+    /// Performs a read-only health audit for launcher-update discovery surfaces.
+    /// A clean enhanced install can use transaction metadata, but any parsed or
+    /// ambiguous post-install LaunchPad activity forces an exact SHA-256 audit so
+    /// a same-length launcher replacement is still detected. Mutation workflows
+    /// must continue to use their own exact authorization audit and race gates.
+    /// </summary>
+    public async Task<InstallHealthReport>
+        AuditInstallHealthForLauncherUpdateDetectionAsync(
+            ProjectPaths paths,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        var fastHealth = await installHealthService
+            .AuditLatestFastAsync(paths, cancellationToken)
+            .ConfigureAwait(false);
+        if (fastHealth.State == InstallHealthState.None)
+        {
+            return fastHealth;
+        }
+
+        if (fastHealth.State != InstallHealthState.EnhancedActive
+            || string.IsNullOrWhiteSpace(fastHealth.InstallManifestPath))
+        {
+            return await installHealthService
+                .AuditLatestAsync(paths, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        try
+        {
+            var manifestPath = PathGuard.EnsurePathUnderRoot(
+                paths.BackupPath,
+                fastHealth.InstallManifestPath);
+            var install = await manifestStore
+                .ReadInstallManifestAsync(manifestPath, cancellationToken)
+                .ConfigureAwait(false);
+            if (install.State != InstallTransactionState.Applied
+                || !PathGuard.SamePath(install.InstallPath, paths.InstallPath))
+            {
+                return await installHealthService
+                    .AuditLatestAsync(paths, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            var evidence = await launchPadUpdateEvidenceService
+                .InspectAsync(paths, install.AppliedUtc, cancellationToken)
+                .ConfigureAwait(false);
+            if (!evidence.HasPostInstallActivity)
+            {
+                return fastHealth;
+            }
+        }
+        catch (Exception exception) when (exception is
+            IOException or
+            UnauthorizedAccessException or
+            InvalidDataException or
+            JsonException or
+            ArgumentException or
+            NotSupportedException)
+        {
+            // Discovery is fail-closed: if the transaction/evidence cannot be
+            // validated cheaply, fall through to an exact read-only health audit.
+        }
+
+        return await installHealthService
+            .AuditLatestAsync(paths, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public async Task<LauncherUpdateRefreshAssessment> AssessLauncherUpdateRefreshAsync(
         ProjectPaths paths,
         InstallHealthReport? verifiedHealth = null,
@@ -2933,11 +3003,29 @@ public sealed class TexturePackWorkflow
 
             try
             {
-                interruptedReceipt = await manifestStore
+                var reconciliationReceipt = await manifestStore
                     .ReadLauncherUpdateReconciliationReceiptAsync(
                         receiptPath,
                         cancellationToken)
                     .ConfigureAwait(false);
+                if (reconciliationReceipt.State
+                    == LauncherUpdateReconciliationState.RolledBack)
+                {
+                    // A rolled-back receipt is a closed journal for an older
+                    // attempt, not permission to reuse its adopted byte
+                    // snapshots. Validate its full transaction identity and
+                    // structure, then assess the current exact health and
+                    // completed LaunchPad evidence as a fresh update below.
+                    InstallTransactionService
+                        .ValidateClosedLauncherUpdateRollbackReceipt(
+                            paths,
+                            install,
+                            reconciliationReceipt);
+                }
+                else
+                {
+                    interruptedReceipt = reconciliationReceipt;
+                }
             }
             catch (Exception exception) when (exception is
                 IOException or
@@ -2954,7 +3042,8 @@ public sealed class TexturePackWorkflow
                     UpdatedRelativePaths: []));
             }
 
-            if (interruptedReceipt.State is not (
+            if (interruptedReceipt is not null
+                && (interruptedReceipt.State is not (
                     LauncherUpdateReconciliationState.Preparing
                     or LauncherUpdateReconciliationState.Completed)
                 || interruptedReceipt.State
@@ -2969,7 +3058,8 @@ public sealed class TexturePackWorkflow
                     StringComparison.OrdinalIgnoreCase)
                 || interruptedReceipt.AppliedUtc != install.AppliedUtc
                 || !PathGuard.SamePath(interruptedReceipt.InstallPath, paths.InstallPath)
-                || interruptedReceipt.Entries.Count != install.Entries.Count)
+                || interruptedReceipt.Entries is null
+                || interruptedReceipt.Entries.Count != install.Entries.Count))
             {
                 return LauncherUpdateRefreshContext.Blocked(new LauncherUpdateRefreshAssessment(
                     LauncherUpdateRefreshState.UnverifiedChanges,
@@ -3202,7 +3292,15 @@ public sealed class TexturePackWorkflow
                 UpdatedArtifactCount: authorizationSnapshots.Count,
                 UpdatedRelativePaths: authorizationSnapshots
                     .Select(item => item.RelativeInstallPath)
-                    .ToArray());
+                    .ToArray())
+            {
+                ConfirmationToken = CreateLauncherUpdateConfirmationToken(
+                    paths,
+                    install,
+                    evidence,
+                    LauncherUpdateRefreshState.FreshBuildRequired,
+                    authorizationSnapshots)
+            };
             return new LauncherUpdateRefreshContext(
                 freshBuildAssessment,
                 health,
@@ -3225,7 +3323,15 @@ public sealed class TexturePackWorkflow
                 UpdatedArtifactCount: authorizationSnapshots.Count,
                 UpdatedRelativePaths: authorizationSnapshots
                     .Select(item => item.RelativeInstallPath)
-                    .ToArray());
+                    .ToArray())
+            {
+                ConfirmationToken = CreateLauncherUpdateConfirmationToken(
+                    paths,
+                    install,
+                    evidence,
+                    LauncherUpdateRefreshState.FreshBuildRequired,
+                    authorizationSnapshots)
+            };
             return new LauncherUpdateRefreshContext(
                 freshBuildAssessment,
                 health,
@@ -3237,17 +3343,26 @@ public sealed class TexturePackWorkflow
                 SelectionLeaves: []);
         }
 
+        var assessmentState = interruptedReceipt is null
+            ? LauncherUpdateRefreshState.Ready
+            : LauncherUpdateRefreshState.ResumeRequired;
         var assessment = new LauncherUpdateRefreshAssessment(
-            interruptedReceipt is null
-                ? LauncherUpdateRefreshState.Ready
-                : LauncherUpdateRefreshState.ResumeRequired,
+            assessmentState,
             interruptedReceipt is null
                 ? $"Game update detected — {updated.Count:N0} archive(s) changed after LaunchPad completed. SpinTexture can reuse unaffected staged work, rebuild only updated sources, and reinstall safely."
                 : $"Game-update recovery is ready — SpinTexture verified the durable interrupted receipt and all {updated.Count:N0} LaunchPad-updated archive snapshot(s). Refresh + Reinstall will safely resume from that receipt.",
             safeInstallManifestPath,
             install.BuildManifestPath,
             updated.Count,
-            updated.Select(item => item.RelativeInstallPath).ToArray());
+            updated.Select(item => item.RelativeInstallPath).ToArray())
+        {
+            ConfirmationToken = CreateLauncherUpdateConfirmationToken(
+                paths,
+                install,
+                evidence,
+                assessmentState,
+                authorizationSnapshots)
+        };
         var candidateContext = new LauncherUpdateRefreshContext(
             assessment,
             health,
@@ -3302,7 +3417,15 @@ public sealed class TexturePackWorkflow
                     authorizationSnapshots.Count,
                     authorizationSnapshots
                         .Select(item => item.RelativeInstallPath)
-                        .ToArray()),
+                        .ToArray())
+                {
+                    ConfirmationToken = CreateLauncherUpdateConfirmationToken(
+                        paths,
+                        install,
+                        evidence,
+                        LauncherUpdateRefreshState.FreshBuildRequired,
+                        authorizationSnapshots)
+                },
                 SelectionLeaves = []
             };
         }
@@ -3313,13 +3436,107 @@ public sealed class TexturePackWorkflow
         };
     }
 
+    private static string CreateLauncherUpdateConfirmationToken(
+        ProjectPaths paths,
+        InstallManifest install,
+        LaunchPadUpdateEvidence evidence,
+        LauncherUpdateRefreshState outcome,
+        IReadOnlyList<AdoptedOriginalArtifact> authorizedChanges)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(install);
+        ArgumentNullException.ThrowIfNull(evidence);
+        ArgumentNullException.ThrowIfNull(authorizedChanges);
+        if (outcome is not (
+                LauncherUpdateRefreshState.Ready
+                or LauncherUpdateRefreshState.ResumeRequired
+                or LauncherUpdateRefreshState.FreshBuildRequired)
+            || authorizedChanges.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "Only an actionable exact launcher-update assessment can be confirmed.");
+        }
+
+        var snapshots = authorizedChanges
+            .Select(change => new LauncherUpdateConfirmationSnapshot(
+                CanonicalizeLauncherUpdateConfirmationPath(
+                    paths.InstallPath,
+                    change.RelativeInstallPath),
+                change.Exists,
+                change.Length,
+                change.Sha256?.ToUpperInvariant()))
+            .OrderBy(snapshot => snapshot.RelativeInstallPath, StringComparer.Ordinal)
+            .ThenBy(snapshot => snapshot.Exists)
+            .ThenBy(snapshot => snapshot.Length)
+            .ThenBy(snapshot => snapshot.Sha256, StringComparer.Ordinal)
+            .ToArray();
+        var evidenceChanges = evidence.ChangedFiles.Values
+            .Select(change => new LauncherUpdateConfirmationEvidenceChange(
+                CanonicalizeLauncherUpdateConfirmationPath(
+                    paths.InstallPath,
+                    change.RelativeInstallPath),
+                change.Action,
+                change.SessionStartedUtc.ToUniversalTime().Ticks))
+            .OrderBy(change => change.RelativeInstallPath, StringComparer.Ordinal)
+            .ThenBy(change => change.Action)
+            .ThenBy(change => change.SessionStartedUtcTicks)
+            .ToArray();
+        var payload = new LauncherUpdateConfirmationPayload(
+            SchemaVersion: 1,
+            ApplyId: install.ApplyId.ToUpperInvariant(),
+            AppliedUtcTicks: install.AppliedUtc.ToUniversalTime().Ticks,
+            InstallPath: Path.TrimEndingDirectorySeparator(
+                    Path.GetFullPath(paths.InstallPath))
+                .ToUpperInvariant(),
+            BuildManifestPath: Path.GetFullPath(install.BuildManifestPath)
+                .ToUpperInvariant(),
+            Outcome: outcome,
+            EvidenceIsCompleted: evidence.IsCompleted,
+            EvidenceHasPostInstallActivity: evidence.HasPostInstallActivity,
+            EvidenceHasUnsafePath: evidence.HasUnsafePath,
+            EvidenceLatestSessionUtcTicks: evidence.LatestSessionStartedUtc?
+                .ToUniversalTime().Ticks,
+            Snapshots: snapshots,
+            EvidenceChanges: evidenceChanges);
+        var serialized = JsonSerializer.SerializeToUtf8Bytes(payload);
+        return Convert.ToHexString(SHA256.HashData(serialized));
+    }
+
+    private static string CanonicalizeLauncherUpdateConfirmationPath(
+        string installPath,
+        string relativePath)
+    {
+        var livePath = PathGuard.ResolveUnderRoot(installPath, relativePath);
+        return Path.GetRelativePath(installPath, livePath)
+            .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
+            .ToUpperInvariant();
+    }
+
+    private static void RequireCurrentLauncherUpdateConfirmation(
+        string expectedConfirmationToken,
+        LauncherUpdateRefreshAssessment currentAssessment)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedConfirmationToken);
+        ArgumentNullException.ThrowIfNull(currentAssessment);
+        if (currentAssessment.ConfirmationToken is null
+            || !string.Equals(
+                expectedConfirmationToken,
+                currentAssessment.ConfirmationToken,
+                StringComparison.Ordinal))
+        {
+            throw new LauncherUpdateAssessmentStaleException(currentAssessment);
+        }
+    }
+
     public async Task<LauncherUpdateRefreshResult>
         RefreshAndApplyActivePackAfterLauncherUpdateAsync(
             ProjectPaths paths,
+            string expectedConfirmationToken,
             IProgress<ProgressUpdate>? progress = null,
             CancellationToken cancellationToken = default) =>
         await RefreshAndApplyActivePackAfterLauncherUpdateCoreAsync(
                 paths,
+                expectedConfirmationToken,
                 rebuildBuilderOverride: null,
                 progress,
                 cancellationToken)
@@ -3328,11 +3545,13 @@ public sealed class TexturePackWorkflow
     internal async Task<LauncherUpdateRefreshResult>
         RefreshAndApplyActivePackAfterLauncherUpdateAsync(
             ProjectPaths paths,
+            string expectedConfirmationToken,
             IStagedArtifactBuilder rebuildBuilder,
             IProgress<ProgressUpdate>? progress = null,
             CancellationToken cancellationToken = default) =>
         await RefreshAndApplyActivePackAfterLauncherUpdateCoreAsync(
                 paths,
+                expectedConfirmationToken,
                 rebuildBuilder
                     ?? throw new ArgumentNullException(nameof(rebuildBuilder)),
                 progress,
@@ -3348,6 +3567,7 @@ public sealed class TexturePackWorkflow
     public async Task<LauncherUpdateReconciliationResult>
         ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
             ProjectPaths paths,
+            string expectedConfirmationToken,
             IProgress<ProgressUpdate>? progress = null,
             CancellationToken cancellationToken = default)
     {
@@ -3358,6 +3578,9 @@ public sealed class TexturePackWorkflow
                 verifiedHealth: null,
                 cancellationToken)
             .ConfigureAwait(false);
+        RequireCurrentLauncherUpdateConfirmation(
+            expectedConfirmationToken,
+            context.Assessment);
         if (!context.Assessment.CanReconcileForFreshBuild
             || context.Assessment.ActiveInstallManifestPath is null
             || context.InstallManifest is null
@@ -3387,6 +3610,7 @@ public sealed class TexturePackWorkflow
     private async Task<LauncherUpdateRefreshResult>
         RefreshAndApplyActivePackAfterLauncherUpdateCoreAsync(
             ProjectPaths paths,
+            string expectedConfirmationToken,
             IStagedArtifactBuilder? rebuildBuilderOverride,
             IProgress<ProgressUpdate>? progress,
             CancellationToken cancellationToken)
@@ -3401,6 +3625,9 @@ public sealed class TexturePackWorkflow
                 verifiedHealth: null,
                 cancellationToken)
             .ConfigureAwait(false);
+        RequireCurrentLauncherUpdateConfirmation(
+            expectedConfirmationToken,
+            context.Assessment);
         if (!context.Assessment.CanRefresh
             || context.Health is null
             || context.InstallManifest is null
@@ -4756,6 +4983,31 @@ public sealed class TexturePackWorkflow
         string LivePath,
         long Length,
         string Sha256);
+
+    private sealed record LauncherUpdateConfirmationSnapshot(
+        string RelativeInstallPath,
+        bool Exists,
+        long Length,
+        string? Sha256);
+
+    private sealed record LauncherUpdateConfirmationEvidenceChange(
+        string RelativeInstallPath,
+        LaunchPadFileAction Action,
+        long SessionStartedUtcTicks);
+
+    private sealed record LauncherUpdateConfirmationPayload(
+        int SchemaVersion,
+        string ApplyId,
+        long AppliedUtcTicks,
+        string InstallPath,
+        string BuildManifestPath,
+        LauncherUpdateRefreshState Outcome,
+        bool EvidenceIsCompleted,
+        bool EvidenceHasPostInstallActivity,
+        bool EvidenceHasUnsafePath,
+        long? EvidenceLatestSessionUtcTicks,
+        IReadOnlyList<LauncherUpdateConfirmationSnapshot> Snapshots,
+        IReadOnlyList<LauncherUpdateConfirmationEvidenceChange> EvidenceChanges);
 
     private sealed record LauncherUpdateRefreshContext(
         LauncherUpdateRefreshAssessment Assessment,

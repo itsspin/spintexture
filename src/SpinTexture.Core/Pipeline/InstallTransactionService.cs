@@ -1792,6 +1792,35 @@ public sealed class InstallTransactionService
         }
     }
 
+    /// <summary>
+    /// Validates a rolled-back reconciliation as a closed journal belonging to
+    /// the supplied install transaction. Its adopted snapshots intentionally do
+    /// not authorize any later launcher update; callers must exact-observe and
+    /// authorize the current live bytes independently.
+    /// </summary>
+    internal static void ValidateClosedLauncherUpdateRollbackReceipt(
+        ProjectPaths paths,
+        InstallManifest install,
+        LauncherUpdateReconciliationReceipt receipt)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(install);
+        ArgumentNullException.ThrowIfNull(receipt);
+        if (receipt.State != LauncherUpdateReconciliationState.RolledBack)
+        {
+            throw new InvalidDataException(
+                "Only a rolled-back launcher-update receipt is a closed rollback journal.");
+        }
+
+        ValidateLauncherUpdateReceipt(
+            paths,
+            install,
+            receipt,
+            new Dictionary<string, AdoptedOriginalArtifact>(
+                StringComparer.OrdinalIgnoreCase),
+            requireAuthorizationMatch: false);
+    }
+
     private static string ResolveReceiptSafetyDirectory(
         string backupDirectory,
         LauncherUpdateReconciliationReceipt receipt)

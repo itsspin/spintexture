@@ -50,6 +50,9 @@ internal static class LaunchPadUpdateEvidenceSelfTests
                 evidence.IsCompleted,
                 $"patch plus later all-up-to-date is complete ({evidence.Summary})");
             Assert(!evidence.HasUnsafePath, "ordinary LaunchPad paths are safe");
+            Assert(
+                evidence.HasPostInstallActivity,
+                "completed post-install session is marked for exact health detection");
             AssertEqual(3, evidence.ChangedFiles.Count, "completed post-install change count");
             Assert(
                 !evidence.TryGetChangedFile("ignored-old.s3d", out _),
@@ -79,6 +82,9 @@ internal static class LaunchPadUpdateEvidenceSelfTests
                 .InspectAsync(paths, appliedUtc, cancellationToken)
                 .ConfigureAwait(false);
             Assert(!incomplete.IsCompleted, "incomplete latest session fails closed");
+            Assert(
+                incomplete.HasPostInstallActivity,
+                "incomplete post-install session still forces exact health detection");
             AssertEqual(0, incomplete.ChangedFiles.Count, "incomplete actions are never trusted");
 
             await WriteLogAsync(
@@ -279,6 +285,9 @@ internal static class LaunchPadUpdateEvidenceSelfTests
                 .InspectAsync(paths, appliedUtc, cancellationToken)
                 .ConfigureAwait(false);
             Assert(!malformedTimestamp.IsCompleted, "malformed later timestamp fails closed");
+            Assert(
+                malformedTimestamp.HasPostInstallActivity,
+                "ambiguous timestamp before a known post-install session fails detection closed");
 
             await WriteLogAsync(
                 installPath,
@@ -340,6 +349,35 @@ internal static class LaunchPadUpdateEvidenceSelfTests
                     cancellationToken)
                 .ConfigureAwait(false);
             Assert(paddedDay.IsCompleted, "single-digit space-padded LaunchPad date parses");
+
+            await WriteLogAsync(
+                installPath,
+                [
+                    Header(oldSession),
+                    "6666-00:00:01:All files are up to date"
+                ],
+                cancellationToken).ConfigureAwait(false);
+            var preInstallOnly = await service
+                .InspectAsync(paths, appliedUtc, cancellationToken)
+                .ConfigureAwait(false);
+            Assert(
+                !preInstallOnly.HasPostInstallActivity,
+                "fully pre-install LaunchPad history keeps clean detection on the fast path");
+
+            await WriteLogAsync(
+                installPath,
+                [
+                    Header(oldSession),
+                    "6666-00:00:01:All files are up to date",
+                    "**** Starting at definitely-not-a-date with plug-in 1.0.3.204 ****"
+                ],
+                cancellationToken).ConfigureAwait(false);
+            var ambiguousTail = await service
+                .InspectAsync(paths, appliedUtc, cancellationToken)
+                .ConfigureAwait(false);
+            Assert(
+                ambiguousTail.HasPostInstallActivity,
+                "an unplaceable appended session after known pre-install history fails detection closed");
         }
         finally
         {

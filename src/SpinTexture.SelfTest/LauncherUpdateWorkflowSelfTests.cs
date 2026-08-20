@@ -130,6 +130,7 @@ internal static class LauncherUpdateWorkflowSelfTests
             var result = await workflow
                 .RefreshAndApplyActivePackAfterLauncherUpdateAsync(
                     paths,
+                    RequireConfirmationToken(assessment),
                     refreshBuilder,
                     cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
@@ -192,6 +193,8 @@ internal static class LauncherUpdateWorkflowSelfTests
             .ConfigureAwait(false);
         await TestInterruptedReconciliationResumesRefreshAsync(cancellationToken)
             .ConfigureAwait(false);
+        await TestClosedRollbackJournalAllowsLaterLauncherUpdateAsync(cancellationToken)
+            .ConfigureAwait(false);
         await TestCompletedReconciliationFinalizesAndRefreshesAsync(cancellationToken)
             .ConfigureAwait(false);
         await TestCompositeRefreshReusesUnaffectedCharacterLeafAsync(cancellationToken)
@@ -222,7 +225,8 @@ internal static class LauncherUpdateWorkflowSelfTests
                 cancellationToken).ConfigureAwait(false);
             var original = "official-loose-old"u8.ToArray();
             var enhanced = "enhanced-loose-old"u8.ToArray();
-            var updated = "official-loose-new"u8.ToArray();
+            var updatedA = "official-loose-update-a"u8.ToArray();
+            var updatedB = "official-loose-update-b"u8.ToArray();
             var livePath = Path.Combine(paths.InstallPath, "global-load.txt");
             await File.WriteAllBytesAsync(livePath, original, cancellationToken)
                 .ConfigureAwait(false);
@@ -247,7 +251,7 @@ internal static class LauncherUpdateWorkflowSelfTests
                 paths,
                 staged.ManifestPath,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-            await File.WriteAllBytesAsync(livePath, updated, cancellationToken)
+            await File.WriteAllBytesAsync(livePath, updatedA, cancellationToken)
                 .ConfigureAwait(false);
             await WriteCompletedLaunchPadLogAsync(
                     paths,
@@ -270,12 +274,86 @@ internal static class LauncherUpdateWorkflowSelfTests
                 assessment.CanReconcileForFreshBuild,
                 "changed loose source requires bounded reconcile before fresh build");
 
-            await workflow.ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
+            var repeatedAssessment = await workflow.AssessLauncherUpdateRefreshAsync(
                     paths,
                     cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
+            AssertEqual(
+                RequireConfirmationToken(assessment),
+                RequireConfirmationToken(repeatedAssessment),
+                "unchanged Fresh assessment produces a deterministic confirmation token");
+
+            // The user confirmed update A, but LaunchPad completed a newer update
+            // B before the action began. The stale token must stop before the
+            // reconciliation journal or install manifest can be written.
+            await File.WriteAllBytesAsync(livePath, updatedB, cancellationToken)
+                .ConfigureAwait(false);
+            await WriteCompletedLaunchPadLogAsync(
+                    paths,
+                    applied.Manifest.AppliedUtc.AddMinutes(2),
+                    "Replacing",
+                    "global-load.txt",
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var installBeforeStaleAction = await File.ReadAllBytesAsync(
+                    applied.InstallManifestPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var receiptPath = Path.Combine(
+                applied.BackupDirectory,
+                InstallTransactionService.LauncherUpdateReconciliationReceiptFileName);
+            LauncherUpdateAssessmentStaleException? stale = null;
+            try
+            {
+                await workflow.ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
+                        paths,
+                        RequireConfirmationToken(assessment),
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (LauncherUpdateAssessmentStaleException exception)
+            {
+                stale = exception;
+            }
+
+            Assert(stale is not null,
+                "Fresh update A confirmation is rejected after update B arrives");
+            AssertEqual(
+                LauncherUpdateRefreshState.FreshBuildRequired,
+                stale!.CurrentAssessment.State,
+                "stale Fresh exception carries the current update B assessment");
+            Assert(
+                !string.Equals(
+                    RequireConfirmationToken(assessment),
+                    RequireConfirmationToken(stale.CurrentAssessment),
+                    StringComparison.Ordinal),
+                "Fresh update B receives a different exact confirmation token");
             AssertSequenceEqual(
-                updated,
+                updatedB,
+                await File.ReadAllBytesAsync(livePath, cancellationToken)
+                    .ConfigureAwait(false),
+                "stale Fresh confirmation leaves update B bytes untouched");
+            AssertSequenceEqual(
+                installBeforeStaleAction,
+                await File.ReadAllBytesAsync(
+                    applied.InstallManifestPath,
+                    cancellationToken).ConfigureAwait(false),
+                "stale Fresh confirmation does not change the active install manifest");
+            Assert(!File.Exists(receiptPath),
+                "stale Fresh confirmation creates no reconciliation journal");
+
+            var currentAssessment = await workflow.AssessLauncherUpdateRefreshAsync(
+                    paths,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+
+            await workflow.ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
+                    paths,
+                    RequireConfirmationToken(currentAssessment),
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            AssertSequenceEqual(
+                updatedB,
                 await File.ReadAllBytesAsync(livePath, cancellationToken)
                     .ConfigureAwait(false),
                 "reconcile-only preserves updated official loose file");
@@ -443,6 +521,7 @@ internal static class LauncherUpdateWorkflowSelfTests
 
             await workflow.RefreshAndApplyActivePackAfterLauncherUpdateAsync(
                     paths,
+                    RequireConfirmationToken(assessment),
                     refreshBuilder,
                     cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
@@ -459,6 +538,289 @@ internal static class LauncherUpdateWorkflowSelfTests
                     Path.Combine(paths.InstallPath, "changed.s3d"),
                     cancellationToken).ConfigureAwait(false),
                 "resume installs newly rebuilt changed archive");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                DeleteTree(root);
+            }
+        }
+    }
+
+    private static async Task TestClosedRollbackJournalAllowsLaterLauncherUpdateAsync(
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"spintexture-launcher-closed-rollback-{Guid.NewGuid():N}");
+        var paths = new ProjectPaths(
+            Path.Combine(root, "EverQuest"),
+            Path.Combine(root, "Workspace"));
+        Directory.CreateDirectory(paths.InstallPath);
+        try
+        {
+            await File.WriteAllBytesAsync(
+                Path.Combine(paths.InstallPath, "eqgame.exe"),
+                "synthetic-eqgame"u8.ToArray(),
+                cancellationToken).ConfigureAwait(false);
+            var original = await CreateArchiveAsync(
+                "closed-rollback-original",
+                cancellationToken).ConfigureAwait(false);
+            var rolledBackPriorPatch = await CreateArchiveAsync(
+                "closed-rollback-prior-patch",
+                cancellationToken).ConfigureAwait(false);
+            var launcherPatchA = await CreateArchiveAsync(
+                "closed-rollback-later-patch-a",
+                cancellationToken).ConfigureAwait(false);
+            var launcherPatchB = await CreateArchiveAsync(
+                "closed-rollback-later-patch-b",
+                cancellationToken).ConfigureAwait(false);
+            var enhancedOld = "closed-rollback-enhanced-old"u8.ToArray();
+            var enhancedNew = "closed-rollback-enhanced-new"u8.ToArray();
+            const string relativePath = "later-update.s3d";
+            var livePath = Path.Combine(paths.InstallPath, relativePath);
+            await File.WriteAllBytesAsync(livePath, original, cancellationToken)
+                .ConfigureAwait(false);
+
+            var staged = await new StagedBuildService().BuildAsync(
+                new StagedBuildRequest(
+                    paths,
+                    UpscaleOptions.Recommended with
+                    {
+                        Scope = AssetScope.WorldOnly,
+                        InstallAfterBuild = false
+                    },
+                    [
+                        new StagedBuildItem(
+                            relativePath,
+                            new DelegateStagedArtifactBuilder(
+                                (context, token) => File.WriteAllBytesAsync(
+                                    context.DestinationPath,
+                                    enhancedOld,
+                                    token)))
+                    ],
+                    BuildId: "launcher-closed-rollback-baseline"),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            var store = new ManifestStore();
+            var transactions = new InstallTransactionService(
+                store,
+                new AtomicFileOperations(),
+                ensureGameStopped: _ => { });
+            var applied = await transactions.ApplyAsync(
+                paths,
+                staged.ManifestPath,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            var install = await store.ReadInstallManifestAsync(
+                    applied.InstallManifestPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            // Recreate the narrow legacy crash state: a prior update's failed
+            // reconciliation rolled live bytes back and closed its journal, but
+            // the install marker remained RecoveryRequired. A later completed
+            // LaunchPad session then writes different official bytes A to the
+            // same managed path.
+            await File.WriteAllBytesAsync(livePath, launcherPatchA, cancellationToken)
+                .ConfigureAwait(false);
+            await WriteCompletedLaunchPadLogAsync(
+                    paths,
+                    applied.Manifest.AppliedUtc.AddMinutes(2),
+                    "Patching",
+                    relativePath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var priorPatchFingerprint = Fingerprint(rolledBackPriorPatch);
+            var receiptPath = Path.Combine(
+                applied.BackupDirectory,
+                InstallTransactionService.LauncherUpdateReconciliationReceiptFileName);
+            var rolledBackReceipt = new LauncherUpdateReconciliationReceipt(
+                LauncherUpdateReconciliationReceipt.CurrentSchemaVersion,
+                install.ApplyId,
+                install.AppliedUtc,
+                DateTimeOffset.UtcNow,
+                ReconciledUtc: null,
+                paths.InstallPath,
+                LauncherUpdateReconciliationState.RolledBack,
+                "restore-safety-launcher-update-closed-a",
+                [
+                    new LauncherUpdateOriginalArtifact(
+                        relativePath,
+                        Exists: true,
+                        priorPatchFingerprint.Length,
+                        priorPatchFingerprint.Sha256,
+                        LauncherUpdateOriginalDisposition.AdoptedUpdatedFile)
+                ]);
+            await store.WriteInstallManifestAsync(
+                    applied.InstallManifestPath,
+                    install with { State = InstallTransactionState.RecoveryRequired },
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            var workflow = new TexturePackWorkflow(
+                clientClosedGuard: () => { },
+                installTransactionService: transactions,
+                manifestStore: store,
+                installHealthService: new InstallHealthService(store));
+
+            // A closed journal must be validated structurally before it is
+            // ignored. Disguising the prior patch as a managed original is
+            // rejected even though current live update A has valid evidence.
+            await store.WriteLauncherUpdateReconciliationReceiptAsync(
+                    receiptPath,
+                    rolledBackReceipt with
+                    {
+                        Entries =
+                        [
+                            rolledBackReceipt.Entries[0] with
+                            {
+                                Disposition = LauncherUpdateOriginalDisposition
+                                    .AlreadyManagedOriginal
+                            }
+                        ]
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var malformedAssessment = await workflow.AssessLauncherUpdateRefreshAsync(
+                    paths,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            AssertEqual(
+                LauncherUpdateRefreshState.UnverifiedChanges,
+                malformedAssessment.State,
+                "malformed closed rollback journal remains blocked");
+
+            await store.WriteLauncherUpdateReconciliationReceiptAsync(
+                    receiptPath,
+                    rolledBackReceipt,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var assessment = await workflow.AssessLauncherUpdateRefreshAsync(
+                    paths,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            AssertEqual(
+                LauncherUpdateRefreshState.Ready,
+                assessment.State,
+                "valid closed rollback journal assesses later update A as fresh work");
+            AssertEqual(
+                1,
+                assessment.UpdatedArtifactCount,
+                "later update A is the only newly authorized artifact");
+
+            var repeatedAssessment = await workflow.AssessLauncherUpdateRefreshAsync(
+                    paths,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            AssertEqual(
+                RequireConfirmationToken(assessment),
+                RequireConfirmationToken(repeatedAssessment),
+                "unchanged Ready assessment produces a deterministic confirmation token");
+
+            // The user confirmed update A, then LaunchPad completed update B for
+            // the same path. The old confirmation cannot authorize rebuilding,
+            // reconciliation, or live writes for B.
+            await File.WriteAllBytesAsync(livePath, launcherPatchB, cancellationToken)
+                .ConfigureAwait(false);
+            await WriteCompletedLaunchPadLogAsync(
+                    paths,
+                    applied.Manifest.AppliedUtc.AddMinutes(3),
+                    "Patching",
+                    relativePath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var installBeforeStaleAction = await File.ReadAllBytesAsync(
+                    applied.InstallManifestPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var receiptBeforeStaleAction = await File.ReadAllBytesAsync(
+                    receiptPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            var rebuilt = 0;
+            var refreshBuilder = new DelegateStagedArtifactBuilder(
+                async (context, token) =>
+                {
+                    rebuilt++;
+                    await File.WriteAllBytesAsync(
+                        context.DestinationPath,
+                        enhancedNew,
+                        token).ConfigureAwait(false);
+                });
+            LauncherUpdateAssessmentStaleException? stale = null;
+            try
+            {
+                await workflow.RefreshAndApplyActivePackAfterLauncherUpdateAsync(
+                        paths,
+                        RequireConfirmationToken(assessment),
+                        refreshBuilder,
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (LauncherUpdateAssessmentStaleException exception)
+            {
+                stale = exception;
+            }
+
+            Assert(stale is not null,
+                "Ready update A confirmation is rejected after update B arrives");
+            AssertEqual(
+                LauncherUpdateRefreshState.Ready,
+                stale!.CurrentAssessment.State,
+                "stale Ready exception carries the current update B assessment");
+            Assert(
+                !string.Equals(
+                    RequireConfirmationToken(assessment),
+                    RequireConfirmationToken(stale.CurrentAssessment),
+                    StringComparison.Ordinal),
+                "Ready update B receives a different exact confirmation token");
+            AssertEqual(0, rebuilt,
+                "stale Ready confirmation performs no source rebuild");
+            AssertSequenceEqual(
+                launcherPatchB,
+                await File.ReadAllBytesAsync(livePath, cancellationToken)
+                    .ConfigureAwait(false),
+                "stale Ready confirmation leaves update B bytes untouched");
+            AssertSequenceEqual(
+                installBeforeStaleAction,
+                await File.ReadAllBytesAsync(
+                    applied.InstallManifestPath,
+                    cancellationToken).ConfigureAwait(false),
+                "stale Ready confirmation does not change the active install manifest");
+            AssertSequenceEqual(
+                receiptBeforeStaleAction,
+                await File.ReadAllBytesAsync(receiptPath, cancellationToken)
+                    .ConfigureAwait(false),
+                "stale Ready confirmation does not change the closed journal");
+
+            var currentAssessment = await workflow.AssessLauncherUpdateRefreshAsync(
+                    paths,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            await workflow.RefreshAndApplyActivePackAfterLauncherUpdateAsync(
+                    paths,
+                    RequireConfirmationToken(currentAssessment),
+                    refreshBuilder,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            AssertEqual(1, rebuilt,
+                "later update B refresh rebuilds the managed archive once");
+            AssertSequenceEqual(
+                enhancedNew,
+                await File.ReadAllBytesAsync(livePath, cancellationToken)
+                    .ConfigureAwait(false),
+                "later update B refresh installs newly rebuilt enhanced bytes");
+
+            await workflow.RestoreLatestAsync(
+                    paths,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            AssertSequenceEqual(
+                launcherPatchB,
+                await File.ReadAllBytesAsync(livePath, cancellationToken)
+                    .ConfigureAwait(false),
+                "later update B remains the official restore baseline");
         }
         finally
         {
@@ -577,6 +939,7 @@ internal static class LauncherUpdateWorkflowSelfTests
                 "Completed receipt plus RecoveryRequired is metadata-finalizable");
             await workflow.RefreshAndApplyActivePackAfterLauncherUpdateAsync(
                     paths,
+                    RequireConfirmationToken(assessment),
                     new DelegateStagedArtifactBuilder(async (context, token) =>
                     {
                         rebuildCount++;
@@ -784,6 +1147,7 @@ internal static class LauncherUpdateWorkflowSelfTests
             var refreshed = await workflow
                 .RefreshAndApplyActivePackAfterLauncherUpdateAsync(
                     paths,
+                    RequireConfirmationToken(assessment),
                     refreshBuilder,
                     cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
@@ -893,6 +1257,7 @@ internal static class LauncherUpdateWorkflowSelfTests
                 "changed ineligible leaf keeps reconcile-only action available");
             await workflow.ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
                     paths,
+                    RequireConfirmationToken(assessment),
                     cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
             AssertSequenceEqual(
@@ -1024,6 +1389,7 @@ internal static class LauncherUpdateWorkflowSelfTests
                 "missing active component keeps official-update acceptance available");
             await workflow.ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
                     paths,
+                    RequireConfirmationToken(assessment),
                     cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
             AssertSequenceEqual(
@@ -1317,6 +1683,15 @@ internal static class LauncherUpdateWorkflowSelfTests
 
     private static (long Length, string Sha256) Fingerprint(byte[] payload) =>
         (payload.LongLength, Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(payload)));
+
+    private static string RequireConfirmationToken(
+        LauncherUpdateRefreshAssessment assessment)
+    {
+        Assert(
+            assessment.ConfirmationToken is { Length: 64 },
+            $"{assessment.State} assessment carries an exact confirmation token");
+        return assessment.ConfirmationToken!;
+    }
 
     private static async Task<byte[]> CreateArchiveAsync(
         string marker,

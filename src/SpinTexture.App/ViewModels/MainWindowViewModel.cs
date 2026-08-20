@@ -181,7 +181,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 AssetScope.SpellEffectsOnly,
                 "Spell effects",
                 "Preview-first loose effect art. Soft-translucent particles keep original alpha and use Original Clarity instead of stylization."),
-            new ScopeOptionViewModel(AssetScope.AllSafeTextures, "All safe textures", "Every classified texture that is safe to transform.")
+            new ScopeOptionViewModel(
+                AssetScope.AllSafeTextures,
+                "Everything safely eligible",
+                "Scans every game archive for world art, race faces and bodies (including Ogres), armor/equipment, and supported loose art. Tiny controls, transparency-critical or unsupported textures, and any output that fails validation stay original.")
         ];
 
         PaintedThemeOptions =
@@ -330,11 +333,21 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
 
+        BeginOperation(
+            "PACK STATUS",
+            "Refreshing installed-pack status before returning to Build");
+        _installHealth = null;
+        _launcherUpdateRefresh = null;
+        OnPropertyChanged(nameof(InstallPackActionText));
+        OnPropertyChanged(nameof(InstallPackActionHint));
+        InstallHealthText = "Refreshing installed-pack status";
         try
         {
             HasManagedBackup = _workflow.HasRestorableBackup(InstallPath);
             HasStagedPack = _workflow.HasStagedPack(InstallPath);
-            await RefreshInstallHealthAsync(CancellationToken.None, fast: true)
+            await RefreshInstallHealthAsync(
+                    CancellationToken.None,
+                    detectLauncherUpdate: true)
                 .ConfigureAwait(true);
         }
         catch (Exception exception) when (exception is
@@ -345,6 +358,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             or NotSupportedException)
         {
             AddLog("WARN", $"Pack Library state could not be refreshed: {exception.Message}");
+        }
+        finally
+        {
+            EndOperation();
         }
     }
 
@@ -703,6 +720,17 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
+    public void CompleteFreshBuildPreparationAfterLauncherUpdate()
+    {
+        ClearAnalysis();
+        StatusText = "Game update accepted • Analyze the updated client and build a fresh texture pack";
+        CurrentStage = "UPDATE ACCEPTED";
+        CurrentItem = "Old active pack retired safely • Analyze is the next step";
+        AddLog(
+            "NEXT",
+            "The completed game update was accepted from Packs. Click Analyze, review the updated client, then build a fresh staged pack.");
+    }
+
     public ScopeOptionViewModel SelectedScopeOption
     {
         get => _selectedScopeOption;
@@ -911,6 +939,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         LauncherUpdateRefreshState.ResumeRequired => "Resume Refresh + Reinstall",
         LauncherUpdateRefreshState.Ready => "Refresh + Reinstall After Update",
         LauncherUpdateRefreshState.FreshBuildRequired => "Accept Update + Build Fresh",
+        LauncherUpdateRefreshState.LauncherIncomplete => "Finish LaunchPad Update",
+        LauncherUpdateRefreshState.UnverifiedChanges => "Resolve Game Update",
+        LauncherUpdateRefreshState.NotApplicable => "Resolve Game Update",
         _ => "Install Staged Pack"
     };
 
@@ -922,6 +953,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             $"Reuses unaffected staged work and rebuilds only {_launcherUpdateRefresh.UpdatedArtifactCount:N0} LaunchPad-updated archive(s)",
         LauncherUpdateRefreshState.FreshBuildRequired =>
             "Preserves the official update, retires stale output, then requires Analyze + a fresh build",
+        LauncherUpdateRefreshState.LauncherIncomplete =>
+            "Let LaunchPad finish completely, close LaunchPad and EverQuest, then Analyze or refresh Packs again",
+        LauncherUpdateRefreshState.UnverifiedChanges =>
+            "SpinTexture will not install over game-file changes that cannot be verified as a completed official update",
+        LauncherUpdateRefreshState.NotApplicable =>
+            "Resolve the current mixed game-file state before installing a staged pack",
         _ => "One-time archive install - no second AI build"
     };
 
@@ -1014,12 +1051,82 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task AnalyzeAsync(CancellationToken cancellationToken)
     {
-        BeginOperation("ANALYZE", "Reading archive and loose-texture inventory");
+        BeginOperation("ANALYZE PREFLIGHT", "Checking for a completed game update before scanning");
         await OptionPreview.WaitForIdleAsync().ConfigureAwait(true);
-        AddLog("SCAN", "Started read-only client analysis.");
 
         try
         {
+            // An old analysis must never remain buildable when this click finds
+            // a newly patched active transaction. Launcher-session evidence
+            // selects the cheap clean path or an exact audit, and that report is
+            // passed into the assessment without hashing managed files twice.
+            ClearAnalysis();
+            HasManagedBackup = _workflow.HasRestorableBackup(InstallPath);
+            HasStagedPack = _workflow.HasStagedPack(InstallPath);
+            await RefreshInstallHealthAsync(
+                    cancellationToken,
+                    detectLauncherUpdate: true)
+                .ConfigureAwait(true);
+            if (_launcherUpdateRefresh is { State: not LauncherUpdateRefreshState.NotApplicable }
+                launcherUpdate)
+            {
+                var nextStep = launcherUpdate.State switch
+                {
+                    LauncherUpdateRefreshState.Ready =>
+                        "Choose Refresh + Reinstall After Update",
+                    LauncherUpdateRefreshState.ResumeRequired =>
+                        "Choose Resume Refresh + Reinstall",
+                    LauncherUpdateRefreshState.FreshBuildRequired =>
+                        "Choose Accept Update + Build Fresh, then Analyze again",
+                    LauncherUpdateRefreshState.LauncherIncomplete =>
+                        "Finish LaunchPad, close it, then Analyze again",
+                    LauncherUpdateRefreshState.UnverifiedChanges =>
+                        "Resolve the unverified game-file changes before Analyze",
+                    _ => "Resolve the game update before Analyze"
+                };
+                AddLog("UPDATE", launcherUpdate.Summary);
+                AddLog("NEXT", nextStep + ".");
+                StatusText = launcherUpdate.Summary;
+                CurrentStage = "GAME UPDATE";
+                CurrentItem = nextStep;
+                _dialogs.ShowLauncherUpdateAnalyzeRequired(launcherUpdate);
+                return;
+            }
+
+            if (_installHealth is null)
+            {
+                const string preflightSummary =
+                    "SpinTexture could not verify the current installed-pack state.";
+                const string nextStep =
+                    "Close EverQuest and LaunchPad, verify the selected folder is accessible, then click Analyze again. If the problem remains, review the Activity Log before changing any packs.";
+                AddLog("WARN", preflightSummary);
+                StatusText = preflightSummary;
+                CurrentStage = "PREFLIGHT BLOCKED";
+                CurrentItem = nextStep;
+                _dialogs.ShowClientAnalysisBlocked(preflightSummary, nextStep);
+                return;
+            }
+
+            if (_installHealth.State is not (
+                    InstallHealthState.None
+                    or InstallHealthState.RevertedToOriginal
+                    or InstallHealthState.EnhancedActive))
+            {
+                var preflightSummary = _installHealth.Summary;
+                var nextStep = _installHealth.State == InstallHealthState.MixedOrModified
+                    ? "Use verified Restore to resolve the partly enhanced installation, then click Analyze again."
+                    : "Complete the required install recovery from the main Build screen, then click Analyze again.";
+                AddLog("WARN", preflightSummary);
+                AddLog("NEXT", nextStep);
+                StatusText = preflightSummary;
+                CurrentStage = "PREFLIGHT BLOCKED";
+                CurrentItem = nextStep;
+                _dialogs.ShowClientAnalysisBlocked(preflightSummary, nextStep);
+                return;
+            }
+
+            BeginOperation("ANALYZE", "Reading archive and loose-texture inventory");
+            AddLog("SCAN", "Game-update preflight passed. Started read-only client analysis.");
             var progress = new Progress<ProgressUpdate>(HandleProgress);
             ScanSummary summary = await _workflow.AnalyzeAsync(InstallPath, progress, cancellationToken);
             await _preferences.WriteLastInstallPathAsync(InstallPath, cancellationToken).ConfigureAwait(true);
@@ -1038,7 +1145,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             UpdateWorldExpansionDetection(summary.Zones);
             HasManagedBackup = _workflow.HasRestorableBackup(InstallPath);
             HasStagedPack = _workflow.HasStagedPack(InstallPath);
-            await RefreshInstallHealthAsync(cancellationToken, fast: true).ConfigureAwait(true);
             RecoverableStagedBuild? recovery = await _workflow
                 .FindRecoverableBuildAsync(InstallPath, cancellationToken)
                 .ConfigureAwait(true);
@@ -1241,9 +1347,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         try
         {
             await RefreshInstallHealthAsync(cancellationToken).ConfigureAwait(true);
-            var refreshingLauncherUpdate = _launcherUpdateRefresh?.CanRefresh == true;
+            var confirmedLauncherUpdate = _launcherUpdateRefresh;
+            var refreshingLauncherUpdate = confirmedLauncherUpdate?.CanRefresh == true;
             var reconcilingForFreshBuild =
-                _launcherUpdateRefresh?.CanReconcileForFreshBuild == true;
+                confirmedLauncherUpdate?.CanReconcileForFreshBuild == true;
             var confirmed = refreshingLauncherUpdate
                 ? _dialogs.ConfirmLauncherUpdateRefresh(
                     _launcherUpdateRefresh!.UpdatedArtifactCount)
@@ -1279,6 +1386,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 var reconciled = await _workflow
                     .ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
                         InstallPath,
+                        confirmedLauncherUpdate?.ConfirmationToken
+                        ?? throw new InvalidOperationException(
+                            "The verified game update has no confirmation token. Refresh its status and try again."),
                         new Progress<ProgressUpdate>(HandleProgress),
                         cancellationToken)
                     .ConfigureAwait(true);
@@ -1317,6 +1427,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 var refreshed = await _workflow
                     .RefreshAndApplyActivePackAfterLauncherUpdateAsync(
                         InstallPath,
+                        confirmedLauncherUpdate?.ConfirmationToken
+                        ?? throw new InvalidOperationException(
+                            "The verified game update has no confirmation token. Refresh its status and try again."),
                         new Progress<ProgressUpdate>(HandleProgress),
                         cancellationToken)
                     .ConfigureAwait(true);
@@ -1442,18 +1555,27 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         try
         {
             await RefreshInstallHealthAsync(cancellationToken).ConfigureAwait(true);
-            if (_launcherUpdateRefresh is { } launcherUpdate
-                && (launcherUpdate.CanRefresh
-                    || launcherUpdate.CanReconcileForFreshBuild))
+            if (_launcherUpdateRefresh is
+                {
+                    State: not LauncherUpdateRefreshState.NotApplicable
+                } launcherUpdate)
             {
-                _dialogs.ShowLauncherUpdateRefreshRequired(
-                    launcherUpdate.Summary);
+                _dialogs.ShowLauncherUpdateAnalyzeRequired(launcherUpdate);
                 AddLog(
                     "UPDATE",
                     "Restore was redirected because replacing a LaunchPad-updated file with its pre-update backup would discard official game changes. Use the game-update action shown on the main screen.");
-                StatusText = launcherUpdate.CanReconcileForFreshBuild
-                    ? "Game update detected • accept it, then Analyze and build fresh"
-                    : "Game update detected • use Refresh + Reinstall After Update";
+                StatusText = launcherUpdate.State switch
+                {
+                    LauncherUpdateRefreshState.FreshBuildRequired =>
+                        "Game update detected • accept it, then Analyze and build fresh",
+                    LauncherUpdateRefreshState.Ready or
+                    LauncherUpdateRefreshState.ResumeRequired =>
+                        "Game update detected • refresh and reinstall the active pack",
+                    LauncherUpdateRefreshState.LauncherIncomplete =>
+                        "Game update not finished • finish LaunchPad, close it, then try again",
+                    _ =>
+                        "Game update changes could not be verified • resolve them before Restore"
+                };
                 return;
             }
 
@@ -1896,8 +2018,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private bool CanInstallLatestPack() =>
         !IsBusy
-        && (HasStagedPack
-            || _launcherUpdateRefresh?.CanReconcileForFreshBuild == true)
+        && (_launcherUpdateRefresh is null
+            ? HasStagedPack
+            : _launcherUpdateRefresh.CanRefresh
+              || _launcherUpdateRefresh.CanReconcileForFreshBuild)
         && IsLegalAcknowledged
         && Directory.Exists(InstallPath);
 
@@ -1925,14 +2049,19 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task RefreshInstallHealthAsync(
         CancellationToken cancellationToken,
-        bool fast = false)
+        bool fast = false,
+        bool detectLauncherUpdate = false)
     {
         InstallHealthState? previousState = _installHealth?.State;
         try
         {
-            _installHealth = await (fast
-                    ? _workflow.AuditInstallHealthFastAsync(InstallPath, cancellationToken)
-                    : _workflow.AuditInstallHealthAsync(InstallPath, cancellationToken))
+            _installHealth = await (detectLauncherUpdate
+                    ? _workflow.AuditInstallHealthForLauncherUpdateDetectionAsync(
+                        InstallPath,
+                        cancellationToken)
+                    : fast
+                        ? _workflow.AuditInstallHealthFastAsync(InstallPath, cancellationToken)
+                        : _workflow.AuditInstallHealthAsync(InstallPath, cancellationToken))
                 .ConfigureAwait(true);
             _launcherUpdateRefresh = (_installHealth.State == InstallHealthState.MixedOrModified
                     && _installHealth.Entries.Any(entry =>
@@ -2169,6 +2298,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         HasManagedBackup = false;
         HasStagedPack = false;
         _installHealth = null;
+        _launcherUpdateRefresh = null;
+        OnPropertyChanged(nameof(InstallPackActionText));
+        OnPropertyChanged(nameof(InstallPackActionHint));
         InstallHealthText = "No enhanced pack is active";
         PreviewManifestPath = null;
         EstimatedOutputText = "Analyze to estimate";

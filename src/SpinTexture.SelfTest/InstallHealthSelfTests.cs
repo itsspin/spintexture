@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using SpinTexture.Core;
 using SpinTexture.Core.Pipeline;
+using SpinTexture.Core.Services;
 
 namespace SpinTexture.SelfTest;
 
@@ -236,6 +237,8 @@ internal static class InstallHealthSelfTests
                 "latest active transaction selection");
 
             await TestEqualLengthFastAuditAsync(root, cancellationToken).ConfigureAwait(false);
+            await TestLauncherUpdateDetectionAuditAsync(root, cancellationToken)
+                .ConfigureAwait(false);
         }
         finally
         {
@@ -342,6 +345,149 @@ internal static class InstallHealthSelfTests
             invalidHealth.Entries.Count,
             "invalid manifest must not emit length-derived artifact states");
     }
+
+    private static async Task TestLauncherUpdateDetectionAuditAsync(
+        string root,
+        CancellationToken cancellationToken)
+    {
+        var installPath = Path.Combine(root, "LauncherDetectionEverQuest");
+        var workspacePath = Path.Combine(root, "LauncherDetectionWorkspace");
+        Directory.CreateDirectory(installPath);
+        var paths = new ProjectPaths(installPath, workspacePath);
+        paths.EnsureWorkspaceDirectories();
+
+        var original = "original-client"u8.ToArray();
+        var enhanced = "enhanced-texture-pack"u8.ToArray();
+        var launcherReplacement = "launcher-patched-file"u8.ToArray();
+        AssertEqual(
+            enhanced.Length,
+            launcherReplacement.Length,
+            "same-length launcher detection fixture setup");
+        var livePath = Path.Combine(installPath, "globalogm_chr.s3d");
+        await File.WriteAllBytesAsync(livePath, enhanced, cancellationToken)
+            .ConfigureAwait(false);
+        var installedTimestamp = File.GetLastWriteTimeUtc(livePath);
+        var appliedUtc = new DateTimeOffset(
+            DateTime.UtcNow.AddHours(-2),
+            TimeSpan.Zero);
+        var artifact = CreateArtifact(
+            "globalogm_chr.s3d",
+            original,
+            enhanced,
+            installedTimestamp.Ticks);
+        var manifest = new InstallManifest(
+            InstallManifest.CurrentSchemaVersion,
+            "launcher-detection",
+            appliedUtc,
+            paths.InstallPath,
+            "launcher-detection-build",
+            Path.Combine(
+                paths.StagingPath,
+                "launcher-detection-build",
+                "build-manifest.json"),
+            InstallTransactionState.Applied,
+            [artifact]);
+        var manifestPath = Path.Combine(
+            paths.BackupPath,
+            manifest.ApplyId,
+            "install-manifest.json");
+        var store = new ManifestStore();
+        await store.WriteInstallManifestAsync(
+            manifestPath,
+            manifest,
+            cancellationToken).ConfigureAwait(false);
+        var healthService = new InstallHealthService(store);
+        var workflow = new TexturePackWorkflow(
+            manifestStore: store,
+            installHealthService: healthService);
+
+        await WriteLaunchPadLogAsync(
+            installPath,
+            [
+                LaunchPadHeader(appliedUtc.AddMinutes(-10)),
+                "1111-00:00:01:All files are up to date"
+            ],
+            cancellationToken).ConfigureAwait(false);
+        var clean = await workflow
+            .AuditInstallHealthForLauncherUpdateDetectionAsync(
+                paths,
+                cancellationToken)
+            .ConfigureAwait(false);
+        AssertEqual(
+            InstallHealthState.EnhancedActive,
+            clean.State,
+            "clean launcher-detection health");
+        Assert(
+            clean.Entries.Single().ObservedSha256 is null,
+            "clean enhanced launcher detection should retain the metadata fast path");
+
+        await File.WriteAllBytesAsync(
+            livePath,
+            launcherReplacement,
+            cancellationToken).ConfigureAwait(false);
+        File.SetLastWriteTimeUtc(livePath, installedTimestamp);
+        await WriteLaunchPadLogAsync(
+            installPath,
+            [
+                LaunchPadHeader(appliedUtc.AddMinutes(10)),
+                "2222-00:00:00:Found 1 file(s) to update.",
+                "2222-00:00:01:Replacing globalogm_chr.s3d",
+                "Finished downloading 100 bytes in 0.1 seconds (1,000 bytes per second)"
+            ],
+            cancellationToken).ConfigureAwait(false);
+        var patched = await workflow
+            .AuditInstallHealthForLauncherUpdateDetectionAsync(
+                paths,
+                cancellationToken)
+            .ConfigureAwait(false);
+        AssertEqual(
+            InstallHealthState.MixedOrModified,
+            patched.State,
+            "same-length launcher replacement detection health");
+        AssertEqual(
+            InstalledArtifactHealthState.ModifiedOrMissing,
+            patched.Entries.Single().State,
+            "same-length launcher replacement detection state");
+        Assert(
+            patched.Entries.Single().ObservedSha256 is { Length: 64 },
+            "post-install LaunchPad activity must force exact SHA-256 detection");
+
+        await File.WriteAllBytesAsync(livePath, original, cancellationToken)
+            .ConfigureAwait(false);
+        await WriteLaunchPadLogAsync(
+            installPath,
+            [
+                LaunchPadHeader(appliedUtc.AddMinutes(-10)),
+                "3333-00:00:01:All files are up to date"
+            ],
+            cancellationToken).ConfigureAwait(false);
+        var reverted = await workflow
+            .AuditInstallHealthForLauncherUpdateDetectionAsync(
+                paths,
+                cancellationToken)
+            .ConfigureAwait(false);
+        AssertEqual(
+            InstallHealthState.RevertedToOriginal,
+            reverted.State,
+            "non-enhanced launcher-detection health");
+        Assert(
+            reverted.Entries.Single().ObservedSha256 is { Length: 64 },
+            "non-enhanced detection state must escalate from metadata to exact health");
+    }
+
+    private static Task WriteLaunchPadLogAsync(
+        string installPath,
+        IReadOnlyList<string> lines,
+        CancellationToken cancellationToken) =>
+        File.WriteAllLinesAsync(
+            Path.Combine(
+                installPath,
+                LaunchPadUpdateEvidenceService.DownloadLogFileName),
+            lines,
+            cancellationToken);
+
+    private static string LaunchPadHeader(DateTimeOffset utc) =>
+        $"**** Starting at {utc.ToLocalTime():ddd MMM d HH:mm:ss yyyy} with plug-in 1.0.3.204 ****";
 
     private static InstallManifest CreateManifest(
         ProjectPaths paths,

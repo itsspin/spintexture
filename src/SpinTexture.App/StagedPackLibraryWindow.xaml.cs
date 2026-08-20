@@ -17,6 +17,14 @@ namespace SpinTexture.App;
 
 public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChanged, IDisposable
 {
+    private enum InstallStateRefreshMode
+    {
+        Cached,
+        AutoDetect,
+        FastAfterVerifiedWrite,
+        Exact
+    }
+
     private const double CompactLayoutBreakpoint = 1320;
     private const double ShortLayoutBreakpoint = 760;
     private readonly ProjectPaths paths;
@@ -32,6 +40,8 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
     private bool isCompactLayout;
     private bool isShortLayout;
     private bool isInstallAcknowledged;
+    private InstallHealthReport? installHealth;
+    private LauncherUpdateRefreshAssessment? launcherUpdateRefresh;
     private string selectedCategoryFilter = "All packs";
     private string statusText = "Loading completed staged builds...";
     private string selectionText = "No packs selected";
@@ -51,7 +61,9 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         PacksView.Filter = FilterPackByCategory;
         DataContext = this;
         SizeChanged += OnLayoutSizeChanged;
-        Loaded += async (_, _) => await RefreshAsync().ConfigureAwait(true);
+        Loaded += async (_, _) => await RefreshAsync(
+                installStateRefresh: InstallStateRefreshMode.AutoDetect)
+            .ConfigureAwait(true);
     }
 
     public ObservableCollection<StagedPackRow> Packs { get; } = [];
@@ -132,6 +144,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                 OnPropertyChanged(nameof(CanCleanupDebris));
                 OnPropertyChanged(nameof(IsLibraryEmpty));
                 OnPropertyChanged(nameof(CanClose));
+                OnPropertyChanged(nameof(CanRunLauncherUpdateAction));
             }
         }
     }
@@ -172,6 +185,55 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         private set => SetField(ref cleanupOverviewText, value);
     }
 
+    public bool HasLauncherUpdateNotice => launcherUpdateRefresh is
+    {
+        State: not LauncherUpdateRefreshState.NotApplicable
+    };
+
+    public bool CanRunLauncherUpdateAction => !IsBusy
+        && HasLauncherUpdateAction;
+
+    public bool HasLauncherUpdateAction => installHealth is not null
+        && launcherUpdateRefresh is not null
+        && (launcherUpdateRefresh.CanRefresh
+            || launcherUpdateRefresh.CanReconcileForFreshBuild);
+
+    public string LauncherUpdateTitle => launcherUpdateRefresh?.State switch
+    {
+        LauncherUpdateRefreshState.Ready => "GAME UPDATE DETECTED",
+        LauncherUpdateRefreshState.ResumeRequired => "GAME UPDATE RECOVERY READY",
+        LauncherUpdateRefreshState.FreshBuildRequired => "FRESH BUILD REQUIRED",
+        LauncherUpdateRefreshState.LauncherIncomplete => "GAME UPDATE NOT FINISHED",
+        LauncherUpdateRefreshState.UnverifiedChanges => "GAME UPDATE NEEDS ATTENTION",
+        _ => "GAME UPDATE"
+    };
+
+    public string LauncherUpdateSummary => launcherUpdateRefresh?.Summary
+        ?? "No completed game update needs texture-pack recovery.";
+
+    public string LauncherUpdateGuidance => launcherUpdateRefresh?.State switch
+    {
+        LauncherUpdateRefreshState.Ready =>
+            "Refreshes the active installed pack only. Checked Install packs are left unchanged for you to apply afterward.",
+        LauncherUpdateRefreshState.ResumeRequired =>
+            "Resumes the verified active-pack recovery only. Checked Install packs are left unchanged.",
+        LauncherUpdateRefreshState.FreshBuildRequired =>
+            "Accepts the verified official files, retires the stale active pack, then returns to Build for Analyze.",
+        LauncherUpdateRefreshState.LauncherIncomplete =>
+            "Finish the LaunchPad update, close LaunchPad and EverQuest, then choose Refresh Library.",
+        LauncherUpdateRefreshState.UnverifiedChanges =>
+            "SpinTexture will not install, repair, or replace packs until the changed game files can be verified safely.",
+        _ => string.Empty
+    };
+
+    public string LauncherUpdateActionText => launcherUpdateRefresh?.State switch
+    {
+        LauncherUpdateRefreshState.Ready => "Refresh + Reinstall Active Pack",
+        LauncherUpdateRefreshState.ResumeRequired => "Resume Refresh + Reinstall",
+        LauncherUpdateRefreshState.FreshBuildRequired => "Accept Update + Build Fresh",
+        _ => "Update Action Unavailable"
+    };
+
     public string DeleteButtonText => Packs
         .Where(pack => pack.IsMarkedForDeletion)
         .ToArray() switch
@@ -210,11 +272,17 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
     }
 
     public bool CanInstall => !IsBusy
+        && HasActionSafeInstallHealth
+        && !HasLauncherUpdateNotice
         && IsInstallAcknowledged
         && Packs.Any(pack => pack.IsSelected && pack.CanSelect);
     public bool CanRepair => !IsBusy
+        && HasActionSafeInstallHealth
+        && !HasLauncherUpdateNotice
         && SelectedPack is { CanRepairAny: true, CanSelect: true };
     public bool CanRepairCheckedPacks => !IsBusy
+        && HasActionSafeInstallHealth
+        && !HasLauncherUpdateNotice
         && Packs.Any(pack => pack.IsSelected && pack.CanSelect && pack.CanRepairAny);
     public bool CanPreview => !IsBusy
         && SelectedPack?.PreviewManifestPath is not null;
@@ -241,10 +309,27 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         && Packs.Any(pack => pack.CanSelect && pack.IsSelected);
     public bool CanClose => !IsBusy;
 
+    private bool HasActionSafeInstallHealth => installHealth?.State is
+        InstallHealthState.None
+        or InstallHealthState.EnhancedActive
+        or InstallHealthState.RevertedToOriginal;
+
     public event PropertyChangedEventHandler? PropertyChanged;
     public event EventHandler? CloseRequested;
+    public event EventHandler? FreshBuildPreparationCompleted;
     public event EventHandler<PackPreviewRequestedEventArgs>? PreviewRequested;
     public bool CanNavigateAway => !IsBusy;
+
+    internal void BeginReturnToBuildRefresh()
+    {
+        IsBusy = true;
+        StatusText = "Refreshing installed-pack status before returning to Build. No game files are being changed.";
+    }
+
+    internal void CompleteReturnToBuildRefresh()
+    {
+        IsBusy = false;
+    }
 
     private void OnLayoutSizeChanged(object sender, SizeChangedEventArgs e)
     {
@@ -264,7 +349,8 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         await RefreshAsync(
                 checkedManifestPaths: checkedPaths,
-                deleteMarkedManifestPaths: deleteMarkedPaths)
+                deleteMarkedManifestPaths: deleteMarkedPaths,
+                installStateRefresh: InstallStateRefreshMode.AutoDetect)
             .ConfigureAwait(true);
     }
 
@@ -591,7 +677,8 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
     private async Task RefreshAsync(
         string? selectManifestPath = null,
         IReadOnlySet<string>? checkedManifestPaths = null,
-        IReadOnlySet<string>? deleteMarkedManifestPaths = null)
+        IReadOnlySet<string>? deleteMarkedManifestPaths = null,
+        InstallStateRefreshMode installStateRefresh = InstallStateRefreshMode.Cached)
     {
         if (IsBusy)
         {
@@ -602,7 +689,12 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         StatusText = "Reading the staged-pack catalog. No game files are being changed.";
         try
         {
-            var activeBuildManifestPath = await FindActiveBuildManifestPathAsync().ConfigureAwait(true);
+            var currentHealth = await RefreshInstallStateAsync(
+                    installStateRefresh,
+                    CancellationToken.None)
+                .ConfigureAwait(true);
+            var activeBuildManifestPath = await FindActiveBuildManifestPathAsync(currentHealth)
+                .ConfigureAwait(true);
             var activeState = await ResolveActivePackStateAsync(
                     activeBuildManifestPath,
                     CancellationToken.None)
@@ -717,13 +809,21 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             UpdateSelection();
             UpdateDeletionSelection();
             UpdateHighlightedSelection();
-            StatusText = Packs.Count == 0
+            StatusText = HasLauncherUpdateNotice
+                ? LauncherUpdateSummary
+                : Packs.Count == 0
                 ? "No completed staged packs were found. Build one from the main window first."
                 : $"Found {Packs.Count:N0} completed pack(s). Delete checkboxes reflect one library-wide active-install and composition safety scan; exact verification runs again before any removal."
                   + (activeState.Warning is null ? string.Empty : $" {activeState.Warning}");
         }
         catch (Exception exception)
         {
+            if (installStateRefresh != InstallStateRefreshMode.Cached)
+            {
+                installHealth = null;
+                SetLauncherUpdateAssessment(null);
+            }
+
             StatusText = $"Pack catalog failed: {exception.Message}";
         }
         finally
@@ -733,11 +833,87 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         }
     }
 
-    private async Task<string?> FindActiveBuildManifestPathAsync()
+    private async Task<InstallHealthReport> RefreshInstallStateAsync(
+        InstallStateRefreshMode refreshMode,
+        CancellationToken cancellationToken)
     {
-        var health = await workflow.AuditInstallHealthFastAsync(paths).ConfigureAwait(false);
-        if (health.State != InstallHealthState.EnhancedActive
-            || health.InstallManifestPath is null)
+        // ApplySelected's typed race guard carries an assessment produced from
+        // its own fresh exact audit. The Pack view's older health snapshot may
+        // still say EnhancedActive, so a catalog-only cached refresh must not
+        // erase that newer fail-closed assessment. Explicit launcher detection,
+        // exact refreshes, and verified post-write fast refreshes are the only
+        // paths that replace it.
+        if (refreshMode == InstallStateRefreshMode.Cached
+            && installHealth is not null
+            && HasLauncherUpdateNotice)
+        {
+            return installHealth;
+        }
+
+        if (installHealth is null || refreshMode != InstallStateRefreshMode.Cached)
+        {
+            installHealth = refreshMode switch
+            {
+                InstallStateRefreshMode.AutoDetect => await workflow
+                    .AuditInstallHealthForLauncherUpdateDetectionAsync(
+                        paths,
+                        cancellationToken)
+                    .ConfigureAwait(false),
+                InstallStateRefreshMode.FastAfterVerifiedWrite => await workflow
+                    .AuditInstallHealthFastAsync(paths, cancellationToken)
+                    .ConfigureAwait(false),
+                _ => await workflow
+                    .AuditInstallHealthAsync(paths, cancellationToken)
+                    .ConfigureAwait(false)
+            };
+        }
+
+        LauncherUpdateRefreshAssessment? assessment = null;
+        var shouldAssess = installHealth.State == InstallHealthState.MixedOrModified
+                && installHealth.Entries.Any(entry =>
+                    entry.State == InstalledArtifactHealthState.ModifiedOrMissing)
+            || installHealth.State == InstallHealthState.RecoveryRequired
+                && installHealth.TransactionState == InstallTransactionState.RecoveryRequired;
+        if (shouldAssess)
+        {
+            assessment = await workflow.AssessLauncherUpdateRefreshAsync(
+                    paths,
+                    installHealth,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        SetLauncherUpdateAssessment(assessment);
+        return installHealth;
+    }
+
+    private void SetLauncherUpdateAssessment(
+        LauncherUpdateRefreshAssessment? assessment)
+    {
+        launcherUpdateRefresh = assessment is
+        {
+            State: not LauncherUpdateRefreshState.NotApplicable
+        }
+            ? assessment
+            : null;
+        OnPropertyChanged(nameof(HasLauncherUpdateNotice));
+        OnPropertyChanged(nameof(HasLauncherUpdateAction));
+        OnPropertyChanged(nameof(CanRunLauncherUpdateAction));
+        OnPropertyChanged(nameof(LauncherUpdateTitle));
+        OnPropertyChanged(nameof(LauncherUpdateSummary));
+        OnPropertyChanged(nameof(LauncherUpdateGuidance));
+        OnPropertyChanged(nameof(LauncherUpdateActionText));
+        OnPropertyChanged(nameof(CanInstall));
+        OnPropertyChanged(nameof(CanRepair));
+        OnPropertyChanged(nameof(CanRepairCheckedPacks));
+    }
+
+    private async Task<string?> FindActiveBuildManifestPathAsync(
+        InstallHealthReport health)
+    {
+        if (health.InstallManifestPath is null
+            || health.State != InstallHealthState.EnhancedActive
+                && !HasLauncherUpdateNotice)
         {
             return null;
         }
@@ -941,6 +1117,175 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         await InstallCheckedPacksCoreAsync().ConfigureAwait(true);
     }
 
+    private async void LauncherUpdateAction_Click(object sender, RoutedEventArgs e)
+    {
+        var assessment = launcherUpdateRefresh;
+        if (IsBusy
+            || assessment is null
+            || (!assessment.CanRefresh
+                && !assessment.CanReconcileForFreshBuild))
+        {
+            return;
+        }
+
+        var isFreshBuild = assessment.CanReconcileForFreshBuild;
+        var prompt = isFreshBuild
+            ? $"LaunchPad completed a verified update that changed {assessment.UpdatedArtifactCount:N0} managed file(s), but the active staged output cannot be reproduced safely from that change.\n\n"
+              + "SpinTexture will preserve the updated official files, retire the stale active install, and return to Build for a new Analyze. It will not install any of the green checked packs.\n\n"
+              + "EverQuest and LaunchPad must remain closed. Accept the update and prepare a fresh build now?"
+            : $"LaunchPad completed a verified update that changed {assessment.UpdatedArtifactCount:N0} archive(s) used by the active installed pack.\n\n"
+              + "SpinTexture will rebuild only those changed source archives with the active pack's recorded settings, reuse unaffected staged work, and reinstall that active pack. The green checked pack selection is intentionally ignored and remains available afterward.\n\n"
+              + "EverQuest and LaunchPad must remain closed. Refresh and reinstall the active pack now?";
+        var answer = MessageBox.Show(
+            Window.GetWindow(this),
+            prompt,
+            isFreshBuild
+                ? "Accept game update and build fresh"
+                : "Refresh active pack after game update",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question,
+            MessageBoxResult.No);
+        if (answer != MessageBoxResult.Yes)
+        {
+            StatusText = "Game-update action canceled safely. No game files or checked packs were changed.";
+            return;
+        }
+
+        var checkedManifestPaths = Packs
+            .Where(pack => pack.IsSelected && pack.CanSelect)
+            .Select(pack => Path.GetFullPath(pack.ManifestPath))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var priorActiveManifestPaths = Packs
+            .Where(pack => pack.IsActive || pack.IsActiveComponent)
+            .Select(pack => Path.GetFullPath(pack.ManifestPath))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // The update action targets the active installed selection, never the
+        // green checkboxes. Preserve unrelated user choices, but do not leave
+        // stale pre-update active manifests checked after the active selection
+        // is refreshed or retired.
+        checkedManifestPaths.ExceptWith(priorActiveManifestPaths);
+        var deleteMarkedManifestPaths = Packs
+            .Where(pack => pack.IsMarkedForDeletion)
+            .Select(pack => Path.GetFullPath(pack.ManifestPath))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        operationCancellation = new CancellationTokenSource();
+        IsBusy = true;
+        StatusText = isFreshBuild
+            ? "Exact-verifying the completed game update before retiring the stale active pack..."
+            : "Exact-verifying the completed game update before refreshing the active pack...";
+        var progress = new Progress<ProgressUpdate>(update =>
+        {
+            StatusText = string.IsNullOrWhiteSpace(update.CurrentItem)
+                ? update.Message
+                : $"{update.Message}  {update.CurrentItem}";
+        });
+
+        try
+        {
+            if (isFreshBuild)
+            {
+                var reconciled = await workflow
+                    .ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
+                        paths,
+                        assessment.ConfirmationToken
+                        ?? throw new InvalidOperationException(
+                            "The verified game update has no confirmation token. Refresh Packs and try again."),
+                        progress,
+                        operationCancellation.Token)
+                    .ConfigureAwait(true);
+                SetLauncherUpdateAssessment(null);
+                IsBusy = false;
+                await RefreshAsync(
+                        checkedManifestPaths: checkedManifestPaths,
+                        deleteMarkedManifestPaths: deleteMarkedManifestPaths,
+                        installStateRefresh: InstallStateRefreshMode.FastAfterVerifiedWrite)
+                    .ConfigureAwait(true);
+                StatusText =
+                    $"Accepted the official update and reconciled {reconciled.ReconciledArtifacts:N0} managed file(s). The stale pack was not installed; Analyze is next.";
+                MessageBox.Show(
+                    Window.GetWindow(this),
+                    "The official game update is accepted and the stale active pack has been retired safely. No checked pack was installed.\n\nSpinTexture will return to Build. Click Analyze, review the updated client, then build a fresh staged pack.",
+                    "Ready for a fresh texture build",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                FreshBuildPreparationCompleted?.Invoke(this, EventArgs.Empty);
+            }
+            else
+            {
+                var refreshed = await workflow
+                    .RefreshAndApplyActivePackAfterLauncherUpdateAsync(
+                        paths,
+                        assessment.ConfirmationToken
+                        ?? throw new InvalidOperationException(
+                            "The verified game update has no confirmation token. Refresh Packs and try again."),
+                        progress,
+                        operationCancellation.Token)
+                    .ConfigureAwait(true);
+                SetLauncherUpdateAssessment(null);
+                IsBusy = false;
+                await RefreshAsync(
+                        refreshed.RefreshedBuildManifestPath,
+                        checkedManifestPaths,
+                        deleteMarkedManifestPaths,
+                        InstallStateRefreshMode.FastAfterVerifiedWrite)
+                    .ConfigureAwait(true);
+                CheckActiveSelectionRows();
+                StatusText =
+                    $"Refreshed {refreshed.UpdatedArtifactCount:N0} updated archive(s), reused {refreshed.ReusedPackCount:N0} unaffected pack(s), and reinstalled the active pack. Checked packs were not applied.";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            const string message =
+                "Game-update recovery canceled safely. Completed staged work remains reusable.";
+            IsBusy = false;
+            await RefreshAsync(
+                    checkedManifestPaths: checkedManifestPaths,
+                    deleteMarkedManifestPaths: deleteMarkedManifestPaths,
+                    installStateRefresh: InstallStateRefreshMode.Exact)
+                .ConfigureAwait(true);
+            CheckActiveSelectionRows();
+            StatusText = message;
+        }
+        catch (Exception exception)
+        {
+            var message = $"Game-update recovery stopped safely: {exception.Message}";
+            IsBusy = false;
+            await RefreshAsync(
+                    checkedManifestPaths: checkedManifestPaths,
+                    deleteMarkedManifestPaths: deleteMarkedManifestPaths,
+                    installStateRefresh: InstallStateRefreshMode.Exact)
+                .ConfigureAwait(true);
+            CheckActiveSelectionRows();
+            StatusText = message;
+            MessageBox.Show(
+                Window.GetWindow(this),
+                exception.Message,
+                "Game-update recovery",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+        finally
+        {
+            operationCancellation?.Dispose();
+            operationCancellation = null;
+            IsBusy = false;
+            ScheduleDeferredCloseIfRequested();
+        }
+    }
+
+    private void CheckActiveSelectionRows()
+    {
+        foreach (var pack in Packs.Where(pack =>
+                     pack.CanSelect
+                     && (pack.IsActive || pack.IsActiveComponent)))
+        {
+            pack.IsSelected = true;
+        }
+
+        UpdateSelection();
+    }
+
     private async Task InstallCheckedPacksCoreAsync()
     {
         var selected = Packs
@@ -963,7 +1308,8 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                     token).ConfigureAwait(false);
                 return (string?)null;
             },
-            successMessage: "The checked packs are installed and active. Existing staged builds remain reusable.")
+            successMessage: "The checked packs are installed and active. Existing staged builds remain reusable.",
+            installStateRefreshAfterSuccess: InstallStateRefreshMode.FastAfterVerifiedWrite)
             .ConfigureAwait(true);
     }
 
@@ -1324,7 +1670,9 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         string startingStatus,
         Func<IProgress<ProgressUpdate>, CancellationToken, Task<string?>> operation,
         string successMessage,
-        string? replaceSelectedManifestPath = null)
+        string? replaceSelectedManifestPath = null,
+        InstallStateRefreshMode installStateRefreshAfterSuccess =
+            InstallStateRefreshMode.Cached)
     {
         if (IsBusy)
         {
@@ -1364,22 +1712,25 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
 
             StatusText = successMessage;
             IsBusy = false;
-            await RefreshAsync(selectManifest, checkedManifestPaths, deleteMarkedManifestPaths)
+            await RefreshAsync(
+                    selectManifest,
+                    checkedManifestPaths,
+                    deleteMarkedManifestPaths,
+                    installStateRefreshAfterSuccess)
                 .ConfigureAwait(true);
             StatusText = successMessage;
         }
         catch (LauncherUpdateActionRequiredException exception)
         {
+            SetLauncherUpdateAssessment(exception.Assessment);
             StatusText = exception.Message;
             MessageBox.Show(
                 Window.GetWindow(this),
                 exception.Message
-                + "\n\nNo pack combination was created and no game files were changed. SpinTexture will return to the main Build screen now.",
+                + "\n\nNo pack combination was created and no game files were changed. Use the game-update action now shown at the top of Packs.",
                 "Game update action required",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);
-            IsBusy = false;
-            CloseRequested?.Invoke(this, EventArgs.Empty);
         }
         catch (OperationCanceledException)
         {
@@ -1761,7 +2112,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                     $"World ({FormatWorldExpansionSelection(manifest.Options.WorldExpansions, compact: true)}) + Characters + Equipment",
                 AssetScope.WorldOnly =>
                     $"World textures · {FormatWorldExpansionSelection(manifest.Options.WorldExpansions, compact: true)}",
-                AssetScope.AllSafeTextures => "All safe textures",
+                AssetScope.AllSafeTextures => "Everything safely eligible",
                 AssetScope.SpellEffectsOnly => "Spell effects",
                 _ => info.CandidateBuildId
             };
@@ -2309,7 +2660,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
                     $"World ({FormatWorldExpansionSelection(options.WorldExpansions, compact: true)}) + Characters + Equipment",
                 AssetScope.WorldOnly =>
                     $"World ({FormatWorldExpansionSelection(options.WorldExpansions, compact: true)})",
-                AssetScope.AllSafeTextures => "All safe textures",
+                AssetScope.AllSafeTextures => "Everything safely eligible",
                 AssetScope.SpellEffectsOnly => "Spell effects",
                 _ => options.Scope.ToString()
             };

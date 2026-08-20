@@ -21,12 +21,46 @@ public sealed record LauncherUpdateRefreshAssessment(
     int UpdatedArtifactCount,
     IReadOnlyList<string> UpdatedRelativePaths)
 {
+    /// <summary>
+    /// Opaque digest binding a user's confirmation to this exact active
+    /// transaction, outcome, launcher evidence, and set of adopted byte
+    /// snapshots. It is present only for actionable assessments.
+    /// </summary>
+    public string? ConfirmationToken { get; init; }
+
     public bool CanRefresh => State is
         LauncherUpdateRefreshState.Ready or
         LauncherUpdateRefreshState.ResumeRequired;
 
     public bool CanReconcileForFreshBuild =>
         State == LauncherUpdateRefreshState.FreshBuildRequired;
+}
+
+/// <summary>
+/// The exact launcher-update state changed after the user was shown a
+/// confirmation. No rebuild, reconciliation, or live install write has begun;
+/// callers should display <see cref="CurrentAssessment"/> and ask again.
+/// </summary>
+public sealed class LauncherUpdateAssessmentStaleException : InvalidOperationException
+{
+    public LauncherUpdateAssessmentStaleException(
+        LauncherUpdateRefreshAssessment currentAssessment)
+        : base(CreateMessage(currentAssessment))
+    {
+        CurrentAssessment = currentAssessment
+            ?? throw new ArgumentNullException(nameof(currentAssessment));
+    }
+
+    public LauncherUpdateRefreshAssessment CurrentAssessment { get; }
+
+    private static string CreateMessage(
+        LauncherUpdateRefreshAssessment? currentAssessment)
+    {
+        ArgumentNullException.ThrowIfNull(currentAssessment);
+        return "The verified game-update state changed after confirmation. "
+               + "No files were changed; review the refreshed update details and confirm again. "
+               + currentAssessment.Summary;
+    }
 }
 
 public sealed record LauncherUpdateRefreshResult(

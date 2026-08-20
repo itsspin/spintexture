@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Windows;
+using SpinTexture.Core.Models;
 using SpinTexture.Core.Services;
 
 namespace SpinTexture.App.Services;
@@ -21,6 +22,8 @@ public interface IUserDialogService
     bool ConfirmLauncherUpdateReconcileForFreshBuild(int updatedFileCount);
     bool ConfirmRestore();
     void ShowLauncherUpdateRefreshRequired(string summary);
+    void ShowLauncherUpdateAnalyzeRequired(LauncherUpdateRefreshAssessment assessment);
+    void ShowClientAnalysisBlocked(string summary, string nextStep);
     bool ConfirmArtisticWorkerSetup(long totalDownloadBytes, IReadOnlyList<string> componentSummaries);
     bool ConfirmArtisticWorkerRemove();
     void ShowArtisticWorkerNotice(string message, bool isError);
@@ -360,6 +363,50 @@ public sealed class UserDialogService : IUserDialogService
             "Refresh the pack after the game update",
             MessageBoxButton.OK,
             MessageBoxImage.Information);
+    }
+
+    public void ShowLauncherUpdateAnalyzeRequired(
+        LauncherUpdateRefreshAssessment assessment)
+    {
+        ArgumentNullException.ThrowIfNull(assessment);
+        var nextStep = assessment.State switch
+        {
+            LauncherUpdateRefreshState.Ready =>
+                "Choose Refresh + Reinstall After Update. SpinTexture will rebuild only the official archives that changed and reuse the unaffected staged work.",
+            LauncherUpdateRefreshState.ResumeRequired =>
+                "Choose Resume Refresh + Reinstall. SpinTexture will safely resume the recorded update recovery before reinstalling the active pack.",
+            LauncherUpdateRefreshState.FreshBuildRequired =>
+                "Choose Accept Update + Build Fresh. Then run Analyze again against the updated official client.",
+            LauncherUpdateRefreshState.LauncherIncomplete =>
+                "Finish the LaunchPad update completely, close LaunchPad and EverQuest, then click Analyze again.",
+            LauncherUpdateRefreshState.UnverifiedChanges =>
+                "SpinTexture could not prove that every changed file came from a completed LaunchPad update. Review the update guidance and do not install or rebuild over this client yet.",
+            _ =>
+                "Resolve the current game-file state, then click Analyze again."
+        };
+
+        MessageBox.Show(
+            "SpinTexture stopped before scanning or building because the installed game files need attention first. No files were changed.\n\n"
+            + assessment.Summary
+            + "\n\n"
+            + nextStep,
+            "Game update detected before Analyze",
+            MessageBoxButton.OK,
+            assessment.State == LauncherUpdateRefreshState.UnverifiedChanges
+                ? MessageBoxImage.Warning
+                : MessageBoxImage.Information);
+    }
+
+    public void ShowClientAnalysisBlocked(string summary, string nextStep)
+    {
+        MessageBox.Show(
+            "SpinTexture stopped before scanning or building. No files were changed.\n\n"
+            + summary
+            + "\n\n"
+            + nextStep,
+            "Client must be resolved before Analyze",
+            MessageBoxButton.OK,
+            MessageBoxImage.Warning);
     }
 
     public bool ConfirmArtisticWorkerSetup(long totalDownloadBytes, IReadOnlyList<string> componentSummaries)

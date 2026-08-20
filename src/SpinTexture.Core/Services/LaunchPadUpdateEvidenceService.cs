@@ -20,6 +20,7 @@ public sealed record LaunchPadChangedFile(
 public sealed record LaunchPadUpdateEvidence(
     bool IsCompleted,
     bool HasUnsafePath,
+    bool HasPostInstallActivity,
     DateTimeOffset? LatestSessionStartedUtc,
     IReadOnlyDictionary<string, LaunchPadChangedFile> ChangedFiles,
     string Summary)
@@ -91,7 +92,7 @@ public sealed partial class LaunchPadUpdateEvidenceService
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            return NotCompleted(
+            return NotCompletedFailClosed(
                 $"SpinTexture could not read LaunchPad's update log safely: {exception.Message}");
         }
 
@@ -101,6 +102,17 @@ public sealed partial class LaunchPadUpdateEvidenceService
             && startedUtc >= activeInstallAppliedUtc);
         if (firstPostInstallIndex < 0)
         {
+            var lastKnownSessionBeforeInstallIndex = sessions.FindLastIndex(session =>
+                session.StartedUtc is { } startedUtc
+                && startedUtc < activeInstallAppliedUtc);
+            if (sessions
+                .Skip(lastKnownSessionBeforeInstallIndex + 1)
+                .Any(session => session.StartedUtc is null))
+            {
+                return NotCompletedFailClosed(
+                    "LaunchPad's latest update log contains a session timestamp SpinTexture cannot place before the active pack install. The live pack will be verified exactly.");
+            }
+
             return NotCompleted(
                 "No LaunchPad update session completed after the active SpinTexture pack was installed.");
         }
@@ -123,6 +135,7 @@ public sealed partial class LaunchPadUpdateEvidenceService
             return new LaunchPadUpdateEvidence(
                 IsCompleted: false,
                 HasUnsafePath: false,
+                HasPostInstallActivity: true,
                 LatestSessionStartedUtc: null,
                 EmptyChanges(),
                 "LaunchPad's latest update log contains a session timestamp SpinTexture cannot validate. No updated originals were trusted.");
@@ -141,6 +154,7 @@ public sealed partial class LaunchPadUpdateEvidenceService
             return new LaunchPadUpdateEvidence(
                 IsCompleted: false,
                 HasUnsafePath: false,
+                HasPostInstallActivity: true,
                 LatestSessionStartedUtc: null,
                 EmptyChanges(),
                 "LaunchPad's latest update log contains a session timestamp SpinTexture cannot validate. No updated originals were trusted.");
@@ -152,6 +166,7 @@ public sealed partial class LaunchPadUpdateEvidenceService
             return new LaunchPadUpdateEvidence(
                 IsCompleted: false,
                 HasUnsafePath: false,
+                HasPostInstallActivity: true,
                 latest.StartedUtc,
                 EmptyChanges(),
                 "The latest LaunchPad session did not record a successful completion. Reopen the official launcher and let verification finish before refreshing the texture pack.");
@@ -186,6 +201,7 @@ public sealed partial class LaunchPadUpdateEvidenceService
                     return new LaunchPadUpdateEvidence(
                         IsCompleted: false,
                         HasUnsafePath: true,
+                        HasPostInstallActivity: true,
                         latest.StartedUtc,
                         EmptyChanges(),
                         "LaunchPad's completed update log contains an unsafe or invalid file path. SpinTexture will not adopt any updated originals from that log.");
@@ -201,6 +217,7 @@ public sealed partial class LaunchPadUpdateEvidenceService
         return new LaunchPadUpdateEvidence(
             IsCompleted: true,
             HasUnsafePath: false,
+            HasPostInstallActivity: true,
             latest.StartedUtc,
             changed,
             changed.Count == 0
@@ -400,6 +417,15 @@ public sealed partial class LaunchPadUpdateEvidenceService
     private static LaunchPadUpdateEvidence NotCompleted(string summary) => new(
         IsCompleted: false,
         HasUnsafePath: false,
+        HasPostInstallActivity: false,
+        LatestSessionStartedUtc: null,
+        EmptyChanges(),
+        summary);
+
+    private static LaunchPadUpdateEvidence NotCompletedFailClosed(string summary) => new(
+        IsCompleted: false,
+        HasUnsafePath: false,
+        HasPostInstallActivity: true,
         LatestSessionStartedUtc: null,
         EmptyChanges(),
         summary);

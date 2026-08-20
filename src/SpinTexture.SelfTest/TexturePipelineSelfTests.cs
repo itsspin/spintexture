@@ -534,6 +534,8 @@ public static class TexturePipelineSelfTests
                 "terrain_common.s3d",
                 "orc_chr.s3d",
                 "globalhuf_chr.s3d",
+                "globalogf_chr.s3d",
+                "globalogm_chr.s3d",
                 "global_chr.s3d",
                 "oot_chr.s3d",
                 "pre1_chr.s3d",
@@ -628,6 +630,30 @@ public static class TexturePipelineSelfTests
                     Path.Combine(root, archiveName),
                     [],
                     cancellationToken).ConfigureAwait(false);
+            }
+
+            var ogreFaceDds = new byte[128 + (256 * 128 / 2)];
+            "DDS "u8.CopyTo(ogreFaceDds);
+            BinaryPrimitives.WriteUInt32LittleEndian(ogreFaceDds.AsSpan(4), 124);
+            BinaryPrimitives.WriteUInt32LittleEndian(ogreFaceDds.AsSpan(12), 128);
+            BinaryPrimitives.WriteUInt32LittleEndian(ogreFaceDds.AsSpan(16), 256);
+            BinaryPrimitives.WriteUInt32LittleEndian(ogreFaceDds.AsSpan(28), 1);
+            BinaryPrimitives.WriteUInt32LittleEndian(ogreFaceDds.AsSpan(76), 32);
+            BinaryPrimitives.WriteUInt32LittleEndian(ogreFaceDds.AsSpan(80), 4);
+            "DXT1"u8.CopyTo(ogreFaceDds.AsSpan(84));
+            await using (var ogreArchiveOutput = new FileStream(
+                             Path.Combine(root, "globalogm_chr.s3d"),
+                             FileMode.Create,
+                             FileAccess.ReadWrite,
+                             FileShare.None,
+                             4096,
+                             FileOptions.Asynchronous))
+            {
+                await PfsArchiveWriter.WriteAsync(
+                        ogreArchiveOutput,
+                        [new PfsArchiveItem("ogmfa0001.dds", ogreFaceDds)],
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
             }
 
             await File.WriteAllTextAsync(
@@ -792,6 +818,8 @@ public static class TexturePipelineSelfTests
             var expectedCharacterNames = new HashSet<string>(
                 [
                     "globalhuf_chr.s3d",
+                    "globalogf_chr.s3d",
+                    "globalogm_chr.s3d",
                     "global_chr.s3d",
                     "oot_chr.s3d",
                     "pre1_chr.s3d",
@@ -1001,11 +1029,36 @@ public static class TexturePipelineSelfTests
                 allPaths.Count,
                 allPaths.Distinct(StringComparer.OrdinalIgnoreCase).Count(),
                 "All safe archive selection should not contain duplicates");
+            var allNames = allPaths
+                .Select(Path.GetFileName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            Assert(
+                allNames.SetEquals(archiveNames)
+                && allNames.Contains("globalogf_chr.s3d")
+                && allNames.Contains("globalogm_chr.s3d"),
+                "Everything safely eligible should scan every detected archive, including both Ogre race archives");
             Assert(
                 allPaths.SequenceEqual(
                     allPaths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase),
                     StringComparer.OrdinalIgnoreCase),
                 "archive selection should be deterministically sorted");
+
+            await using (var ogreArchive = await PfsArchive.OpenAsync(
+                             Path.Combine(root, "globalogm_chr.s3d"),
+                             cancellationToken: cancellationToken).ConfigureAwait(false))
+            {
+                var ogreFace = ogreArchive.GetEntry("ogmfa0001.dds");
+                Assert(
+                    PfsTextureArchiveBuilder.IsPotentialCandidate(
+                        ogreFace,
+                        allOptions.MaximumDimension,
+                        allOptions.Preset)
+                    && TexturePackWorkflow.HasPotentialArchiveCandidate(
+                        ogreArchive,
+                        Path.Combine(root, "globalogm_chr.s3d"),
+                        allOptions),
+                    "Everything safely eligible should plan a real Ogre face-atlas member for enhancement");
+            }
 
             var manifestPath = Path.Combine(root, "manifest", "build-manifest.json");
             var manifest = new BuildManifest(

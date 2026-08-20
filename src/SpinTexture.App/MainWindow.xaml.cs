@@ -19,6 +19,7 @@ public partial class MainWindow : Window
     private StagedPackLibraryWindow? _packLibraryView;
     private PackStorageSettingsWindow? _packStorageView;
     private NativeGraphicsWindow? _nativeGraphicsView;
+    private Task _packLibraryCloseRefreshTask = Task.CompletedTask;
     private bool _previewReturnsToPacks;
     private string? _viewInstallPath;
     private bool _shutdownDrainComplete;
@@ -335,15 +336,69 @@ public partial class MainWindow : Window
         if (_packLibraryView is null)
         {
             _packLibraryView = new StagedPackLibraryWindow(installPath);
-            _packLibraryView.CloseRequested += async (_, _) =>
+            _packLibraryView.CloseRequested += OnPackLibraryCloseRequested;
+            _packLibraryView.FreshBuildPreparationCompleted += (_, _) =>
             {
+                _viewModel.CompleteFreshBuildPreparationAfterLauncherUpdate();
                 ShowBuildSection();
-                await _viewModel.RefreshPackLibraryStateAsync().ConfigureAwait(true);
             };
             _packLibraryView.PreviewRequested += OnPackPreviewRequested;
         }
 
         ShowSection(_packLibraryView, "STAGED PACKS");
+    }
+
+    private void OnPackLibraryCloseRequested(object? sender, EventArgs e)
+    {
+        if (IsClosingOrClosed
+            || sender is not StagedPackLibraryWindow packLibraryView
+            || !ReferenceEquals(_packLibraryView, packLibraryView)
+            || !_packLibraryCloseRefreshTask.IsCompleted)
+        {
+            return;
+        }
+
+        var requestedInstallPath = Path.GetFullPath(_viewModel.InstallPath);
+        _packLibraryCloseRefreshTask = RefreshPackStateAndReturnToBuildAsync(
+            packLibraryView,
+            requestedInstallPath);
+    }
+
+    private async Task RefreshPackStateAndReturnToBuildAsync(
+        StagedPackLibraryWindow packLibraryView,
+        string requestedInstallPath)
+    {
+        packLibraryView.BeginReturnToBuildRefresh();
+        try
+        {
+            await _viewModel.RefreshPackLibraryStateAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception)
+        {
+            if (!IsClosingOrClosed && ReferenceEquals(_packLibraryView, packLibraryView))
+            {
+                MessageBox.Show(
+                    this,
+                    $"SpinTexture could not refresh the installed-pack status. No game files were changed; verify the install status again before installing or playing.\n\n{exception.Message}",
+                    "Pack status refresh",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
+        }
+        finally
+        {
+            packLibraryView.CompleteReturnToBuildRefresh();
+        }
+
+        if (!IsClosingOrClosed
+            && ReferenceEquals(_packLibraryView, packLibraryView)
+            && string.Equals(
+                Path.GetFullPath(_viewModel.InstallPath),
+                requestedInstallPath,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            ShowBuildSection();
+        }
     }
 
     private void OnPackPreviewRequested(object? sender, PackPreviewRequestedEventArgs e) =>
@@ -509,7 +564,11 @@ public partial class MainWindow : Window
             SectionContent.Content = null;
         }
 
-        _packLibraryView?.Dispose();
+        if (_packLibraryView is not null)
+        {
+            _packLibraryView.CloseRequested -= OnPackLibraryCloseRequested;
+            _packLibraryView.Dispose();
+        }
         _packLibraryView = null;
         _previewGalleryView?.Dispose();
         _previewGalleryView = null;
@@ -593,7 +652,7 @@ public partial class MainWindow : Window
         }
 
         e.Cancel = true;
-        if (!CanLeaveCurrentSection())
+        if (!CanDrainCurrentSectionForShutdown())
         {
             MessageBox.Show(
                 this,
@@ -613,7 +672,10 @@ public partial class MainWindow : Window
         IsEnabled = false;
         try
         {
-            await _viewModel.DrainForShutdownAsync().ConfigureAwait(true);
+            await Task.WhenAll(
+                    _viewModel.DrainForShutdownAsync(),
+                    _packLibraryCloseRefreshTask)
+                .ConfigureAwait(true);
             await Dispatcher.InvokeAsync(
                 () =>
                 {
@@ -634,6 +696,12 @@ public partial class MainWindow : Window
                 MessageBoxImage.Information);
         }
     }
+
+    private bool CanDrainCurrentSectionForShutdown() =>
+        ((_packLibraryView?.CanNavigateAway ?? true)
+         || !_packLibraryCloseRefreshTask.IsCompleted)
+        && (_packStorageView?.CanNavigateAway ?? true)
+        && (_nativeGraphicsView?.CanNavigateAway ?? true);
 
     private void OnWindowClosed(object? sender, EventArgs e)
     {

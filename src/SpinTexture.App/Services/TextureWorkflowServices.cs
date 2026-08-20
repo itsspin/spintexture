@@ -43,6 +43,10 @@ public interface ITextureWorkflowService
         string installPath,
         CancellationToken cancellationToken);
 
+    Task<InstallHealthReport> AuditInstallHealthForLauncherUpdateDetectionAsync(
+        string installPath,
+        CancellationToken cancellationToken);
+
     Task<LauncherUpdateRefreshAssessment> AssessLauncherUpdateRefreshAsync(
         string installPath,
         InstallHealthReport? verifiedHealth,
@@ -50,12 +54,14 @@ public interface ITextureWorkflowService
 
     Task<LauncherUpdateRefreshResult> RefreshAndApplyActivePackAfterLauncherUpdateAsync(
         string installPath,
+        string expectedConfirmationToken,
         IProgress<ProgressUpdate> progress,
         CancellationToken cancellationToken);
 
     Task<LauncherUpdateReconciliationResult>
         ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
             string installPath,
+            string expectedConfirmationToken,
             IProgress<ProgressUpdate> progress,
             CancellationToken cancellationToken);
 
@@ -163,6 +169,13 @@ public sealed class TextureWorkflowService : ITextureWorkflowService
             WorkspaceLocator.ForInstall(installPath, workspaceRoot),
             cancellationToken);
 
+    public Task<InstallHealthReport> AuditInstallHealthForLauncherUpdateDetectionAsync(
+        string installPath,
+        CancellationToken cancellationToken) =>
+        workflow.AuditInstallHealthForLauncherUpdateDetectionAsync(
+            WorkspaceLocator.ForInstall(installPath, workspaceRoot),
+            cancellationToken);
+
     public Task<LauncherUpdateRefreshAssessment> AssessLauncherUpdateRefreshAsync(
         string installPath,
         InstallHealthReport? verifiedHealth,
@@ -175,12 +188,14 @@ public sealed class TextureWorkflowService : ITextureWorkflowService
     public async Task<LauncherUpdateRefreshResult>
         RefreshAndApplyActivePackAfterLauncherUpdateAsync(
             string installPath,
+            string expectedConfirmationToken,
             IProgress<ProgressUpdate> progress,
             CancellationToken cancellationToken)
     {
         var result = await workflow
             .RefreshAndApplyActivePackAfterLauncherUpdateAsync(
                 WorkspaceLocator.ForInstall(installPath, workspaceRoot),
+                expectedConfirmationToken,
                 progress,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -191,10 +206,12 @@ public sealed class TextureWorkflowService : ITextureWorkflowService
     public Task<LauncherUpdateReconciliationResult>
         ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
             string installPath,
+            string expectedConfirmationToken,
             IProgress<ProgressUpdate> progress,
             CancellationToken cancellationToken) =>
         workflow.ReconcileActivePackForFreshBuildAfterLauncherUpdateAsync(
             WorkspaceLocator.ForInstall(installPath, workspaceRoot),
+            expectedConfirmationToken,
             progress,
             cancellationToken);
 
