@@ -1836,7 +1836,9 @@ public sealed class TextureOptionPreviewService
     {
         try
         {
-            var excluded = excludedKeys.ToHashSet(StringComparer.Ordinal);
+            // In-flight keys are upper-cased paths while cache directories are
+            // lower-case hashes, so the exclusion must ignore case.
+            var excluded = excludedKeys.ToHashSet(StringComparer.OrdinalIgnoreCase);
             var completed = Directory.EnumerateDirectories(
                     cacheRoot,
                     "*",

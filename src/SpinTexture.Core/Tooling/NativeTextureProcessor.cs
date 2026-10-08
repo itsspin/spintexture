@@ -930,7 +930,10 @@ public sealed class NativeTextureProcessor
                     cancellationToken).ConfigureAwait(false);
             }
             catch (NativeProcessException) when (
-                !workerThreads.Equals(
+                // The external artistic worker ignores the Vulkan queue setting, so a
+                // retry would only rerun the whole diffusion batch before falling back.
+                key.WorkerKind != NeuralWorkerKind.ExternalArtistic
+                && !workerThreads.Equals(
                     ConservativeNeuralWorkerThreads,
                     StringComparison.Ordinal))
             {
@@ -962,8 +965,12 @@ public sealed class NativeTextureProcessor
                     cancellationToken).ConfigureAwait(false);
             }
         }
-        catch (NativeProcessException) when (key.WorkerKind == NeuralWorkerKind.ExternalArtistic)
+        catch (Exception exception) when (
+            key.WorkerKind == NeuralWorkerKind.ExternalArtistic
+            && exception is NativeProcessException or System.ComponentModel.Win32Exception)
         {
+            // Win32Exception: Windows could not start the configured worker at all
+            // (for example a script that is not an executable or .bat/.cmd).
             Interlocked.Exchange(ref artisticWorkerUnavailable, 1);
             nativeProgress?.Report(new NativeOutputLine(
                 NativeOutputStream.StandardError,

@@ -1243,7 +1243,9 @@ public sealed class ArtisticWorkerSetupService
         script.AppendLine("} finally {");
         script.AppendLine("  Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue");
         script.AppendLine("}");
-        File.WriteAllText(outputPath, script.ToString());
+        // Windows PowerShell 5.1 reads BOM-less scripts in the legacy ANSI code page,
+        // which garbles the absolute paths embedded above for non-ASCII user folders.
+        File.WriteAllText(outputPath, script.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
     }
 
     private static void WriteBatchShim(string path, string powerShellScriptReference)

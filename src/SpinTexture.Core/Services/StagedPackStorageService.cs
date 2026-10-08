@@ -634,6 +634,13 @@ public sealed class StagedPackStorageService
     {
         var root = Path.GetPathRoot(Path.GetFullPath(destinationPath))
             ?? throw new InvalidOperationException("Windows could not determine the destination drive.");
+        if (root.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            // DriveInfo rejects UNC roots; the verified copy still fails cleanly
+            // and rolls back if the share runs out of space.
+            return;
+        }
+
         var drive = new DriveInfo(root);
         var required = checked(requiredBytes + FreeSpaceReserve);
         if (drive.AvailableFreeSpace < required)
