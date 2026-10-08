@@ -1,3 +1,5 @@
+using SpinTexture.Core.Textures;
+
 namespace SpinTexture.Core.Tooling;
 
 public sealed record UpscaleDimensions(
@@ -26,6 +28,22 @@ public sealed record UpscaleDimensions(
                 RealEsrganCommandBuilder.MinimumOutputScale,
                 RealEsrganCommandBuilder.ModelScale);
         }
+    }
+
+    /// <summary>
+    /// The output size the processor produces for this texture, including the
+    /// multiple-of-4 alignment block-compressed encoders require. Anything that
+    /// later validates a produced payload must use this, not <see cref="Calculate"/>.
+    /// </summary>
+    public static UpscaleDimensions CalculateFor(TextureMetadata metadata, int maximumDimension)
+    {
+        ArgumentNullException.ThrowIfNull(metadata);
+        return Calculate(
+            metadata.Width,
+            metadata.Height,
+            maximumDimension,
+            dimensionAlignment:
+                metadata.TexconvFormat?.StartsWith("BC", StringComparison.OrdinalIgnoreCase) == true ? 4 : 1);
     }
 
     public static UpscaleDimensions Calculate(

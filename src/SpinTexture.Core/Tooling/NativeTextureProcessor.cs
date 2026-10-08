@@ -136,14 +136,9 @@ public sealed class NativeTextureProcessor
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var request = requests[index];
-                var dimensions = UpscaleDimensions.Calculate(
-                    request.Metadata.Width,
-                    request.Metadata.Height,
-                    request.Options.MaximumDimension,
-                    dimensionAlignment:
-                        request.Metadata.TexconvFormat?.StartsWith("BC", StringComparison.OrdinalIgnoreCase) == true
-                            ? 4
-                            : 1);
+                var dimensions = UpscaleDimensions.CalculateFor(
+                    request.Metadata,
+                    request.Options.MaximumDimension);
                 var started = DateTimeOffset.UtcNow;
 
                 if (!dimensions.RequiresUpscale
@@ -2483,10 +2478,15 @@ public sealed class NativeTextureProcessor
         }
 
         // A maximum-dimension cap commonly rounds one axis by a fraction of a
-        // pixel (for example 300x200 -> 1024x683). Treat that as the same
-        // aspect ratio, while continuing to reject actual geometric distortion.
+        // pixel (for example 300x200 -> 1024x683), and block-compressed outputs
+        // are then aligned to a multiple of 4 (1024x684), moving the short axis
+        // by up to 2 more pixels. Treat that as the same aspect ratio, measured
+        // from whichever axis is closer, while still rejecting real distortion.
+        const double aspectTolerance = 2.51;
         var expectedHeightFromWidth = source.Height * horizontalScale;
-        if (Math.Abs(enhanced.Height - expectedHeightFromWidth) > 1.01)
+        var expectedWidthFromHeight = source.Width * verticalScale;
+        if (Math.Abs(enhanced.Height - expectedHeightFromWidth) > aspectTolerance
+            && Math.Abs(enhanced.Width - expectedWidthFromHeight) > aspectTolerance)
         {
             throw new InvalidDataException(
                 "The enhanced texture scale changes the source aspect ratio.");

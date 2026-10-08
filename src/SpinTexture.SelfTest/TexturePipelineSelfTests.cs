@@ -1794,6 +1794,11 @@ public static class TexturePipelineSelfTests
             && metrics.CoarseLuminanceCorrelation >= 0.999,
             "a rounded aspect-preserving cap must pass deterministic area-reduced fidelity comparison");
 
+        // 384x256 BC3 at a 1024 cap: 1024x683 is aligned to 1024x684 for block compression.
+        _ = NativeTextureProcessor.CalculateFidelityMetrics(
+            CreateSolidTgaBuffer(384, 256, 92, 128, 74),
+            CreateSolidTgaBuffer(1024, 684, 92, 128, 74));
+
         var distortedRejected = false;
         try
         {

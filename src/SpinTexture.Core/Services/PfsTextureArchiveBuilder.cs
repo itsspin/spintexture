@@ -547,9 +547,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                     continue;
                 }
 
-                var reviewDimensions = UpscaleDimensions.Calculate(
-                    metadata.Width,
-                    metadata.Height,
+                var reviewDimensions = UpscaleDimensions.CalculateFor(
+                    metadata,
                     context.Options.MaximumDimension);
                 previewCollector?.RegisterReview(new TextureReviewEntry(
                     context.RelativeInstallPath,
@@ -658,9 +657,8 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                             var reusedMetadata = await sniffer.ReadFileAsync(
                                 reusedTexturePath,
                                 cancellationToken).ConfigureAwait(false);
-                            var expectedDimensions = UpscaleDimensions.Calculate(
-                                metadata.Width,
-                                metadata.Height,
+                            var expectedDimensions = UpscaleDimensions.CalculateFor(
+                                metadata,
                                 context.Options.MaximumDimension);
                             var expectedMipCount = GetExpectedMipCount(
                                 metadata.FileFormat,

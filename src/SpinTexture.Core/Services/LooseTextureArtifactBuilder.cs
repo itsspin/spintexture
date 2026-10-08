@@ -108,9 +108,8 @@ internal sealed class LooseTextureArtifactBuilder : IStagedArtifactBuilder, ISta
             return;
         }
 
-        var reviewDimensions = UpscaleDimensions.Calculate(
-            metadata.Width,
-            metadata.Height,
+        var reviewDimensions = UpscaleDimensions.CalculateFor(
+            metadata,
             context.Options.MaximumDimension);
         previewCollector?.RegisterReview(new TextureReviewEntry(
             context.RelativeInstallPath,

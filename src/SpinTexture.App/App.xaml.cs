@@ -57,8 +57,12 @@ public partial class App : Application
             catch (Exception exception)
             {
                 var logPath = TryWriteStartupFailure(exception);
+                var outcome = exception is ApplicationUpdateRollbackException rollbackFailure
+                    ? "Some files of the previous installation could not be put back. "
+                        + $"They are kept in {rollbackFailure.BackupDirectory}."
+                    : "The previous installation was restored.";
                 MessageBox.Show(
-                    "SpinTexture could not finish the update. The previous installation was restored."
+                    "SpinTexture could not finish the update. " + outcome
                     + (logPath is null ? string.Empty : $"\n\nDetails: {logPath}"),
                     "SpinTexture update failed",
                     MessageBoxButton.OK,

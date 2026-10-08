@@ -76,14 +76,12 @@ internal static class AtomicFile
 
     public static void CommitTemporaryFile(string temporaryPath, string destinationPath)
     {
-        if (File.Exists(destinationPath))
-        {
-            File.Replace(temporaryPath, destinationPath, destinationBackupFileName: null, ignoreMetadataErrors: true);
-        }
-        else
-        {
-            File.Move(temporaryPath, destinationPath);
-        }
+        // The temporary file is always a sibling, so this is a same-volume rename
+        // (MoveFileEx + MOVEFILE_REPLACE_EXISTING): it either replaces the destination
+        // or fails with both names intact. File.Replace without a backup name can fail
+        // after deleting the destination (ERROR_UNABLE_TO_MOVE_REPLACEMENT), and every
+        // caller then deletes the temporary file, losing the only surviving copy.
+        File.Move(temporaryPath, destinationPath, overwrite: true);
     }
 
     public static void TryDelete(string path)

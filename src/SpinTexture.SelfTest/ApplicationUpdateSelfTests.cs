@@ -237,11 +237,21 @@ internal static class ApplicationUpdateSelfTests
             Assert(File.Exists(Path.Combine(destination, "old.txt")), "Failed update did not restore old payload.");
             Assert(!File.Exists(Path.Combine(destination, "new.txt")), "Failed update left new payload installed.");
             await File.WriteAllTextAsync(planPath, JsonSerializer.Serialize(plan)).ConfigureAwait(false);
+            // Files SpinTexture creates beside itself at runtime (artistic worker and
+            // its lease) are outside the release manifest and must not block updates.
+            var runtimeWorkerConfig = Path.Combine(destination, "Tools", "artistic-worker", "worker-config.json");
+            var runtimeWorkerLock = Path.Combine(destination, "Tools", ".artistic-worker.access.lock");
+            Directory.CreateDirectory(Path.GetDirectoryName(runtimeWorkerConfig)!);
+            await File.WriteAllTextAsync(runtimeWorkerConfig, "{}").ConfigureAwait(false);
+            await File.WriteAllTextAsync(runtimeWorkerLock, string.Empty).ConfigureAwait(false);
             await ApplicationUpdateService.ApplyPreparedUpdateAsync(
                 planPath,
                 restartApplication: false).ConfigureAwait(false);
             Assert(File.Exists(Path.Combine(destination, "new.txt")), "Prepared update did not install new payload.");
             Assert(!File.Exists(Path.Combine(destination, "old.txt")), "Prepared update left obsolete managed payload.");
+            Assert(
+                File.Exists(runtimeWorkerConfig) && File.Exists(runtimeWorkerLock),
+                "Prepared update removed runtime files that are not part of the release.");
         }
         finally
         {

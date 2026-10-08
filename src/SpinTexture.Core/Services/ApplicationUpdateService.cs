@@ -23,6 +23,7 @@ public sealed class ApplicationUpdateService
 {
     public const string ApplyUpdateArgument = "--apply-update";
     public const string ReleaseVersionFileName = "release-version.json";
+    private const string RollbackIncompleteMarkerName = "ROLLBACK-INCOMPLETE";
     private const string LatestReleaseEndpoint = "https://api.github.com/repos/itsspin/spintexture/releases/latest";
     private const long MaximumArchiveBytes = 512L * 1024L * 1024L;
     private const long MaximumExtractedBytes = 1024L * 1024L * 1024L;
@@ -371,7 +372,6 @@ public sealed class ApplicationUpdateService
             .Append("release-manifest.json")
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        var committed = false;
         var copiedNewFiles = new List<string>();
         try
         {
@@ -382,6 +382,13 @@ public sealed class ApplicationUpdateService
                 var backup = ResolveUnderRoot(backupRoot, relativePath);
                 Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
                 File.Move(source, backup);
+                if (File.Exists(source))
+                {
+                    // A cross-volume move copies then deletes; when the delete fails
+                    // (file in use) Windows still reports success and leaves the source.
+                    throw new IOException(
+                        $"'{relativePath}' is in use and could not be moved aside for the update.");
+                }
             }
 
             foreach (var relativePath in newFiles)
@@ -394,8 +401,14 @@ public sealed class ApplicationUpdateService
                 copiedNewFiles.Add(relativePath);
             }
 
-            await ValidatePayloadAsync(plan.DestinationDirectory, plan.ExecutableName, cancellationToken)
-                .ConfigureAwait(false);
+            // The portable install directory also holds files SpinTexture creates at
+            // runtime (the artistic worker under Tools\ and its lock file), so only the
+            // manifest's own files are verified here, not the exact directory listing.
+            await ValidatePayloadAsync(
+                plan.DestinationDirectory,
+                plan.ExecutableName,
+                cancellationToken,
+                requireExactFileSet: false).ConfigureAwait(false);
             var installedExecutablePath = Path.Combine(plan.DestinationDirectory, plan.ExecutableName);
             var actualVersion = FileVersionInfo.GetVersionInfo(installedExecutablePath).ProductVersion;
             if (string.IsNullOrWhiteSpace(actualVersion)
@@ -404,29 +417,11 @@ public sealed class ApplicationUpdateService
                 throw new InvalidDataException("The installed update does not report the expected version.");
             }
 
-            committed = true;
         }
-        finally
+        catch (Exception exception)
         {
-            if (!committed)
-            {
-                foreach (var relativePath in copiedNewFiles.AsEnumerable().Reverse())
-                {
-                    var path = ResolveUnderRoot(plan.DestinationDirectory, relativePath);
-                    if (File.Exists(path))
-                    {
-                        File.Delete(path);
-                    }
-                }
-
-                foreach (var relativePath in EnumerateRelativeFiles(backupRoot))
-                {
-                    var source = ResolveUnderRoot(backupRoot, relativePath);
-                    var destination = ResolveUnderRoot(plan.DestinationDirectory, relativePath);
-                    Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                    File.Move(source, destination);
-                }
-            }
+            RollBackAppliedUpdate(plan, sessionRoot, backupRoot, copiedNewFiles, exception);
+            throw;
         }
 
         var executablePath = Path.Combine(plan.DestinationDirectory, plan.ExecutableName);
@@ -451,6 +446,12 @@ public sealed class ApplicationUpdateService
         {
             try
             {
+                if (File.Exists(Path.Combine(directory, RollbackIncompleteMarkerName)))
+                {
+                    // Its rollback folder may hold the only copy of the previous install.
+                    continue;
+                }
+
                 if (Directory.GetLastWriteTimeUtc(directory) < DateTime.UtcNow.AddDays(-1))
                 {
                     TryDeleteDirectory(directory);
@@ -583,10 +584,69 @@ public sealed class ApplicationUpdateService
         }
     }
 
+    private static void RollBackAppliedUpdate(
+        UpdateApplyPlan plan,
+        string sessionRoot,
+        string backupRoot,
+        IReadOnlyList<string> copiedNewFiles,
+        Exception updateFailure)
+    {
+        // Keep going past individual failures so one locked file cannot strand the
+        // rest of the previous install in the rollback folder.
+        var failures = new List<Exception>();
+        foreach (var relativePath in copiedNewFiles.Reverse())
+        {
+            try
+            {
+                var path = ResolveUnderRoot(plan.DestinationDirectory, relativePath);
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
+        }
+
+        foreach (var relativePath in EnumerateRelativeFiles(backupRoot).ToArray())
+        {
+            try
+            {
+                var source = ResolveUnderRoot(backupRoot, relativePath);
+                var destination = ResolveUnderRoot(plan.DestinationDirectory, relativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                File.Move(source, destination, overwrite: true);
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
+        }
+
+        if (failures.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            File.WriteAllText(Path.Combine(sessionRoot, RollbackIncompleteMarkerName), string.Empty);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
+
+        failures.Insert(0, updateFailure);
+        throw new ApplicationUpdateRollbackException(backupRoot, failures);
+    }
+
     private static async Task ValidatePayloadAsync(
         string root,
         string executableName,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireExactFileSet = true)
     {
         var manifest = await ReadManifestAsync(root, cancellationToken).ConfigureAwait(false);
         if (!manifest.Any(entry => entry.Path.Equals(executableName, StringComparison.OrdinalIgnoreCase)))
@@ -601,7 +661,7 @@ public sealed class ApplicationUpdateService
         var expectedFiles = manifest.Select(entry => entry.Path)
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        if (!actualFiles.SequenceEqual(expectedFiles, StringComparer.OrdinalIgnoreCase))
+        if (requireExactFileSet && !actualFiles.SequenceEqual(expectedFiles, StringComparer.OrdinalIgnoreCase))
         {
             throw new InvalidDataException("The update payload contains missing or unexpected files.");
         }
@@ -751,4 +811,18 @@ public sealed class ApplicationUpdateService
         string DestinationDirectory,
         string ExecutableName,
         string ExpectedVersion);
+}
+
+public sealed class ApplicationUpdateRollbackException : AggregateException
+{
+    public ApplicationUpdateRollbackException(string backupDirectory, IEnumerable<Exception> failures)
+        : base(
+            $"The update failed and the previous installation could not be fully restored. "
+            + $"The remaining original files are kept in {backupDirectory}.",
+            failures)
+    {
+        BackupDirectory = backupDirectory;
+    }
+
+    public string BackupDirectory { get; }
 }
