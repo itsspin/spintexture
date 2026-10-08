@@ -10,7 +10,8 @@ public sealed record AppPreferences(
     double BakedDepth = 0,
     double EmissiveGlow = 0,
     bool FullResolutionRepaint = false,
-    double MipSharpen = 0)
+    double MipSharpen = 0,
+    bool ShowAdvancedOptions = false)
 {
     public static AppPreferences Empty { get; } = new((string?)null);
 }
@@ -60,7 +61,8 @@ public sealed class AppPreferencesStore
                 Math.Clamp(document.BakedDepth, 0d, 1d),
                 Math.Clamp(document.EmissiveGlow, 0d, 1d),
                 document.FullResolutionRepaint,
-                Math.Clamp(document.MipSharpen, 0d, 1d));
+                Math.Clamp(document.MipSharpen, 0d, 1d),
+                document.ShowAdvancedOptions);
         }
         catch (Exception exception) when (exception is
             IOException or UnauthorizedAccessException or JsonException or ArgumentException or NotSupportedException)
@@ -89,7 +91,8 @@ public sealed class AppPreferencesStore
                 current.BakedDepth,
                 current.EmissiveGlow,
                 current.FullResolutionRepaint,
-                current.MipSharpen),
+                current.MipSharpen,
+                current.ShowAdvancedOptions),
             cancellationToken);
     }
 
@@ -106,9 +109,25 @@ public sealed class AppPreferencesStore
                 current.BakedDepth,
                 current.EmissiveGlow,
                 current.FullResolutionRepaint,
-                current.MipSharpen),
+                current.MipSharpen,
+                current.ShowAdvancedOptions),
             cancellationToken);
     }
+
+    public Task WriteShowAdvancedOptionsAsync(
+        bool showAdvancedOptions,
+        CancellationToken cancellationToken = default) =>
+        EnqueueWriteAsync(
+            current => new PreferencesDocument(
+                CurrentSchemaVersion,
+                current.LastInstallPath,
+                current.PaintedStyle,
+                current.BakedDepth,
+                current.EmissiveGlow,
+                current.FullResolutionRepaint,
+                current.MipSharpen,
+                showAdvancedOptions),
+            cancellationToken);
 
     private static string? NormalizeOptionalPath(string? path)
     {
@@ -145,7 +164,8 @@ public sealed class AppPreferencesStore
                 clampedBakedDepth,
                 clampedEmissiveGlow,
                 fullResolutionRepaint,
-                clampedMipSharpen),
+                clampedMipSharpen,
+                current.ShowAdvancedOptions),
             cancellationToken);
     }
 
@@ -204,5 +224,6 @@ public sealed class AppPreferencesStore
         double BakedDepth = 0,
         double EmissiveGlow = 0,
         bool FullResolutionRepaint = false,
-        double MipSharpen = 0);
+        double MipSharpen = 0,
+        bool ShowAdvancedOptions = false);
 }

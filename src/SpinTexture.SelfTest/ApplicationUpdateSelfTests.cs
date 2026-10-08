@@ -148,6 +148,7 @@ internal static class ApplicationUpdateSelfTests
                 ColorSimplification: 0.58,
                 CanvasGrain: 0.29,
                 Strength: 0.84);
+            await store.WriteShowAdvancedOptionsAsync(true).ConfigureAwait(false);
             var styleWrite = store.WritePaintedStyleAsync(paintedStyle);
             var enhancementWrite = store.WriteEnhancementsAsync(
                 bakedDepth: 0.31,
@@ -166,6 +167,7 @@ internal static class ApplicationUpdateSelfTests
             Assert(
                 combined.LastInstallPath == Path.GetFullPath(install),
                 "Concurrent preference writes lost the remembered EQ directory.");
+            Assert(combined.ShowAdvancedOptions, "Other preference writes lost the advanced-options view choice.");
 
             var orderedWrites = Enumerable.Range(1, 20)
                 .Select(value => store.WriteEnhancementsAsync(

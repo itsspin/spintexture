@@ -747,6 +747,24 @@
                             <TextBlock Text="Keep the era. Recover the detail." Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,4" />
                             <TextBlock Text="Choose the art direction first. Every route keeps format, alpha, mip, and archive safety; protected assets remain original."
                                        Style="{StaticResource CaptionStyle}" />
+                            <CheckBox Margin="0,12,0,0" IsChecked="{Binding ShowAdvancedOptions}"
+                                      Foreground="{StaticResource PrimaryTextBrush}"
+                                      AutomationProperties.Name="Show advanced options"
+                                      ToolTip="Size ceiling, mip chains, painted sliders, diffusion repaint, and optional visual enhancements. The recommended values are used when these stay hidden.">
+                                <TextBlock Text="Show advanced options" FontWeight="SemiBold" />
+                            </CheckBox>
+                            <Border Margin="0,8,0,0" Padding="10,7" CornerRadius="6"
+                                    Background="#1A1510" BorderBrush="#6A4A25" BorderThickness="1"
+                                    Visibility="{Binding ShowCustomAdvancedSettingsNotice, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                <DockPanel LastChildFill="True">
+                                    <Button DockPanel.Dock="Right" Margin="10,0,0,0" Padding="10,3"
+                                            Content="Use recommended"
+                                            Command="{Binding ResetAdvancedSettingsCommand}"
+                                            AutomationProperties.Name="Reset advanced settings to recommended" />
+                                    <TextBlock Text="{Binding CustomAdvancedSettingsText}" VerticalAlignment="Center"
+                                               Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" />
+                                </DockPanel>
+                            </Border>
 
                             <ListBox Margin="0,17,0,0"
                                      Background="Transparent"
@@ -758,7 +776,7 @@
                                      ItemContainerStyle="{StaticResource PresetItemStyle}">
                                 <ListBox.ItemsPanel>
                                     <ItemsPanelTemplate>
-                                        <UniformGrid Rows="2" Columns="2" />
+                                        <UniformGrid Columns="2" />
                                     </ItemsPanelTemplate>
                                 </ListBox.ItemsPanel>
                                 <ListBox.ItemTemplate>
@@ -833,6 +851,7 @@
                                         </StackPanel>
                                     </Grid>
 
+                                    <StackPanel Visibility="{Binding ShowAdvancedOptions, Converter={StaticResource BooleanToVisibilityConverter}}">
                                     <Grid Margin="0,12,0,0">
                                         <Grid.Resources>
                                             <Style TargetType="Slider">
@@ -978,11 +997,13 @@
                                             </WrapPanel>
                                         </StackPanel>
                                     </Border>
+                                    </StackPanel>
                                 </StackPanel>
                             </Border>
 
                             <Border Margin="0,14,0,0" Padding="13" CornerRadius="7" Background="#0D1117"
-                                    BorderBrush="#343B46" BorderThickness="1">
+                                    BorderBrush="#343B46" BorderThickness="1"
+                                    Visibility="{Binding ShowAdvancedOptions, Converter={StaticResource BooleanToVisibilityConverter}}">
                                 <StackPanel>
                                     <TextBlock Text="VISUAL ENHANCEMENTS (OPTIONAL)" Style="{StaticResource FieldLabelStyle}" />
                                     <Grid Margin="0,8,0,0">
@@ -1033,7 +1054,8 @@
                             </Border>
 
                             <Border Margin="0,14,0,0" Padding="13" CornerRadius="7" Background="#0D1117"
-                                    BorderBrush="#343B46" BorderThickness="1">
+                                    BorderBrush="#343B46" BorderThickness="1"
+                                    Visibility="{Binding ShowAdvancedOptions, Converter={StaticResource BooleanToVisibilityConverter}}">
                                 <Grid>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="1.15*" />
@@ -1058,6 +1080,7 @@
                                 </Grid>
                             </Border>
                             <TextBlock Margin="2,10,2,0" Style="{StaticResource CaptionStyle}" TextWrapping="Wrap"
+                                       Visibility="{Binding ShowAdvancedOptions, Converter={StaticResource BooleanToVisibilityConverter}}"
                                        Text="For an accurate example, build one Selected zone. Texture Review opens real original/enhanced images from your own client; safety fallbacks are reported instead of hidden." />
                             <Border Visibility="Collapsed" Margin="0,13,0,0" Padding="10" CornerRadius="7" Background="#0A0D11"
                                     BorderBrush="#303640" BorderThickness="1">
@@ -1102,7 +1125,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Grid Margin="0,14,0,0">
+                    <Grid Margin="0,14,0,0" Visibility="{Binding ShowAdvancedOptions, Converter={StaticResource BooleanToVisibilityConverter}}">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="*" />
@@ -1110,7 +1133,7 @@
 
                         <Border Grid.Column="0" Style="{StaticResource CardStyle}" Margin="0,0,7,0">
                             <StackPanel>
-                                <TextBlock Text="04 / TEXTURE CEILING" Style="{StaticResource EyebrowTextStyle}" />
+                                <TextBlock Text="ADVANCED / TEXTURE CEILING" Style="{StaticResource EyebrowTextStyle}" />
                                 <TextBlock Text="Upscale ceiling (longest edge)" Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,4" />
                                 <TextBlock Text="This is a size limit, not a target. SpinTexture performs one meaningful up-to-4x restoration pass and preserves aspect ratio."
                                            Style="{StaticResource CaptionStyle}" />
@@ -1576,7 +1599,7 @@
 
                     <Border Style="{StaticResource CardStyle}" Margin="0,14,0,0">
                         <StackPanel>
-                            <TextBlock Text="05 / BUILD" Style="{StaticResource EyebrowTextStyle}" />
+                            <TextBlock Text="04 / BUILD" Style="{StaticResource EyebrowTextStyle}" />
                             <TextBlock Text="Forge your texture pack" Style="{StaticResource SectionTitleStyle}" Margin="0,5,0,4" />
                             <TextBlock Text="Start with staging, inspect the report and thumbnails, then opt into an installation."
                                        Style="{StaticResource CaptionStyle}" />

@@ -67,7 +67,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private double _mipSharpen;
     private ScopeOptionViewModel _selectedScopeOption;
     private string? _selectedZone;
-    private int _selectedMaximumDimension = 2048;
+    private int _selectedMaximumDimension = RecommendedMaximumDimension;
+    private const int RecommendedMaximumDimension = 2048;
+    private bool _showAdvancedOptions;
     private string _estimatedOutputText = "Analyze to estimate";
     private string _estimatedArchivesText = "—";
     private string _estimatedTimeText = "—";
@@ -239,6 +241,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _emissiveGlow = Math.Clamp(rememberedPreferences.EmissiveGlow, 0d, 1d);
         _fullResolutionRepaint = rememberedPreferences.FullResolutionRepaint;
         _mipSharpen = Math.Clamp(rememberedPreferences.MipSharpen, 0d, 1d);
+        _showAdvancedOptions = rememberedPreferences.ShowAdvancedOptions;
         var rememberedInstall = rememberedPreferences.LastInstallPath;
         if (!string.IsNullOrWhiteSpace(rememberedInstall)
             && Directory.Exists(rememberedInstall)
@@ -250,6 +253,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         BrowseCommand = new RelayCommand(_ => Browse(), _ => !IsBusy);
         ResetPaintedStyleCommand = new RelayCommand(_ => ResetPaintedStyle(), _ => !IsBusy);
+        ResetAdvancedSettingsCommand = new RelayCommand(
+            _ => ResetAdvancedSettings(),
+            _ => !IsBusy && HasCustomAdvancedSettings);
         AnalyzeCommand = new AsyncRelayCommand(AnalyzeAsync, CanAnalyze);
         BuildStagedPackCommand = new AsyncRelayCommand(
             BuildAsync,
@@ -533,6 +539,121 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     }
 
     public RelayCommand ResetPaintedStyleCommand { get; }
+    public RelayCommand ResetAdvancedSettingsCommand { get; }
+
+    /// <summary>
+    /// Simple view (default) shows only client, scope, look, preview and build.
+    /// Every hidden control already has a recommended default; anything a user
+    /// changed there stays visible through <see cref="CustomAdvancedSettingsText"/>.
+    /// </summary>
+    public bool ShowAdvancedOptions
+    {
+        get => _showAdvancedOptions;
+        set
+        {
+            if (SetProperty(ref _showAdvancedOptions, value))
+            {
+                OnPropertyChanged(nameof(ShowCustomAdvancedSettingsNotice));
+                _ = PersistShowAdvancedOptionsAsync(value);
+            }
+        }
+    }
+
+    public bool HasCustomAdvancedSettings => DescribeCustomAdvancedSettings().Count != 0;
+
+    public bool ShowCustomAdvancedSettingsNotice => !ShowAdvancedOptions && HasCustomAdvancedSettings;
+
+    public string CustomAdvancedSettingsText
+    {
+        get
+        {
+            var changed = DescribeCustomAdvancedSettings();
+            return changed.Count == 0
+                ? "Using the recommended settings."
+                : $"Custom settings still apply: {string.Join(", ", changed)}.";
+        }
+    }
+
+    private List<string> DescribeCustomAdvancedSettings()
+    {
+        var changed = new List<string>();
+        if (_selectedMaximumDimension != RecommendedMaximumDimension)
+        {
+            changed.Add($"{_selectedMaximumDimension:N0} px ceiling");
+        }
+
+        if (!_generateMipMaps)
+        {
+            changed.Add("mip chains off");
+        }
+
+        if (_bakedDepth > 0)
+        {
+            changed.Add("baked depth");
+        }
+
+        if (_emissiveGlow > 0)
+        {
+            changed.Add("emissive glow");
+        }
+
+        if (_mipSharpen > 0)
+        {
+            changed.Add("crisp distance detail");
+        }
+
+        if (IsGraphicPaintedSelected && EffectivePaintedStyleOrDefault != PaintedStyleSettings.Default)
+        {
+            changed.Add("painted style sliders");
+        }
+
+        if (IsGraphicPaintedSelected && IsArtisticWorkerEnabled && _fullResolutionRepaint)
+        {
+            changed.Add("full-resolution repaint");
+        }
+
+        return changed;
+    }
+
+    private void ResetAdvancedSettings()
+    {
+        SelectedMaximumDimension = RecommendedMaximumDimension;
+        GenerateMipMaps = true;
+        BakedDepth = 0;
+        EmissiveGlow = 0;
+        MipSharpen = 0;
+        if (_fullResolutionRepaint)
+        {
+            _fullResolutionRepaint = false;
+            OnPropertyChanged(nameof(FullResolutionRepaint));
+            PersistLighting();
+        }
+
+        ResetPaintedStyle();
+        NotifyAdvancedSettingsChanged();
+        AddLog("INFO", "Advanced settings were reset to the recommended values.");
+    }
+
+    private void NotifyAdvancedSettingsChanged()
+    {
+        OnPropertyChanged(nameof(HasCustomAdvancedSettings));
+        OnPropertyChanged(nameof(ShowCustomAdvancedSettingsNotice));
+        OnPropertyChanged(nameof(CustomAdvancedSettingsText));
+        ResetAdvancedSettingsCommand?.RaiseCanExecuteChanged();
+    }
+
+    private async Task PersistShowAdvancedOptionsAsync(bool value)
+    {
+        try
+        {
+            await _preferences.WriteShowAdvancedOptionsAsync(value).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            // Remembering the view mode is best-effort.
+        }
+    }
 
     private void SetPaintedStyleComponent(
         ref double field,
@@ -2193,6 +2314,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private void UpdateEstimate()
     {
+        NotifyAdvancedSettingsChanged();
         UpdateOptionPreviewSelection();
         if (_scanSummary is null)
         {
@@ -3018,6 +3140,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         SelectAllDetectedWorldExpansionsCommand.RaiseCanExecuteChanged();
         SetupArtisticWorkerCommand.RaiseCanExecuteChanged();
         RemoveArtisticWorkerCommand.RaiseCanExecuteChanged();
+        ResetAdvancedSettingsCommand.RaiseCanExecuteChanged();
     }
 
     private static string FormatBytes(long bytes)
