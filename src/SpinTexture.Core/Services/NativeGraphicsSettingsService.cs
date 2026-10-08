@@ -1094,33 +1094,35 @@ public sealed class NativeGraphicsSettingsService
     {
         var manifestSettings = GetManagedSettingsForManifest(manifest);
         EnsureCompleteBaseline(manifest.BaselineSettings, manifestSettings);
-        if (manifestSettings.Count == ManagedSettings.Length)
-        {
-            return manifest.BaselineSettings;
-        }
 
-        // Older schemas predate one or more managed settings. Every newly owned
-        // value remains entirely unmanaged until a real preset switch, at which
-        // point its current live value becomes the baseline. Never source a newly
-        // managed value from the older whole-file backup: EverQuest or the user
-        // may have legitimately changed it since the original transaction.
-        var migrated = manifest.BaselineSettings.Select(value => value with { }).ToList();
-        foreach (var setting in ManagedSettings.Where(setting =>
-                     !manifestSettings.Any(existing => SameSetting(
-                         existing.Section,
-                         existing.Key,
-                         setting.Section,
-                         setting.Key))))
-        {
-            var current = currentDocument.Get(setting.Section, setting.Key);
-            migrated.Add(new NativeGraphicsStoredSetting(
-                setting.Section,
-                setting.Key,
-                current.Exists,
-                current.Value));
-        }
+        // Only values the active preset actually wrote are SpinTexture's to
+        // restore; for those the recorded baseline stays authoritative. Every
+        // other managed value (including ones newer than an older manifest
+        // schema) is still the user's or EverQuest's, which may have changed it
+        // in game since the previous apply, so its live value becomes the
+        // baseline. Never carry an older recorded value forward for such a key:
+        // a later restore or preset switch would silently undo that change.
+        return ManagedSettings
+            .Select(setting =>
+            {
+                var ownedByActivePreset = manifest.AppliedSettings.Any(applied => SameSetting(
+                    applied.Section,
+                    applied.Key,
+                    setting.Section,
+                    setting.Key));
+                if (ownedByActivePreset)
+                {
+                    return FindStored(manifest.BaselineSettings, setting) with { };
+                }
 
-        return migrated;
+                var current = currentDocument.Get(setting.Section, setting.Key);
+                return new NativeGraphicsStoredSetting(
+                    setting.Section,
+                    setting.Key,
+                    current.Exists,
+                    current.Value);
+            })
+            .ToArray();
     }
 
     private static IReadOnlyList<ManagedSetting> GetManagedSettingsForManifest(

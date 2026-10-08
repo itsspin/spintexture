@@ -12,6 +12,7 @@ internal static class NativeGraphicsSettingsSelfTests
     public static async Task RunAsync(CancellationToken cancellationToken)
     {
         await TestPresetSwitchingAndRestoreAsync(cancellationToken).ConfigureAwait(false);
+        await TestInGameChangeToUnownedSettingSurvivesSwitchAsync(cancellationToken).ConfigureAwait(false);
         await TestCinematicBloomToggleAsync(cancellationToken).ConfigureAwait(false);
         await TestSwitchBackToBaselineRetiresTransactionAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -578,6 +579,50 @@ internal static class NativeGraphicsSettingsSelfTests
             original,
             await File.ReadAllBytesAsync(fixture.SettingsPath, cancellationToken).ConfigureAwait(false),
             "retired switch restores original managed values");
+    }
+
+    private static async Task TestInGameChangeToUnownedSettingSurvivesSwitchAsync(
+        CancellationToken cancellationToken)
+    {
+        // Balanced only owns Shadows. If EverQuest changes the shadow distance
+        // while Balanced is active, switching to Cinematic and restoring must
+        // return to the player's in-game value, not the pre-Balanced one.
+        await using var fixture = await NativeGraphicsFixture.CreateAsync(
+                EncodeUtf8Bom(
+                    "[Defaults]\r\nMultiPassLighting=FALSE\r\nPostEffects=0\r\nBloom=0\r\n"
+                    + "[Options]\r\nShadowClipPlane=77\r\n"),
+                cancellationToken)
+            .ConfigureAwait(false);
+        var service = fixture.CreateService();
+        await service.ApplyAsync(
+                fixture.Paths,
+                NativeGraphicsPreset.Balanced,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        var inGameText = (await fixture.ReadSettingsTextAsync(cancellationToken).ConfigureAwait(false))
+            .Replace("ShadowClipPlane=77", "ShadowClipPlane=40", StringComparison.Ordinal);
+        await File.WriteAllBytesAsync(
+                fixture.SettingsPath,
+                EncodeUtf8Bom(inGameText),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        await service.ApplyAsync(
+                fixture.Paths,
+                NativeGraphicsPreset.Cinematic,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        AssertContains(
+            await fixture.ReadSettingsTextAsync(cancellationToken).ConfigureAwait(false),
+            "ShadowClipPlane=100",
+            "Cinematic still applies maximum shadow distance");
+
+        await service.RestoreAsync(fixture.Paths, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        AssertContains(
+            await fixture.ReadSettingsTextAsync(cancellationToken).ConfigureAwait(false),
+            "ShadowClipPlane=40",
+            "restore keeps the in-game shadow distance chosen while Balanced was active");
     }
 
     private static async Task TestPresetSwitchingAndRestoreAsync(
