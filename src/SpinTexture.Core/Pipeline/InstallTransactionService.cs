@@ -830,11 +830,17 @@ public sealed class InstallTransactionService
             var backupPath = PathGuard.ResolveUnderRoot(
                 backupPayloadDirectory,
                 entry.RelativeInstallPath);
-            if (File.Exists(backupPath) || Directory.Exists(backupPath))
+            if (Directory.Exists(backupPath))
             {
                 throw new IOException(
-                    $"The additive backup destination already exists: {entry.RelativeInstallPath}");
+                    $"The additive backup destination is a directory: {entry.RelativeInstallPath}");
             }
+
+            // A file already here is an orphan from a promotion interrupted before
+            // its Preparing manifest was written: this entry is not part of the
+            // active transaction, so nothing references it. The backup copy below
+            // atomically replaces it with freshly verified original bytes, so a
+            // crash no longer blocks every later promotion that includes it.
 
             newArtifacts.Add(new PreparedPromotionArtifact(
                 entry,

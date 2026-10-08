@@ -490,7 +490,7 @@ public partial class MainWindow : Window
 
     private void ShowBuildSection()
     {
-        if (!CanLeaveCurrentSection())
+        if (!ConfirmCanLeaveCurrentSection())
         {
             return;
         }
@@ -504,6 +504,24 @@ public partial class MainWindow : Window
         (_packLibraryView?.CanNavigateAway ?? true)
         && (_packStorageView?.CanNavigateAway ?? true)
         && (_nativeGraphicsView?.CanNavigateAway ?? true);
+
+    // The header stays clickable while a Packs, Storage or Graphics operation
+    // runs; leaving would hide that operation and its Cancel button.
+    private bool ConfirmCanLeaveCurrentSection()
+    {
+        if (CanLeaveCurrentSection())
+        {
+            return true;
+        }
+
+        MessageBox.Show(
+            this,
+            "Finish or cancel the current Packs, Storage, or Graphics operation first.",
+            "Operation in progress",
+            MessageBoxButton.OK,
+            MessageBoxImage.Information);
+        return false;
+    }
 
     private void EnsureViewsMatchInstall(string installPath)
     {
@@ -546,7 +564,7 @@ public partial class MainWindow : Window
 
     private void PacksNav_Click(object sender, RoutedEventArgs e)
     {
-        if (_viewModel.OpenPackLibraryCommand.CanExecute(null))
+        if (ConfirmCanLeaveCurrentSection() && _viewModel.OpenPackLibraryCommand.CanExecute(null))
         {
             _viewModel.OpenPackLibraryCommand.Execute(null);
         }
@@ -554,7 +572,7 @@ public partial class MainWindow : Window
 
     private void ReviewNav_Click(object sender, RoutedEventArgs e)
     {
-        if (_viewModel.OpenPreviewGalleryCommand.CanExecute(null))
+        if (ConfirmCanLeaveCurrentSection() && _viewModel.OpenPreviewGalleryCommand.CanExecute(null))
         {
             _viewModel.OpenPreviewGalleryCommand.Execute(null);
         }
@@ -562,7 +580,7 @@ public partial class MainWindow : Window
 
     private void GraphicsNav_Click(object sender, RoutedEventArgs e)
     {
-        if (_viewModel.OpenNativeGraphicsCommand.CanExecute(null))
+        if (ConfirmCanLeaveCurrentSection() && _viewModel.OpenNativeGraphicsCommand.CanExecute(null))
         {
             _viewModel.OpenNativeGraphicsCommand.Execute(null);
         }
@@ -570,7 +588,7 @@ public partial class MainWindow : Window
 
     private void StorageNav_Click(object sender, RoutedEventArgs e)
     {
-        if (_viewModel.OpenPackStorageCommand.CanExecute(null))
+        if (ConfirmCanLeaveCurrentSection() && _viewModel.OpenPackStorageCommand.CanExecute(null))
         {
             _viewModel.OpenPackStorageCommand.Execute(null);
         }

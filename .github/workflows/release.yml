@@ -106,9 +106,16 @@ jobs:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
           RELEASE_ARCHIVE: ${{ steps.version.outputs.archive }}
         run: |
+          # A prerelease must never become the "latest" release: the in-app
+          # updater reads /releases/latest and only accepts stable versions.
+          $prereleaseArguments = @()
+          if ($env:RELEASE_VERSION.Contains('-')) {
+            $prereleaseArguments += '--prerelease'
+          }
           gh release create $env:RELEASE_TAG `
             (Join-Path 'publish' $env:RELEASE_ARCHIVE) `
             (Join-Path 'publish' "$env:RELEASE_ARCHIVE.sha256.txt") `
             --target $env:GITHUB_SHA `
             --title "SpinTexture $env:RELEASE_VERSION" `
-            --generate-notes
+            --generate-notes `
+            @prereleaseArguments
