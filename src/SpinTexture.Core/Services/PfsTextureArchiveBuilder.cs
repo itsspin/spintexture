@@ -197,7 +197,15 @@ public sealed class PfsTextureArchiveBuilder : IStagedArtifactBuilder, IStagedAr
                     cancellationToken: cancellationToken).ConfigureAwait(false);
             }
 
-            ValidateReusableArchiveLayout(source, reuseArchive, context.RelativeInstallPath);
+            try
+            {
+                ValidateReusableArchiveLayout(source, reuseArchive, context.RelativeInstallPath);
+            }
+            catch
+            {
+                await reuseArchive.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
         }
         else if (rebuildFromReuseArchive)
         {

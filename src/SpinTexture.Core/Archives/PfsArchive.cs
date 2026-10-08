@@ -568,16 +568,49 @@ public sealed class PfsArchive : IDisposable, IAsyncDisposable
             rawRecords[index] = new RawDirectoryRecord(index, crc, offset, size);
         }
 
+        // Exact aliases share one chunk walk, and distinct walks may not cover more
+        // bytes than the data area holds. Without this, a small malformed directory
+        // whose records all point at one long chunk run forces quadratic work and
+        // memory before ValidateStoredRanges gets a chance to reject the overlap.
         var storedEntries = new List<PfsStoredEntry>(entryCount);
+        var walkedRanges = new Dictionary<(uint Offset, uint Size), PfsStoredEntry>();
+        var remainingDataBytes = directoryOffset - PfsFormat.HeaderSize;
         foreach (var record in rawRecords)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            storedEntries.Add(await ReadStoredEntryAsync(
+            if (record.Size != 0 && walkedRanges.TryGetValue((record.Offset, record.Size), out var alias))
+            {
+                storedEntries.Add(new PfsStoredEntry
+                {
+                    DirectoryIndex = record.Index,
+                    Crc = record.Crc,
+                    Offset = alias.Offset,
+                    UncompressedSize = alias.UncompressedSize,
+                    Chunks = alias.Chunks,
+                    StoredLength = alias.StoredLength
+                });
+                continue;
+            }
+
+            var stored = await ReadStoredEntryAsync(
                 source,
                 directoryOffset,
                 record,
                 options,
-                cancellationToken).ConfigureAwait(false));
+                cancellationToken).ConfigureAwait(false);
+            remainingDataBytes -= stored.StoredLength;
+            if (remainingDataBytes < 0)
+            {
+                throw new PfsArchiveException(
+                    $"PFS directory record {record.Index} overlaps data already claimed by other records.");
+            }
+
+            if (record.Size != 0)
+            {
+                walkedRanges.Add((record.Offset, record.Size), stored);
+            }
+
+            storedEntries.Add(stored);
         }
 
         ValidateStoredRanges(storedEntries, directoryOffset);

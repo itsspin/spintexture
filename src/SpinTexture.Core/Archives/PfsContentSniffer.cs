@@ -51,14 +51,14 @@ internal static class PfsContentSniffer
         var pixelFormatFlags = ReadUInt32(bytes, 80);
         var fourCcBytes = bytes.Slice(84, 4);
         var fourCc = IsPrintableAscii(fourCcBytes)
-            ? Encoding.ASCII.GetString(fourCcBytes)
+            ? Encoding.ASCII.GetString(fourCcBytes).TrimEnd('\0', ' ')
             : string.Empty;
 
         string pixelFormat;
         bool hasAlpha;
-        if (!string.IsNullOrWhiteSpace(fourCc))
+        if (fourCc.Length != 0)
         {
-            pixelFormat = fourCc.TrimEnd('\0', ' ');
+            pixelFormat = fourCc;
             hasAlpha = pixelFormat is "DXT2" or "DXT3" or "DXT4" or "DXT5";
 
             if (pixelFormat == "DX10" && bytes.Length >= 148)
