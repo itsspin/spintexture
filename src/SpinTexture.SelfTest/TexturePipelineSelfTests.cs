@@ -124,6 +124,7 @@ public static class TexturePipelineSelfTests
         await TestCrispMipChainAsync(cancellationToken).ConfigureAwait(false);
         TestPresetAwareFidelityGate();
         TestPaintedFinalValidationPolicyAndCappedMetrics();
+        TestCleanDetailFinish();
         await output.WriteLineAsync("Texture model discovery and preset fidelity-gate tests passed.").ConfigureAwait(false);
         await TestWrappedTgaAsync(cancellationToken).ConfigureAwait(false);
         await output.WriteLineAsync("Seam-safe TGA tests passed.").ConfigureAwait(false);
@@ -1731,6 +1732,87 @@ public static class TexturePipelineSelfTests
         Assert(
             blankRejected,
             "graphic painted fidelity gate must reject output with no visible pixels");
+    }
+
+    private static void TestCleanDetailFinish()
+    {
+        const int size = 16;
+        static byte[] Solid(byte red, byte green, byte blue, byte alpha = 255)
+        {
+            var pixels = new byte[size * size * 4];
+            for (var offset = 0; offset < pixels.Length; offset += 4)
+            {
+                pixels[offset] = red;
+                pixels[offset + 1] = green;
+                pixels[offset + 2] = blue;
+                pixels[offset + 3] = alpha;
+            }
+
+            return pixels;
+        }
+
+        static void Set(byte[] pixels, int x, int y, byte red, byte green, byte blue)
+        {
+            var offset = ((y * size) + x) * 4;
+            pixels[offset] = red;
+            pixels[offset + 1] = green;
+            pixels[offset + 2] = blue;
+        }
+
+        static (byte Red, byte Green, byte Blue, byte Alpha) Get(TgaPixelBuffer image, int x, int y)
+        {
+            var pixels = image.RgbaPixels.Span;
+            var offset = ((y * size) + x) * 4;
+            return (pixels[offset], pixels[offset + 1], pixels[offset + 2], pixels[offset + 3]);
+        }
+
+        // An isolated bright magenta texel is the upscaler speck that shimmers in game.
+        var speckled = Solid(60, 50, 55);
+        Set(speckled, 7, 7, 230, 40, 200);
+        var despeckled = TgaPixelBuffer.FromRgba(size, size, speckled)
+            .ApplyCleanDetailFinish(wrapEdges: true, softening: 0);
+        Assert(Get(despeckled, 7, 7) == (60, 50, 55, 255),
+            "clean-detail finish removes an isolated speck entirely");
+
+        // A one-texel crack is structure, not a speck: every texel on it has a
+        // neighbour along the line, so speck removal must leave it untouched.
+        var cracked = Solid(150, 140, 130);
+        for (var x = 0; x < size; x++)
+        {
+            Set(cracked, x, 5, 20, 20, 20);
+        }
+
+        var crackFinished = TgaPixelBuffer.FromRgba(size, size, cracked)
+            .ApplyCleanDetailFinish(wrapEdges: true, softening: 0);
+        Assert(Get(crackFinished, 9, 5) == (20, 20, 20, 255),
+            "clean-detail finish keeps one-texel lines");
+
+        // Flat colour and alpha are unchanged, with or without softening.
+        var flat = Solid(90, 120, 30, 200);
+        var flatFinished = TgaPixelBuffer.FromRgba(size, size, flat)
+            .ApplyCleanDetailFinish(wrapEdges: false, softening: 0.3);
+        Assert(flatFinished.RgbaPixels.Span.SequenceEqual(flat),
+            "clean-detail finish leaves flat colour and alpha unchanged");
+
+        // Softening pulls a crack toward its neighbours only partly and stays
+        // deterministic; wrap sampling makes left/right edges agree for tiling.
+        var softened = TgaPixelBuffer.FromRgba(size, size, cracked)
+            .ApplyCleanDetailFinish(wrapEdges: true, softening: 0.3);
+        var softenedCrack = Get(softened, 9, 5).Red;
+        Assert(softenedCrack > 20 && softenedCrack < 60,
+            $"clean-detail softening is mild (crack {softenedCrack})");
+        Assert(Get(softened, 0, 5) == Get(softened, size - 1, 5),
+            "wrapped clean-detail finish stays seamless across the tile edge");
+        var repeated = TgaPixelBuffer.FromRgba(size, size, cracked)
+            .ApplyCleanDetailFinish(wrapEdges: true, softening: 0.3);
+        Assert(repeated.RgbaPixels.Span.SequenceEqual(softened.RgbaPixels.Span),
+            "clean-detail finish is deterministic");
+
+        Assert(NativeTextureProcessor.GetCleanDetailSoftening(TexturePreset.ClassicHd, TexturePreset.ClassicHd, hasAlpha: false) == 0.30
+               && NativeTextureProcessor.GetCleanDetailSoftening(TexturePreset.ClassicHd, TexturePreset.Faithful, hasAlpha: false) == 0
+               && NativeTextureProcessor.GetCleanDetailSoftening(TexturePreset.ClassicHd, TexturePreset.ClassicHd, hasAlpha: true) is null
+               && NativeTextureProcessor.GetCleanDetailSoftening(TexturePreset.Illustrated, TexturePreset.ClassicHd, hasAlpha: false) is null,
+            "clean-detail finish applies to plain reconstructions only, never painted looks or alpha textures");
     }
 
     private static void TestPaintedFinalValidationPolicyAndCappedMetrics()

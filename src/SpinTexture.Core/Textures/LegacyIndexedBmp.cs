@@ -24,6 +24,13 @@ internal static class LegacyIndexedBmp
             && CountUsedIndices(source, layout) >= 8;
     }
 
+    /// <summary>
+    /// True when the bitmap's border statistics indicate a palette color key
+    /// (the same heuristic <see cref="Encode"/> applies when allowed).
+    /// </summary>
+    public static bool HasLikelyColorKey(ReadOnlySpan<byte> source) =>
+        TryReadLayout(source, out var layout) && FindLikelyKeyedIndex(source, layout) is not null;
+
     public static byte[] Encode(
         ReadOnlySpan<byte> source,
         int width,

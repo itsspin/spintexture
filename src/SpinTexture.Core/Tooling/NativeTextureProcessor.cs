@@ -622,6 +622,49 @@ public sealed class NativeTextureProcessor
     private static bool IsPaintedPreset(TexturePreset preset) =>
         preset is TexturePreset.Illustrated or TexturePreset.RusticPainted;
 
+    /// <summary>
+    /// Finest-band softening for the in-game clean-detail finish, keyed by the
+    /// model that actually ran: PBRify (Texture HD) and Real-ESRGAN (Material
+    /// Detail) invent texel-scale noise; Real-ESRNet (Faithful) is already smooth
+    /// and only gets speck removal. Painted looks own their texture and alpha
+    /// textures keep exact edges, so both are left alone (null).
+    /// </summary>
+    internal static double? GetCleanDetailSoftening(
+        TexturePreset effectivePreset,
+        TexturePreset workerPreset,
+        bool hasAlpha) =>
+        IsPaintedPreset(effectivePreset) || hasAlpha
+            ? null
+            : workerPreset switch
+            {
+                TexturePreset.ClassicHd => 0.30,
+                TexturePreset.MaximumDetail => 0.20,
+                _ => 0
+            };
+
+    private static async Task<bool> MayCarryPaletteColorKeyAsync(
+        NativeTextureProcessRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.Metadata.FileFormat != TextureFileFormat.Bmp || request.Metadata.BitsPerPixel != 8)
+        {
+            return false;
+        }
+
+        if (request.HasMaskedColorKey)
+        {
+            return true;
+        }
+
+        if (request.SuppressIndexedColorKeyHeuristic)
+        {
+            return false;
+        }
+
+        var source = await File.ReadAllBytesAsync(request.SourcePath, cancellationToken).ConfigureAwait(false);
+        return LegacyIndexedBmp.HasLikelyColorKey(source);
+    }
+
     internal static bool ShouldRepaintAtSelectedCap(
         NativeTextureProcessRequest request,
         UpscaleDimensions dimensions)
@@ -1799,6 +1842,19 @@ public sealed class NativeTextureProcessor
                 job.Decoded,
                 preserveCoverage: job.PreserveAlphaCoverage,
                 wrapEdges: job.Request.WrapEdges);
+        }
+
+        if (GetCleanDetailSoftening(job.EffectivePreset, key.WorkerPreset, job.Request.Metadata.HasAlpha)
+            is { } softening)
+        {
+            if (softening > 0 && await MayCarryPaletteColorKeyAsync(job.Request, cancellationToken).ConfigureAwait(false))
+            {
+                // Blurring next to a keyed background would pull the key color
+                // into visible edge texels; keep only the speck removal there.
+                softening = 0;
+            }
+
+            cropped = cropped.ApplyCleanDetailFinish(job.Request.WrapEdges, softening);
         }
 
         var fidelity = CalculateFidelityMetrics(job.Decoded, cropped);

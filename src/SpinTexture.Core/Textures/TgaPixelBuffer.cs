@@ -419,6 +419,104 @@ public sealed class TgaPixelBuffer
     /// synthesize geometry or add random noise, so wrapped texture borders stay
     /// deterministic and repeatable.
     /// </summary>
+    /// <summary>
+    /// In-game finishing for neural reconstructions. Upscalers invent texel-sized
+    /// specks and a fine cross-hatch that the source-grid fidelity checks cannot
+    /// see; in game they read as crunchy noise and shimmer as the camera moves.
+    /// Pass 1 clamps each channel into the range of its eight neighbours, which
+    /// moves only isolated outliers (single-texel specks) and never a line or an
+    /// edge. Pass 2 softens just the finest band toward a 3x3 binomial blur.
+    /// Alpha is unchanged; sampling wraps or clamps like the rest of the pipeline.
+    /// </summary>
+    public TgaPixelBuffer ApplyCleanDetailFinish(bool wrapEdges, double softening)
+    {
+        if (!double.IsFinite(softening) || softening is < 0 or > 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(softening));
+        }
+
+        if (Width < 3 || Height < 3)
+        {
+            return new TgaPixelBuffer(Width, Height, (byte[])_rgba.Clone());
+        }
+
+        var despeckled = (byte[])_rgba.Clone();
+        Parallel.For(0, Height, y =>
+        {
+            for (var x = 0; x < Width; x++)
+            {
+                var offset = ((y * Width) + x) * 4;
+                for (var channel = 0; channel < 3; channel++)
+                {
+                    var minimum = 255;
+                    var maximum = 0;
+                    for (var dy = -1; dy <= 1; dy++)
+                    {
+                        var row = SampleCoordinate(y + dy, Height, wrapEdges) * Width;
+                        for (var dx = -1; dx <= 1; dx++)
+                        {
+                            if (dx == 0 && dy == 0)
+                            {
+                                continue;
+                            }
+
+                            var value = _rgba[((row + SampleCoordinate(x + dx, Width, wrapEdges)) * 4) + channel];
+                            minimum = Math.Min(minimum, value);
+                            maximum = Math.Max(maximum, value);
+                        }
+                    }
+
+                    despeckled[offset + channel] = (byte)Math.Clamp(_rgba[offset + channel], minimum, maximum);
+                }
+            }
+        });
+
+        if (softening == 0)
+        {
+            return new TgaPixelBuffer(Width, Height, despeckled);
+        }
+
+        // Fixed-point weight keeps the result identical on every machine.
+        var weight = (int)Math.Round(softening * 256);
+        var output = (byte[])despeckled.Clone();
+        Parallel.For(0, Height, y =>
+        {
+            var up = SampleCoordinate(y - 1, Height, wrapEdges) * Width;
+            var middle = y * Width;
+            var down = SampleCoordinate(y + 1, Height, wrapEdges) * Width;
+            for (var x = 0; x < Width; x++)
+            {
+                var left = SampleCoordinate(x - 1, Width, wrapEdges);
+                var right = SampleCoordinate(x + 1, Width, wrapEdges);
+                var offset = (middle + x) * 4;
+                for (var channel = 0; channel < 3; channel++)
+                {
+                    int At(int rowStart, int column) => despeckled[((rowStart + column) * 4) + channel];
+                    var blurSum = (4 * At(middle, x))
+                        + (2 * (At(up, x) + At(down, x) + At(middle, left) + At(middle, right)))
+                        + At(up, left) + At(up, right) + At(down, left) + At(down, right);
+                    var center = At(middle, x);
+                    // center - weight * (center - blur), with blur = blurSum / 16.
+                    var scaled = (center * 16 * 256) - (weight * ((center * 16) - blurSum));
+                    output[offset + channel] = (byte)Math.Clamp((scaled + 2048) >> 12, 0, 255);
+                }
+            }
+        });
+
+        return new TgaPixelBuffer(Width, Height, output);
+    }
+
+    private static int SampleCoordinate(int value, int size, bool wrap)
+    {
+        if (wrap)
+        {
+            var wrapped = value % size;
+            return wrapped < 0 ? wrapped + size : wrapped;
+        }
+
+        return Math.Clamp(value, 0, size - 1);
+    }
+
     public TgaPixelBuffer ApplyRusticPaintedGrade(double strength = 1)
     {
         if (!double.IsFinite(strength) || strength is < 0 or > 1)

@@ -37,10 +37,15 @@ namespace SpinTexture.Core.Services;
 /// reconstructed without weakening protection for animated water, glass, or
 /// other blended-only resources. It also carries proven classic diffuse
 /// context into semantic classification for logical BMP names stored as DDS.
+/// Revision 12 adds the in-game clean-detail finish for Faithful, Texture HD
+/// and Material Detail: texel-sized specks the upscalers invent are removed and
+/// the finest band is softened, so new detail stops reading as crunchy noise
+/// and shimmering in motion. It changes pixels only, not safety coverage, so it
+/// adds no repair rule; a fresh build picks it up.
 /// </summary>
 public static class TextureProcessingPipeline
 {
-    public const int CurrentRevision = 11;
+    public const int CurrentRevision = 12;
     // Preservation reason recorded when a repair retried a previously
     // preserved member and safely kept its original bytes; shared so repair
     // summaries in the workflow and app can count these outcomes.
