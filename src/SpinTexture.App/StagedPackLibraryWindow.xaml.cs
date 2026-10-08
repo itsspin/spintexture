@@ -38,6 +38,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
     private string focusedPackText = "No focused pack";
     private string cleanupSelectionText = "CLEANUP · No packs checked for deletion";
     private string librarySummaryText = "Measuring pack-library storage...";
+    private string? lastRefreshActiveBuildManifestPath;
     private string cleanupOverviewText = "Checking which packs are protected and which are safe to remove...";
 
     public StagedPackLibraryWindow(string installPath)
@@ -51,7 +52,9 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         PacksView.Filter = FilterPackByCategory;
         DataContext = this;
         SizeChanged += OnLayoutSizeChanged;
-        Loaded += async (_, _) => await RefreshAsync().ConfigureAwait(true);
+        // Loaded fires again every time the main window re-shows this cached view
+        // (for example returning from the preview gallery).
+        Loaded += async (_, _) => await RefreshOnShowAsync().ConfigureAwait(true);
     }
 
     public ObservableCollection<StagedPackRow> Packs { get; } = [];
@@ -603,6 +606,7 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
         try
         {
             var activeBuildManifestPath = await FindActiveBuildManifestPathAsync().ConfigureAwait(true);
+            lastRefreshActiveBuildManifestPath = activeBuildManifestPath;
             var activeState = await ResolveActivePackStateAsync(
                     activeBuildManifestPath,
                     CancellationToken.None)
@@ -731,6 +735,50 @@ public partial class StagedPackLibraryWindow : UserControl, INotifyPropertyChang
             IsBusy = false;
             ScheduleDeferredCloseIfRequested();
         }
+    }
+
+    private async Task RefreshOnShowAsync()
+    {
+        if (Packs.Count > 0 && !IsBusy)
+        {
+            bool activeUnchanged;
+            try
+            {
+                var activeNow = await FindActiveBuildManifestPathAsync().ConfigureAwait(true);
+                activeUnchanged = activeNow is null || lastRefreshActiveBuildManifestPath is null
+                    ? activeNow is null && lastRefreshActiveBuildManifestPath is null
+                    : SamePath(activeNow, lastRefreshActiveBuildManifestPath);
+            }
+            catch (Exception exception) when (exception is IOException
+                or UnauthorizedAccessException
+                or InvalidDataException
+                or System.Text.Json.JsonException)
+            {
+                // The full refresh below reports the failure in the status line.
+                activeUnchanged = false;
+            }
+
+            if (activeUnchanged)
+            {
+                // Keep the user's install checks, delete marks and selection (including
+                // a just-created revision that was checked for them).
+                var checkedPaths = Packs
+                    .Where(candidate => candidate.IsSelected && candidate.CanSelect)
+                    .Select(candidate => Path.GetFullPath(candidate.ManifestPath))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var deleteMarkedPaths = Packs
+                    .Where(candidate => candidate.IsMarkedForDeletion)
+                    .Select(candidate => Path.GetFullPath(candidate.ManifestPath))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                await RefreshAsync(SelectedPack?.ManifestPath, checkedPaths, deleteMarkedPaths)
+                    .ConfigureAwait(true);
+                return;
+            }
+        }
+
+        // First show, or the installed pack changed elsewhere: start from the
+        // active-pack defaults rather than stale checks.
+        await RefreshAsync().ConfigureAwait(true);
     }
 
     private async Task<string?> FindActiveBuildManifestPathAsync()
