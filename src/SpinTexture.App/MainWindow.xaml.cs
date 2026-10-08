@@ -334,7 +334,25 @@ public partial class MainWindow : Window
         EnsureViewsMatchInstall(installPath);
         if (_packLibraryView is null)
         {
-            _packLibraryView = new StagedPackLibraryWindow(installPath);
+            try
+            {
+                _packLibraryView = new StagedPackLibraryWindow(installPath);
+            }
+            catch (Exception exception) when (exception is InvalidDataException
+                or IOException
+                or UnauthorizedAccessException)
+            {
+                // pack-storage.json can be corrupt, from a newer schema, or point
+                // at an unsafe location; report it instead of crashing the app.
+                MessageBox.Show(
+                    this,
+                    $"SpinTexture could not open the pack library.\n\n{exception.Message}",
+                    "Pack library unavailable",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
+
             _packLibraryView.CloseRequested += async (_, _) =>
             {
                 ShowBuildSection();

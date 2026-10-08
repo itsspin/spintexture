@@ -210,7 +210,8 @@ public partial class App : Application
         }
         catch (Exception exception) when (exception is
             HttpRequestException or TaskCanceledException or IOException or UnauthorizedAccessException
-            or InvalidDataException or InvalidOperationException or System.Security.SecurityException)
+            or InvalidDataException or InvalidOperationException or System.Security.SecurityException
+            or System.Text.Json.JsonException or System.ComponentModel.Win32Exception)
         {
             if (notifyWhenCurrent && owner.IsVisible)
             {

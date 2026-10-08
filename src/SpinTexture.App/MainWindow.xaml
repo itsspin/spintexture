@@ -560,6 +560,7 @@
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <TextBox Grid.Column="0" Text="{Binding InstallPath, UpdateSourceTrigger=PropertyChanged}"
+                                         IsReadOnly="{Binding IsBusy}"
                                          Style="{StaticResource TextBoxStyle}" ToolTip="EverQuest Legends installation folder" />
                                 <Button Grid.Column="1" Margin="8,0,0,0" Command="{Binding BrowseCommand}" ToolTip="Browse for the client folder">
                                     <StackPanel Orientation="Horizontal">

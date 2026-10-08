@@ -69,7 +69,9 @@ public partial class PackStorageSettingsWindow : UserControl
 
     private async void UseDefault_Click(object sender, RoutedEventArgs e)
     {
-        var paths = WorkspaceLocator.ForInstall(installPath);
+        // ForInstallDefault does not read pack-storage.json, so a corrupt or
+        // unsupported settings file cannot block moving back to the default.
+        var paths = WorkspaceLocator.ForInstallDefault(installPath);
         await PreparePlanAsync(paths.DefaultStagingPath, useDefault: true).ConfigureAwait(true);
     }
 
@@ -216,7 +218,7 @@ public partial class PackStorageSettingsWindow : UserControl
         MoveButton.IsEnabled = !busy && plan is { IsNoOp: false };
         CloseButton.IsEnabled = !busy;
         CancelButton.Visibility = busy && !planning ? Visibility.Visible : Visibility.Collapsed;
-        DefaultButton.IsEnabled = !busy && !PathEquals(CurrentPathBox.Text, WorkspaceLocator.ForInstall(installPath).DefaultStagingPath);
+        DefaultButton.IsEnabled = !busy && !PathEquals(CurrentPathBox.Text, WorkspaceLocator.ForInstallDefault(installPath).DefaultStagingPath);
         MoveProgress.IsIndeterminate = busy && planning;
         if (!busy)
         {

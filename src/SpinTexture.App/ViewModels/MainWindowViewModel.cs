@@ -1022,7 +1022,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             var progress = new Progress<ProgressUpdate>(HandleProgress);
             ScanSummary summary = await _workflow.AnalyzeAsync(InstallPath, progress, cancellationToken);
-            await _preferences.WriteLastInstallPathAsync(InstallPath, cancellationToken).ConfigureAwait(true);
+            // Best-effort: failing to remember the path must not discard a completed analysis.
+            await RememberInstallPathAsync(InstallPath).ConfigureAwait(true);
 
             _scanSummary = summary;
             Zones.Clear();
@@ -2339,6 +2340,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
         catch (Exception exception) when (exception is
             IOException
+            or InvalidDataException
             or UnauthorizedAccessException
             or ArgumentException
             or NotSupportedException)
@@ -2917,7 +2919,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             or UnauthorizedAccessException
             or InvalidDataException
             or System.Net.Http.HttpRequestException
-            or InvalidOperationException)
+            or InvalidOperationException
+            or NotSupportedException
+            or FormatException
+            or System.Text.Json.JsonException
+            or System.ComponentModel.Win32Exception)
         {
             AddLog("WARN", $"Artistic worker setup failed: {exception.Message}");
             var previousWorkerRemainsEnabled = _artisticWorkerSetup.GetStatus().IsEnabled;
