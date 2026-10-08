@@ -3378,7 +3378,6 @@ public sealed class TexturePackWorkflow
                 context.Assessment.ActiveInstallManifestPath,
                 reconciliation.ApplyId,
                 reconciliation.ReconciledArtifacts,
-                cancellationToken,
                 reconciliation.ReconciledUtc)
             .ConfigureAwait(false);
         return reconciliation;
@@ -3490,7 +3489,6 @@ public sealed class TexturePackWorkflow
                 context.Assessment.ActiveInstallManifestPath,
                 reconciliation.ApplyId,
                 reconciliation.ReconciledArtifacts,
-                cancellationToken,
                 reconciliation.ReconciledUtc)
             .ConfigureAwait(false);
 
@@ -4394,7 +4392,6 @@ public sealed class TexturePackWorkflow
             manifestPath,
             result.ApplyId,
             result.RestoredArtifacts,
-            cancellationToken,
             result.RestoredUtc).ConfigureAwait(false);
         return result;
     }
@@ -4412,8 +4409,30 @@ public sealed class TexturePackWorkflow
                 "install-manifest.json",
                 SearchOption.AllDirectories)
             .Where(path => !File.Exists(Path.Combine(Path.GetDirectoryName(path)!, "restore-complete.json")))
+            .Where(path => !IsSettledInstallManifest(path))
             .OrderByDescending(File.GetLastWriteTimeUtc)
             .FirstOrDefault();
+    }
+
+    // Mirrors InstallHealthService: a rolled-back or restored transaction is not an
+    // active install and must not be offered for restore. Unreadable manifests are
+    // kept so restore and health surface them instead of silently skipping them.
+    private static bool IsSettledInstallManifest(string manifestPath)
+    {
+        try
+        {
+            using var stream = File.OpenRead(manifestPath);
+            using var document = JsonDocument.Parse(stream);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("state", out var state)
+                && state.ValueKind == JsonValueKind.String
+                && (string.Equals(state.GetString(), "restored", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(state.GetString(), "rolledBack", StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return false;
+        }
     }
 
     public string? FindLatestBuildManifest(ProjectPaths paths)
@@ -4429,6 +4448,9 @@ public sealed class TexturePackWorkflow
                 "manifest.json",
                 SearchOption.AllDirectories)
             .Select(path => PathGuard.EnsurePathUnderRoot(paths.StagingPath, path))
+            // A build that still has its checkpoint is unfinished (finalization failed
+            // or was interrupted); the pack catalog rejects it, so Install must too.
+            .Where(path => !File.Exists(Path.Combine(Path.GetDirectoryName(path)!, "build-checkpoint.json")))
             .OrderByDescending(File.GetLastWriteTimeUtc)
             .ThenByDescending(path => path, StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault();
@@ -4488,17 +4510,18 @@ public sealed class TexturePackWorkflow
         await WriteRestoreCompletionMarkerAsync(
             safeManifestPath,
             manifest.ApplyId,
-            health.Entries.Count,
-            cancellationToken).ConfigureAwait(false);
+            health.Entries.Count).ConfigureAwait(false);
     }
 
     private static Task WriteRestoreCompletionMarkerAsync(
         string installManifestPath,
         string applyId,
         int restoredArtifacts,
-        CancellationToken cancellationToken,
         DateTimeOffset? restoredUtc = null)
     {
+        // The live restore has already committed by the time this runs, so the
+        // marker is written without cancellation; a cancel here would otherwise
+        // leave a restored client still advertising a restorable backup.
         var markerPath = Path.Combine(
             Path.GetDirectoryName(installManifestPath)!,
             "restore-complete.json");
@@ -4510,7 +4533,7 @@ public sealed class TexturePackWorkflow
                 RestoredArtifacts = restoredArtifacts,
                 RestoredUtc = restoredUtc ?? DateTimeOffset.UtcNow
             }),
-            cancellationToken);
+            CancellationToken.None);
     }
 
     internal static IReadOnlyList<string> SelectArchives(string installPath, UpscaleOptions options) =>

@@ -212,7 +212,7 @@ public static class LegacyTranslucentMaterialSafetyPolicy
                 bitmapInfo.Data.Span.Slice(4, sizeof(uint)));
             if (bitmapCount == 0
                 || bitmapCount > int.MaxValue
-                || bitmapCount * sizeof(uint) > bitmapInfo.Data.Length - 8)
+                || (long)bitmapCount * sizeof(uint) > bitmapInfo.Data.Length - 8)
             {
                 isComplete = false;
                 continue;

@@ -162,6 +162,7 @@ public static class PaintedStylizer
             width,
             height,
             reduce,
+            wrapEdges,
             settings);
 
         return result;
@@ -184,6 +185,7 @@ public static class PaintedStylizer
         int width,
         int height,
         int reduce,
+        bool wrapEdges,
         PaintedStyleSettings settings)
     {
         var result = new byte[input.Length];
@@ -208,8 +210,8 @@ public static class PaintedStylizer
                 float fb = fine[offset + 2];
                 var fl = Luma(fr, fg, fb);
 
-                // Coarse underpainting sampled bilinearly (wrapped grid).
-                SampleBilinear(coarse, coarseWidth, coarseHeight, (x + 0.5f) / reduce - 0.5f, coarseV, out var cr, out var cg, out var cb);
+                // Coarse underpainting sampled bilinearly; wraps only for tiling textures.
+                SampleBilinear(coarse, coarseWidth, coarseHeight, (x + 0.5f) / reduce - 0.5f, coarseV, wrapEdges, out var cr, out var cg, out var cb);
                 var cl = Luma(cr, cg, cb);
 
                 // Value: detailed areas keep the fine pass, flat areas relax
@@ -815,6 +817,7 @@ public static class PaintedStylizer
         int height,
         float x,
         float y,
+        bool wrap,
         out float r,
         out float g,
         out float b)
@@ -823,10 +826,10 @@ public static class PaintedStylizer
         var y0 = (int)MathF.Floor(y);
         var fx = x - x0;
         var fy = y - y0;
-        var px0 = Mod(x0, width);
-        var px1 = Mod(x0 + 1, width);
-        var py0 = Mod(y0, height);
-        var py1 = Mod(y0 + 1, height);
+        var px0 = WrapOrClamp(x0, width, wrap);
+        var px1 = WrapOrClamp(x0 + 1, width, wrap);
+        var py0 = WrapOrClamp(y0, height, wrap);
+        var py1 = WrapOrClamp(y0 + 1, height, wrap);
         var o00 = ((py0 * width) + px0) * 4;
         var o10 = ((py0 * width) + px1) * 4;
         var o01 = ((py1 * width) + px0) * 4;

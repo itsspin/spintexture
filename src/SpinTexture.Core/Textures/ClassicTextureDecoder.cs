@@ -45,6 +45,7 @@ public static class ClassicTextureDecoder
         var height = Math.Abs(rawHeight);
         var topDown = rawHeight < 0;
         if (infoSize < 40
+            || infoSize > payload.Length - 14
             || planes != 1
             || compression != 0
             || width <= 0
@@ -126,6 +127,25 @@ public static class ClassicTextureDecoder
             return null;
         }
 
+        // BI_RGB 32bpp stores a reserved fourth byte that most writers leave at 0.
+        // Treat an all-zero channel as opaque so the preview is not invisible.
+        var usesAlpha = false;
+        if (bytesPerPixel == 4)
+        {
+            for (var row = 0; row < height && !usesAlpha; row++)
+            {
+                var rowStart = pixelOffset + row * stride;
+                for (var x = 0; x < width; x++)
+                {
+                    if (payload[rowStart + x * 4 + 3] != 0)
+                    {
+                        usesAlpha = true;
+                        break;
+                    }
+                }
+            }
+        }
+
         var bgra = new byte[checked(width * height * 4)];
         for (var row = 0; row < height; row++)
         {
@@ -138,7 +158,7 @@ public static class ClassicTextureDecoder
                 bgra[destination] = payload[source];
                 bgra[destination + 1] = payload[source + 1];
                 bgra[destination + 2] = payload[source + 2];
-                bgra[destination + 3] = bytesPerPixel == 4 ? payload[source + 3] : byte.MaxValue;
+                bgra[destination + 3] = usesAlpha ? payload[source + 3] : byte.MaxValue;
             }
         }
 

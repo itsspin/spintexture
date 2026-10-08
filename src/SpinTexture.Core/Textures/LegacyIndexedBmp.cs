@@ -304,7 +304,7 @@ internal static class LegacyIndexedBmp
 
         var pixelOffset = (int)pixelOffsetValue;
         var dibSize = (int)dibSizeValue;
-        if (FileHeaderSize + dibSize > source.Length
+        if ((long)FileHeaderSize + dibSize > source.Length
             || pixelOffset > source.Length
             || BinaryPrimitives.ReadUInt16LittleEndian(source.Slice(26, 2)) != 1
             || BinaryPrimitives.ReadUInt16LittleEndian(source.Slice(28, 2)) != 8
@@ -334,9 +334,10 @@ internal static class LegacyIndexedBmp
             return false;
         }
 
-        var sourceStride = checked((signedWidth + 3) & ~3);
+        // A corrupt header must report "cannot encode", not overflow.
+        var sourceStride = ((long)signedWidth + 3) & ~3L;
         var sourceHeight = Math.Abs(signedHeight);
-        var requiredPixelBytes = checked(sourceStride * sourceHeight);
+        var requiredPixelBytes = sourceStride * sourceHeight;
         if (requiredPixelBytes > source.Length - pixelOffset)
         {
             return false;
@@ -348,7 +349,7 @@ internal static class LegacyIndexedBmp
             colorCount,
             signedWidth,
             sourceHeight,
-            sourceStride,
+            (int)sourceStride,
             signedHeight < 0);
         return true;
     }
