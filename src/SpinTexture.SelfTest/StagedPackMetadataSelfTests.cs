@@ -98,6 +98,21 @@ internal static class StagedPackMetadataSelfTests
                 Directory.Exists(completed) && Directory.Exists(resumable),
                 "completed packs and resumable builds survive cleanup");
 
+            // A crashed repair build has a checkpoint without a resume key; it can
+            // never resume, so it is reclaimable leftover rather than kept forever.
+            var orphanedRepair = Path.Combine(paths.StagingPath, "build-orphaned-repair");
+            Directory.CreateDirectory(orphanedRepair);
+            await File.WriteAllTextAsync(
+                Path.Combine(orphanedRepair, "build-checkpoint.json"),
+                "{\"resumeOperationKey\":\"\"}",
+                cancellationToken).ConfigureAwait(false);
+            var orphanedDebris = StagedPackCatalogService.FindBuildDebris(paths, TimeSpan.Zero);
+            AssertEqual(1, orphanedDebris.Count, "only the non-resumable checkpointed build is debris");
+            AssertEqual("build-orphaned-repair", orphanedDebris[0].Name, "non-resumable debris identity");
+            var orphanedCleanup = StagedPackCatalogService.DeleteBuildDebris(paths, orphanedDebris);
+            AssertEqual(1, orphanedCleanup.DeletedDirectories, "non-resumable build is reclaimed");
+            Assert(Directory.Exists(resumable), "a resumable build still survives cleanup");
+
             // Re-verification guard: a directory that gained a manifest after
             // discovery must not be deleted.
             var lateCompleted = Path.Combine(paths.StagingPath, "build-late");

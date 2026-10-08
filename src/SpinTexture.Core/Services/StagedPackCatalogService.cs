@@ -368,9 +368,37 @@ public sealed class StagedPackCatalogService
         return new StagedPackDebrisCleanupResult(deleted, reclaimedBytes, failures);
     }
 
-    private static bool IsBuildDebris(string directory) =>
-        !File.Exists(Path.Combine(directory, "manifest.json"))
-        && !File.Exists(Path.Combine(directory, "build-checkpoint.json"));
+    private static bool IsBuildDebris(string directory)
+    {
+        if (File.Exists(Path.Combine(directory, "manifest.json")))
+        {
+            return false;
+        }
+
+        var checkpointPath = Path.Combine(directory, "build-checkpoint.json");
+        return !File.Exists(checkpointPath) || IsNonResumableCheckpoint(checkpointPath);
+    }
+
+    // Builds started without a resume key (repairs) can never be resumed, so a
+    // crash before they publish a manifest leaves a checkpointed folder that no
+    // code path would otherwise ever reclaim. Unreadable checkpoints are kept.
+    private static bool IsNonResumableCheckpoint(string checkpointPath)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllBytes(checkpointPath));
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("resumeOperationKey", out var key)
+                && key.ValueKind == JsonValueKind.String
+                && string.IsNullOrWhiteSpace(key.GetString());
+        }
+        catch (Exception exception) when (exception is IOException
+            or UnauthorizedAccessException
+            or JsonException)
+        {
+            return false;
+        }
+    }
 
     private static void EnsureDebrisRootSafe(ProjectPaths paths)
     {

@@ -272,7 +272,7 @@ public sealed class StagedPackDeletionService
 
             blockers.AddRange(dependencyScan.SafetyBlockers);
             var isCurrentInstall = currentInstallBuildManifest is not null
-                && PathGuard.SamePath(
+                && IsSameStagedBuild(
                     currentInstallBuildManifest,
                     location.ManifestPath);
             var dependencies = dependencyScan.DependenciesByManifest
@@ -281,7 +281,7 @@ public sealed class StagedPackDeletionService
                 {
                     IsReferencedByCurrentInstall =
                         currentInstallBuildManifest is not null
-                        && PathGuard.SamePath(
+                        && IsSameStagedBuild(
                             dependency.CompositionManifestPath,
                             currentInstallBuildManifest)
                 })
@@ -985,4 +985,19 @@ public sealed class StagedPackDeletionService
             string,
             IReadOnlyList<StagedPackDeletionDependency>> DependenciesByManifest,
         IReadOnlyList<string> SafetyBlockers);
+
+    // The install manifest records the pack's absolute path. If a library move was
+    // interrupted after rewriting that path but before switching pack-storage.json,
+    // the two disagree on the root; the build directory name still identifies the
+    // installed pack, so it must stay protected from deletion.
+    private static bool IsSameStagedBuild(string leftManifestPath, string rightManifestPath) =>
+        PathGuard.SamePath(leftManifestPath, rightManifestPath)
+        || (Path.GetFileName(leftManifestPath).Equals(
+                Path.GetFileName(rightManifestPath),
+                StringComparison.OrdinalIgnoreCase)
+            && Path.GetFileName(Path.GetDirectoryName(Path.GetFullPath(leftManifestPath)))
+                is { Length: > 0 } leftBuildId
+            && leftBuildId.Equals(
+                Path.GetFileName(Path.GetDirectoryName(Path.GetFullPath(rightManifestPath))),
+                StringComparison.OrdinalIgnoreCase));
 }
