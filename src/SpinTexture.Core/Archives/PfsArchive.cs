@@ -574,7 +574,7 @@ public sealed class PfsArchive : IDisposable, IAsyncDisposable
         // memory before ValidateStoredRanges gets a chance to reject the overlap.
         var storedEntries = new List<PfsStoredEntry>(entryCount);
         var walkedRanges = new Dictionary<(uint Offset, uint Size), PfsStoredEntry>();
-        var remainingDataBytes = directoryOffset - PfsFormat.HeaderSize;
+        var remainingDataBytes = (long)directoryOffset - PfsFormat.HeaderSize;
         foreach (var record in rawRecords)
         {
             cancellationToken.ThrowIfCancellationRequested();
